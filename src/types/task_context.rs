@@ -1053,6 +1053,12 @@ pub struct CxInner {
     pub(crate) next_cancel_waker_token: u64,
     /// Set when task completion detaches the registry permanently.
     pub(crate) cancel_waker_registry_closed: bool,
+    /// Capture-only authority installed with the native task's primary cancel
+    /// Waker. Derived cancellation/request scopes start with None even when
+    /// they share this task's identity and observability. The trace owns no
+    /// runtime or context, so this cannot retain the task through a cycle.
+    #[cfg(feature = "full-runtime")]
+    pub(crate) native_cancel_capture: Option<crate::trace::TraceBufferHandle>,
     /// Timer armed at the budget deadline (br-asupersync-pev2xi).
     pub(crate) budget_deadline_timer: Option<BudgetDeadlineTimer>,
     /// Async-finalizer infrastructure keeps its legacy masked deadline
@@ -1130,6 +1136,8 @@ impl CxInner {
             cancel_waker_pool: Vec::new(),
             next_cancel_waker_token: 0,
             cancel_waker_registry_closed: false,
+            #[cfg(feature = "full-runtime")]
+            native_cancel_capture: None,
             budget_deadline_timer: None,
             budget_deadline_exempt: false,
             mask_depth: 0,

@@ -4332,29 +4332,13 @@ impl<Caps> Cx<Caps> {
         // already recorded keeps priority only if it is older
         // (br-asupersync-27bbrg; CancelReason::new is fixed at 1 s).
         let now = self.current_checkpoint_time();
-        let (region, task, wakers) = {
-            let mut inner = self.inner.write();
-            let region = inner.region;
-            let task = inner.task;
-
+        let (region, task) = self.publish_local_cancellation(|region, task| {
             let mut reason = CancelReason::with_origin(kind, region, now).with_task(task);
             if let Some(msg) = message {
                 reason = reason.with_message(msg);
             }
-
-            inner.set_cancel_requested(true);
-            if let Some(existing) = inner.cancel_reason.as_mut() {
-                existing.strengthen(&reason);
-            } else {
-                inner.cancel_reason = Some(reason);
-            }
-            let wakers = inner.cancel_waker_snapshot();
-            inner.cancel_wakers_pending = false;
-            drop(inner);
-            (region, task, wakers)
-        };
-
-        crate::types::task_context::CancelWakeEffects::new(wakers).dispatch();
+            reason
+        });
 
         debug!(
             task_id = ?task,
@@ -4378,19 +4362,95 @@ impl<Caps> Cx<Caps> {
     /// timestamp. Like that method, it cancels this context locally; region-tree
     /// propagation remains the responsibility of the runtime or region owner.
     pub fn cancel_with_reason(&self, reason: CancelReason) {
-        let wakers = {
+        self.publish_local_cancellation(|_, _| reason);
+    }
+
+    /// The two attribution APIs share one publication path. Capture is enabled
+    /// only by a native worker holding this task's authoritative primary inner.
+    /// Never acquire a trace lock while holding the context lock, or invoke a
+    /// Waker before both the cancellation and its capture witness are complete.
+    fn publish_local_cancellation(
+        &self,
+        build_reason: impl FnOnce(RegionId, TaskId) -> CancelReason,
+    ) -> (RegionId, TaskId) {
+        #[cfg(feature = "full-runtime")]
+        let capture = {
+            let inner = self.inner.read();
+            if inner.cancel_waker_registry_closed {
+                None
+            } else {
+                inner
+                    .native_cancel_capture
+                    .as_ref()
+                    .map(|trace| (trace.clone(), inner.task))
+            }
+        }
+        .and_then(|(trace, task)| {
+            trace
+                .begin_cancellation_publication(task)
+                .map(|start| (trace, start))
+        });
+        #[cfg(not(feature = "full-runtime"))]
+        let capture: Option<(TraceBufferHandle, u64)> = None;
+
+        let (region, task, wakers, request, unsupported_mutation) = {
             let mut inner = self.inner.write();
+            let region = inner.region;
+            let task = inner.task;
+            let reason = build_reason(region, task);
+            // Decide this under the same write lock as flag/reason publication.
+            // A previously visible fast flag without a reason is not a witnessed
+            // first request merely because attribution is being filled in now.
+            let was_requested = capture.is_some() && inner.is_cancel_requested();
+            let first_request =
+                capture.is_some() && !was_requested && inner.cancel_reason.is_none();
             inner.set_cancel_requested(true);
-            if let Some(existing) = inner.cancel_reason.as_mut() {
-                existing.strengthen(&reason);
+            let changed = if let Some(existing) = inner.cancel_reason.as_mut() {
+                existing.strengthen(&reason)
             } else {
                 inner.cancel_reason = Some(reason);
-            }
+                true
+            };
+            let request = first_request.then(|| {
+                inner
+                    .cancel_reason
+                    .as_ref()
+                    .expect("local cancellation published its reason")
+                    .clone()
+            });
             let wakers = inner.cancel_waker_snapshot();
             inner.cancel_wakers_pending = false;
-            wakers
+            (
+                region,
+                task,
+                wakers,
+                request,
+                !first_request && (changed || !was_requested),
+            )
         };
+
+        if let Some((trace, start)) = capture {
+            let mut request_sequence = None;
+            // The native checkpoint materialization derives this same budget;
+            // both native and replay defer applying it until acknowledgement.
+            let cleanup_budget = request.as_ref().map(CancelReason::cleanup_budget);
+            if let Some(reason) = request {
+                trace.record_event(|seq| {
+                    request_sequence = Some(seq);
+                    TraceEvent::cancel_request(seq, reason.timestamp, task, region, reason)
+                });
+            }
+            // Equal/weaker repeats preserve their ordinary wake dispatch but
+            // add no second Request. Effective strengthening remains a refusal.
+            trace.finish_cancellation_publication(
+                Some(start),
+                request_sequence,
+                cleanup_budget,
+                unsupported_mutation,
+            );
+        }
         crate::types::task_context::CancelWakeEffects::new(wakers).dispatch();
+        (region, task)
     }
 
     /// Charges one actual caller-polled root turn, using the native worker's

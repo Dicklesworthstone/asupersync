@@ -241,8 +241,10 @@ impl ScheduleCaptureSnapshot {
     /// Builds a checked task-order projection that also injects witnessed task
     /// cancellation requests and checks checkpoint acknowledgements on replay.
     ///
-    /// The native runtime currently witnesses region and sibling cancellation
-    /// publication. A request is admitted only when its entire publication span
+    /// The native runtime witnesses region and sibling cancellation publication,
+    /// plus the first direct [`crate::Cx::cancel_with`] or
+    /// [`crate::Cx::cancel_with_reason`] request on a worker-polled task's primary
+    /// context. A request is admitted only when its entire publication span
     /// lies between all worker polls; recording a Request after publishing a Cx
     /// flag is insufficient evidence on its own. Acknowledgements retain their
     /// originating task-poll ordinal through their worker context, even if the
@@ -250,8 +252,8 @@ impl ScheduleCaptureSnapshot {
     ///
     /// This captures task cancellation, with its full reason and effective
     /// cleanup budget. The harness still reconstructs region lifecycle effects,
-    /// external inputs, and user effects. Direct Cx cancellation, task-handle
-    /// aborts, deadline publication, and unrecorded reason/budget strengthening
+    /// external inputs, and user effects. Derived-context cancellation,
+    /// task-handle aborts, deadline publication, and reason/budget strengthening
     /// are not covered: missing or inconsistent evidence is refused. Every
     /// completion must also carry an authoritative terminal task-Cx witness, so
     /// a silent cancellation followed by an Ok result cannot attest absence of
@@ -766,6 +768,10 @@ impl ScheduleCaptureRecorder {
                 caller_tasks: VecDeque::new(),
             }),
         }
+    }
+
+    pub(crate) fn trace_handle(&self) -> TraceBufferHandle {
+        self.trace.clone()
     }
 
     /// Notes that `task` owns a `block_on` caller's root future, which the

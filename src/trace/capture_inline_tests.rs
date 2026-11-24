@@ -1,5 +1,6 @@
 use super::*;
-use crate::types::{RegionId, Time};
+use crate::types::{CancelKind, RegionId, Time};
+use std::sync::Arc;
 
 fn ids() -> (TaskId, RegionId) {
     (TaskId::new_for_test(0, 1), RegionId::new_for_test(0, 1))
@@ -654,4 +655,238 @@ fn cancellation_capture_checks_silent_terminal_cx_state() {
             }
         }
     }
+}
+
+/// Unit fixture for the producer/refusal rules. The integration test in
+/// native_schedule_capture exercises the real worker installing this marker.
+fn captured_primary_context() -> (crate::Cx, TraceBufferHandle, Arc<ScheduleCaptureRecorder>) {
+    let trace = TraceBufferHandle::new(64);
+    let recorder = Arc::new(ScheduleCaptureRecorder::new(trace.clone(), 1));
+    let (task, region) = ids();
+    let cx = crate::Cx::new(region, task, Budget::INFINITE);
+    cx.set_trace_buffer(trace.clone());
+    cx.inner.write().native_cancel_capture = Some(trace.clone());
+    trace.record_event(|seq| TraceEvent::spawn(seq, Time::ZERO, task, region));
+    captured_poll(&recorder, 0, task, region);
+    captured_yield(&recorder, 0, task, region);
+    (cx, trace, recorder)
+}
+
+fn finish_cancelled_context(
+    cx: &crate::Cx,
+    trace: &TraceBufferHandle,
+    recorder: &ScheduleCaptureRecorder,
+) -> ScheduleCaptureSnapshot {
+    let task = cx.task_id();
+    let region = cx.region_id();
+    captured_poll(recorder, 0, task, region);
+    assert!(cx.checkpoint().is_err());
+    let reason = cx.cancel_reason().unwrap();
+    captured_ack(recorder, 0, task, region, &reason);
+    captured_completion(trace, task, region, Severity::Cancelled, Some(&reason));
+    recorder.snapshot()
+}
+
+#[test]
+fn direct_cx_capture_keeps_one_request_and_finishes_before_every_wake() {
+    use crate::types::task_context::{CancelWaker, CxInner};
+    use std::sync::Weak;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Wake, Waker};
+
+    struct InspectWake {
+        inner: Weak<crate::sync::pl::RwLock<CxInner>>,
+        recorder: Arc<ScheduleCaptureRecorder>,
+        calls: AtomicUsize,
+    }
+    impl Wake for InspectWake {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            // Reentrant observation must not deadlock on the publisher's Cx
+            // or trace locks, and must never see an unfinished publication.
+            assert!(self.inner.upgrade().unwrap().read().is_cancel_requested());
+            let snapshot = self.recorder.snapshot();
+            assert_eq!(snapshot.cancellation_publications.spans.len(), 1);
+            let span = &snapshot.cancellation_publications.spans[0];
+            assert!(span.end_sequence.is_some());
+            assert!(span.request_sequence.is_some());
+            assert!(!span.unsupported_mutation);
+            self.calls.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    let (cx, trace, recorder) = captured_primary_context();
+    let observer = Arc::new(InspectWake {
+        inner: Arc::downgrade(&cx.inner),
+        recorder: Arc::clone(&recorder),
+        calls: AtomicUsize::new(0),
+    });
+    cx.inner.write().cancel_waker = Some(Arc::new(CancelWaker::new(Waker::from(
+        Arc::clone(&observer),
+    ))));
+    let reason = CancelReason::with_origin(CancelKind::Timeout, cx.region_id(), Time::from_nanos(7))
+        .with_task(cx.task_id())
+        .with_message("direct timeout")
+        .with_cause(CancelReason::user("external cause"));
+    cx.cancel_with_reason(reason.clone());
+    cx.clone().cancel_with_reason(reason.clone());
+    cx.cancel_with(CancelKind::User, Some("weaker repeated signal"));
+    assert_eq!(observer.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(cx.cancel_reason(), Some(reason.clone()));
+
+    let snapshot = finish_cancelled_context(&cx, &trace, &recorder);
+    let schedule = snapshot.production_schedule_with_cancellation().unwrap();
+    let events = schedule.cancellation_events().unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].phase(), ProductionCancellationPhase::Request);
+    assert_eq!(events[0].reason(), &reason);
+    assert_eq!(events[0].cleanup_budget(), reason.cleanup_budget());
+    assert_eq!(
+        events[1].phase(),
+        ProductionCancellationPhase::Acknowledgement
+    );
+
+    let mut missing_witness = snapshot.clone();
+    missing_witness.cancellation_publications.spans.clear();
+    assert!(matches!(
+        missing_witness.production_schedule_with_cancellation(),
+        Err(ScheduleCaptureError::CancellationPublication { .. })
+    ));
+    let mut changed_reason = snapshot;
+    let request = changed_reason
+        .events
+        .iter_mut()
+        .find(|event| event.kind == TraceEventKind::CancelRequest)
+        .unwrap();
+    let TraceData::Cancel { reason, .. } = &mut request.data else {
+        panic!("canonical cancellation request");
+    };
+    *reason = reason.clone().with_message("mutated attribution");
+    assert!(matches!(
+        changed_reason.production_schedule_with_cancellation(),
+        Err(ScheduleCaptureError::CancellationOrder { .. })
+    ));
+}
+
+#[test]
+fn direct_cx_capture_refuses_strengthening_and_unwitnessed_existing_cancellation() {
+    for case in 0..3 {
+        let (cx, trace, recorder) = captured_primary_context();
+        match case {
+            0 => cx.cancel_with(CancelKind::User, Some("first request")),
+            1 => cx
+                .inner
+                .read()
+                .fast_cancel
+                .store(true, crate::sync::atomic::Ordering::Release),
+            2 => {
+                cx.inner.write().cancel_reason = Some(CancelReason::user("earlier attribution"));
+            }
+            _ => unreachable!(),
+        }
+        cx.cancel_with_reason(CancelReason::with_origin(
+            CancelKind::Shutdown,
+            cx.region_id(),
+            Time::from_nanos(19),
+        ));
+        let snapshot = finish_cancelled_context(&cx, &trace, &recorder);
+        assert!(snapshot.production_schedule().is_ok());
+        assert!(matches!(
+            snapshot.production_schedule_with_cancellation(),
+            Err(ScheduleCaptureError::CancellationPublication { .. })
+        ));
+        assert!(
+            snapshot
+                .cancellation_publications
+                .spans
+                .iter()
+                .any(|span| span.unsupported_mutation)
+        );
+        assert_eq!(cx.cancel_reason().unwrap().kind, CancelKind::Shutdown);
+    }
+}
+
+#[test]
+fn direct_cx_capture_authority_does_not_follow_shared_identity_or_observability() {
+    let (cx, trace, recorder) = captured_primary_context();
+    let derived = cx.derive_cancel_scope();
+    assert_eq!(derived.task_id(), cx.task_id());
+    assert!(derived.inner.read().native_cancel_capture.is_none());
+    derived.cancel_with(CancelKind::User, Some("fiber-only cancellation"));
+    assert!(!cx.is_cancel_requested());
+    assert!(derived.is_cancel_requested());
+
+    #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
+    {
+        let request = cx.derive_request_scope();
+        assert!(request.inner.read().native_cancel_capture.is_none());
+        request.cancel_with_reason(CancelReason::user("request-only cancellation"));
+        assert!(!cx.is_cancel_requested());
+    }
+
+    // Publicly attaching the captured trace to another context with the same
+    // identifiers must not manufacture authority over the native task.
+    let unattached = crate::Cx::new(cx.region_id(), cx.task_id(), Budget::INFINITE);
+    unattached.set_trace_buffer(trace.clone());
+    unattached.cancel_with_reason(CancelReason::user("independent context"));
+    assert!(!cx.is_cancel_requested());
+    captured_poll(&recorder, 0, cx.task_id(), cx.region_id());
+    captured_completion(&trace, cx.task_id(), cx.region_id(), Severity::Ok, None);
+    let snapshot = recorder.snapshot();
+    assert!(snapshot.cancellation_publications.spans.is_empty());
+    assert!(
+        snapshot
+            .production_schedule_with_cancellation()
+            .unwrap()
+            .cancellation_events()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn direct_cx_capture_refuses_a_request_inside_an_actual_poll_interval() {
+    let (cx, trace, recorder) = captured_primary_context();
+    captured_poll(&recorder, 0, cx.task_id(), cx.region_id());
+    cx.cancel_with(CancelKind::User, Some("inside poll"));
+    assert!(cx.checkpoint().is_err());
+    let reason = cx.cancel_reason().unwrap();
+    captured_ack(&recorder, 0, cx.task_id(), cx.region_id(), &reason);
+    captured_completion(
+        &trace,
+        cx.task_id(),
+        cx.region_id(),
+        Severity::Cancelled,
+        Some(&reason),
+    );
+    assert!(matches!(
+        recorder.snapshot().production_schedule_with_cancellation(),
+        Err(ScheduleCaptureError::CancellationDuringPoll { .. })
+    ));
+}
+
+#[test]
+fn direct_cx_capture_does_not_publish_for_a_retired_task() {
+    let (cx, trace, recorder) = captured_primary_context();
+    let retired = {
+        let mut inner = cx.inner.write();
+        inner.take_cancel_wakers()
+    };
+    drop(retired);
+    captured_completion(&trace, cx.task_id(), cx.region_id(), Severity::Ok, None);
+    cx.cancel_with(CancelKind::User, Some("retained retired context"));
+    assert!(cx.is_cancel_requested());
+    let snapshot = recorder.snapshot();
+    assert!(snapshot.cancellation_publications.spans.is_empty());
+    assert!(
+        snapshot
+            .production_schedule_with_cancellation()
+            .unwrap()
+            .cancellation_events()
+            .unwrap()
+            .is_empty()
+    );
 }

@@ -414,7 +414,7 @@ impl CancellationCleanupGate {
 /// that occurred while the controller was observing the first acknowledgement.
 async fn cancellation_receiver(
     mut receiver: oneshot::Receiver<()>,
-    parked: Option<mpsc::Sender<TaskId>>,
+    parked: Option<mpsc::Sender<Cx>>,
     observed: Arc<Mutex<Vec<CancelReason>>>,
     cleanup: Arc<CancellationCleanupGate>,
     replay_cleanup_ready_poll: Option<usize>,
@@ -427,7 +427,7 @@ async fn cancellation_receiver(
         if result.is_pending()
             && let Some(sender) = parked.take()
         {
-            sender.send(cx.task_id()).unwrap();
+            sender.send(cx.clone()).unwrap();
         }
         result
     })
@@ -482,7 +482,8 @@ fn native_region_cancellation_replays_request_and_cleanup_acknowledgements() {
             ));
             let task = parked_rx
                 .recv_timeout(WATCHDOG)
-                .expect("native receiver registered its Pending operation");
+                .expect("native receiver registered its Pending operation")
+                .task_id();
             // The message above is sent inside poll. Wait for the worker's
             // Yield too, so cancellation is provably between actual polls.
             let deadline = Instant::now() + WATCHDOG;
@@ -664,46 +665,93 @@ fn native_region_cancellation_replays_request_and_cleanup_acknowledgements() {
 }
 
 #[test]
-fn native_cancellation_capture_contains_ack_before_completion() {
-    for workers in [1, 2] {
-        for sharded in [false, true] {
+#[allow(clippy::too_many_lines)]
+fn native_direct_cx_cancellation_replays_request_and_cleanup_acknowledgements() {
+    for (workers, sharded) in [(1, false), (1, true), (2, false), (2, true)] {
+        for explicit_reason in [false, true] {
             let runtime = RuntimeBuilder::new()
                 .worker_threads(workers)
                 .with_sharded_state(sharded)
                 .capture_schedules(true)
                 .build()
                 .unwrap();
-            let (sender, mut receiver) = oneshot::channel::<()>();
+            let (sender, receiver) = oneshot::channel::<()>();
             let (parked_tx, parked_rx) = mpsc::channel();
-            let join = runtime.handle().spawn(async move {
-                let cx = Cx::current().unwrap();
-                let mut parked = Some(parked_tx);
-                let mut receive = std::pin::pin!(receiver.recv(&cx));
-                let result = poll_fn(|task| {
-                    let result = receive.as_mut().poll(task);
-                    if result.is_pending()
-                        && let Some(parked) = parked.take()
-                    {
-                        parked.send(cx.clone()).unwrap();
-                    }
-                    result
-                })
-                .await;
-                assert!(result.is_err());
-                assert!(cx.checkpoint().is_err());
-                cx.cancel_reason().expect("actual task cancellation")
-            });
+            let cleanup = Arc::new(CancellationCleanupGate::default());
+            let native_observed = Arc::new(Mutex::new(Vec::new()));
+            let join = runtime.handle().spawn(cancellation_receiver(
+                receiver,
+                Some(parked_tx),
+                Arc::clone(&native_observed),
+                Arc::clone(&cleanup),
+                None,
+            ));
             let owner = parked_rx
                 .recv_timeout(WATCHDOG)
                 .expect("task parked on live oneshot");
-            owner.cancel_with(CancelKind::User, Some("capture cancellation"));
+            let task = owner.task_id();
+            // The Pending witness is sent inside poll. Only the worker's Yield
+            // establishes a serializable boundary for the external request.
+            let deadline = Instant::now() + WATCHDOG;
+            loop {
+                let snapshot = runtime.schedule_capture_snapshot().unwrap();
+                if snapshot.events().iter().any(|event| {
+                    event.kind == TraceEventKind::Yield
+                        && matches!(event.data, TraceData::Task { task: observed, .. }
+                            if observed == task)
+                }) {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "native task never yielded");
+                std::thread::yield_now();
+            }
+
+            let supplied_reason = explicit_reason.then(|| {
+                CancelReason::with_origin(CancelKind::User, owner.region_id(), owner.now())
+                    .with_task(task)
+                    .with_message("direct capture cancellation")
+                    .with_cause(CancelReason::user("external controller input"))
+            });
+            if let Some(reason) = supplied_reason.as_ref() {
+                owner.cancel_with_reason(reason.clone());
+            } else {
+                owner.cancel_with(CancelKind::User, Some("direct capture cancellation"));
+            }
+            let deadline = Instant::now() + WATCHDOG;
+            loop {
+                let snapshot = runtime.schedule_capture_snapshot().unwrap();
+                if snapshot.events().iter().any(|event| {
+                    event.kind == TraceEventKind::CancelAck
+                        && matches!(event.data, TraceData::Cancel { task: observed, .. }
+                            if observed == task)
+                }) {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "native cleanup never acknowledged"
+                );
+                std::thread::yield_now();
+            }
+            assert!(
+                !join.is_finished(),
+                "cancelled cleanup still awaits its external input"
+            );
+            // The original oneshot sender remains live: cancellation released
+            // recv, and this separate real wake releases the cleanup future.
+            cleanup.release();
             let reason = join_native(&runtime, join);
             assert_eq!(reason.kind, CancelKind::User);
-            let snapshot = completed_capture(&runtime);
-            assert!(
-                snapshot.production_schedule_with_cancellation().is_err(),
-                "the original direct Cx cancellation is unsupported"
+            if let Some(supplied) = supplied_reason {
+                assert_eq!(reason, supplied);
+            }
+            assert_eq!(
+                *native_observed.lock().unwrap(),
+                vec![reason.clone(), reason.clone()]
             );
+            let snapshot = completed_capture(&runtime);
+            assert_eq!(snapshot.dropped_events(), 0);
+            assert_caller_tasks_left_out(&snapshot, 1);
             let snapshot = archive_roundtrip(&snapshot);
             assert!(
                 snapshot
@@ -712,31 +760,99 @@ fn native_cancellation_capture_contains_ack_before_completion() {
                     .cancellation_events()
                     .is_none()
             );
-            assert!(
-                snapshot.production_schedule_with_cancellation().is_err(),
-                "direct Cx cancellation has no witnessed request publication"
+            let schedule = snapshot.production_schedule_with_cancellation().unwrap();
+            let dispatches = schedule.summary().steps;
+            assert!((3..=128).contains(&dispatches), "{schedule:?}");
+            let events = schedule.cancellation_events().unwrap();
+            assert_eq!(
+                events.len(),
+                3,
+                "one request and two actual checkpoint polls"
             );
-            let ack = snapshot
-                .events()
-                .iter()
-                .find(|event| {
-                    event.kind == TraceEventKind::CancelAck
-                        && matches!(&event.data, TraceData::Cancel { task, reason: observed, .. }
-                        if *task == owner.task_id() && observed == &reason)
-                })
-                .expect("actual checkpoint receipt captured");
-            let complete = snapshot.events().iter().find(|event| {
-                event.kind == TraceEventKind::Complete
-                    && matches!(event.data, TraceData::Task { task, .. } if task == owner.task_id())
-            }).unwrap();
-            assert!(ack.seq < complete.seq);
-            assert!(snapshot.contexts().iter().any(|context| context.event_sequence == ack.seq && context.worker_id.is_some()));
+            assert_eq!(events[0].phase(), ProductionCancellationPhase::Request);
+            assert_eq!(events[0].after_dispatches(), 1);
+            assert_eq!(events[0].task_poll_ordinal(), 1);
+            assert_eq!(
+                events[1].phase(),
+                ProductionCancellationPhase::Acknowledgement
+            );
+            assert_eq!(events[1].task_poll_ordinal(), 2);
+            assert_eq!(
+                events[2].phase(),
+                ProductionCancellationPhase::Acknowledgement
+            );
+            assert_eq!(events[2].task_poll_ordinal(), dispatches);
+            for event in events {
+                assert_eq!(event.task(), CompactTaskId::from(task));
+                assert_eq!(event.reason(), &reason);
+                assert_eq!(event.cleanup_budget(), reason.cleanup_budget());
+            }
+            assert!(
+                snapshot
+                    .terminal_outcomes()
+                    .contains(&(task, Severity::Cancelled))
+            );
+
+            let mut lab = LabRuntime::new(LabConfig::new(109).max_steps(128));
+            let region = lab.state.create_root_region(Budget::INFINITE);
+            let (lab_sender, receiver) = oneshot::channel::<()>();
+            let lab_observed = Arc::new(Mutex::new(Vec::new()));
+            let (lab_task, mut lab_join) = lab
+                .state
+                .create_task(
+                    region,
+                    Budget::new(),
+                    cancellation_receiver(
+                        receiver,
+                        None,
+                        Arc::clone(&lab_observed),
+                        Arc::new(CancellationCleanupGate::default()),
+                        Some(events[2].task_poll_ordinal() - 1),
+                    ),
+                )
+                .unwrap();
+            lab.scheduler.lock().schedule(lab_task, 0);
+            let report = lab
+                .run_production_schedule_strict(
+                    &schedule,
+                    StrictProductionReplayLimits::new(512, 8, 128, 256, 0),
+                )
+                .unwrap();
+            assert_eq!(
+                report.termination,
+                StrictProductionReplayTermination::Matched,
+                "{report:?}"
+            );
+            assert_eq!(report.replay.steps_matched, dispatches);
+            assert!(report.passed(), "{report:?}");
+            assert_eq!(
+                *lab_observed.lock().unwrap(),
+                *native_observed.lock().unwrap()
+            );
+            assert!(lab.is_quiescent());
+            assert!(lab.scheduler.lock().is_empty());
+            assert!(lab_join.is_finished());
+            match lab_join.try_join() {
+                Err(asupersync::runtime::JoinError::Cancelled(observed)) => {
+                    assert_eq!(observed, reason);
+                }
+                other => panic!("replayed cleanup must retain cancellation: {other:?}"),
+            }
             eprintln!(
                 "{}",
-                serde_json::json!({"bead": "asupersync-bi2462.95", "case": "cancel_ack", "workers": workers, "sharded": sharded, "task": format!("{:?}", owner.task_id()), "ack": ack.seq, "complete": complete.seq})
+                serde_json::json!({
+                    "bead": "asupersync-bi2462.8",
+                    "case": "direct_cx_cancellation_replay",
+                    "workers": workers,
+                    "sharded": sharded,
+                    "explicit_reason": explicit_reason,
+                    "replay": format!("{report:?}"),
+                })
             );
             drop(sender);
+            drop(lab_sender);
             drop(owner);
+            assert!(runtime.is_quiescent());
             assert!(runtime.shutdown_timeout(WATCHDOG));
         }
     }

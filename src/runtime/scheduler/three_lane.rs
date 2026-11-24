@@ -9923,6 +9923,15 @@ impl ThreeLaneWorker {
                 ));
                 let retired_waker = {
                     let mut guard = inner.write();
+                    #[cfg(feature = "full-runtime")]
+                    if !guard.cancel_waker_registry_closed
+                        && guard.native_cancel_capture.is_none()
+                        && let Some(capture) = self.schedule_capture.get()
+                    {
+                        // This is the authoritative task-record inner, not a
+                        // derived fiber/request context with the same TaskId.
+                        guard.native_cancel_capture = Some(capture.trace_handle());
+                    }
                     if guard.cancel_waker_registry_closed {
                         None
                     } else if !guard
