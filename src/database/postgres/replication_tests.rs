@@ -266,6 +266,13 @@ fn lsn_configuration_and_feedback_validate_without_sql_injection() {
             .unwrap(),
         config().start_command().unwrap()
     );
+    let two_phase = config().two_phase(true);
+    assert_eq!(two_phase.pgoutput_decoder().protocol_version(), PgOutputProtocolVersion::V3);
+    assert!(two_phase.start_command().unwrap().ends_with("two_phase 'on')"));
+    let both = two_phase.streaming(true);
+    assert!(both.start_command().unwrap().contains("proto_version '3'"));
+    assert!(both.start_command().unwrap().ends_with("streaming 'on', two_phase 'on')"));
+    assert_eq!(both.two_phase(false).start_command().unwrap(), config().streaming(true).start_command().unwrap());
     assert!(config().with_max_message_bytes(24).is_err());
     assert!(
         config()
@@ -551,6 +558,81 @@ fn native_streamed_replication_preserves_abort_ownership_and_explicit_commit_fee
         peer.join().unwrap();
         assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
     }
+}
+
+#[test]
+fn native_two_phase_replication_delivers_rollback_without_acknowledging_prepare() {
+    let (listener, url) = listener();
+    let peer = std::thread::spawn(move || {
+        let mut socket = accept(&listener);
+        startup(&mut socket);
+        authenticate(&mut socket);
+        assert_eq!(receive(&mut socket), (b'Q',
+            b"START_REPLICATION SLOT \"slot_1\" LOGICAL 0/10 (proto_version '3', publication_names '\"pub\"', two_phase 'on')\0".to_vec()));
+        socket.write_all(&frame(b'W', &[0, 0, 0])).unwrap();
+        let mut body = 0x30u64.to_be_bytes().to_vec();
+        body.extend_from_slice(&0x38u64.to_be_bytes());
+        body.extend_from_slice(&7i64.to_be_bytes());
+        body.extend_from_slice(b"\0\0\0\x2dorders-19\0");
+        let mut seq = wal(&[b"b".as_slice(), &body].concat());
+        seq.extend(wal(b"I\0\0\0\x09N\0\x01t\0\0\0\x05order"));
+        seq.extend(wal(&[b"P\0".as_slice(), &body].concat()));
+        seq.extend(keepalive(0x60, true));
+        socket.write_all(&seq).unwrap();
+        assert_feedback(&mut socket, [0, 0, 0]);
+
+        let mut rollback = b"r\0".to_vec();
+        rollback.extend_from_slice(&0x38u64.to_be_bytes());
+        rollback.extend_from_slice(&0x58u64.to_be_bytes());
+        rollback.extend_from_slice(&7i64.to_be_bytes());
+        rollback.extend_from_slice(&8i64.to_be_bytes());
+        rollback.extend_from_slice(b"\0\0\0\x2dorders-19\0");
+        socket.write_all(&wal(&rollback)).unwrap();
+        finish_peer(&mut socket);
+    });
+    let runtime = runtime(1);
+    runtime.block_on(async {
+        let cx = Cx::current().unwrap();
+        let config = config().two_phase(true);
+        let mut decoder = config.pgoutput_decoder();
+        let connection = ok(PgReplicationConnection::connect(&cx, &url).await);
+        let mut stream = ok(connection.start(&cx, config).await);
+        let prepare = super::super::pgoutput::PgPrepare {
+            prepare_lsn: PgLsn::new(0x30),
+            end_lsn: PgLsn::new(0x38),
+            prepare_time_micros: 7,
+            xid: 45,
+            gid: "orders-19",
+        };
+        for expected in [
+            Some(PgOutputEvent::BeginPrepare(prepare)),
+            Some(PgOutputEvent::Message {
+                stream_xid: None,
+                xid: None,
+                message: PgOutputMessage::Insert {
+                    relation_id: 9,
+                    new_tuple: vec![PgTupleValue::Text(b"order")],
+                },
+            }),
+            Some(PgOutputEvent::Prepare(prepare)),
+            None,
+            Some(PgOutputEvent::RollbackPrepared {
+                prepare_end_lsn: PgLsn::new(0x38),
+                rollback_end_lsn: PgLsn::new(0x58),
+                prepare_time_micros: 7,
+                rollback_time_micros: 8,
+                xid: 45,
+                gid: "orders-19",
+            }),
+        ] {
+            let event = ok(stream.next(&cx).await).unwrap();
+            assert_eq!(event.pgoutput_with(&mut decoder).unwrap(), expected);
+            assert_eq!(stream.feedback(), PgReplicationFeedback::default());
+        }
+        ok(stream.finish(&cx).await);
+    });
+    peer.join().unwrap();
+    assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
 }
 
 #[test]
