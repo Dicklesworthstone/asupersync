@@ -1842,10 +1842,12 @@ pub struct IncomingRequestBodyWriter {
 
 /// Observe whether a produced response still owns its incoming body without
 /// retaining the consumer itself or the writer's checked obligation.
+#[cfg(not(target_arch = "wasm32"))]
 pub(super) struct IncomingBodyConsumer {
     shared: Arc<IncomingBodyShared>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl IncomingBodyConsumer {
     pub(super) fn dropped(&self) -> bool {
         self.shared.consumer_dropped()
@@ -1962,6 +1964,7 @@ impl IncomingRequestBodyWriter {
         self.shared.consumer_dropped()
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn consumer_observer(&self) -> IncomingBodyConsumer {
         IncomingBodyConsumer {
             shared: Arc::clone(&self.shared),

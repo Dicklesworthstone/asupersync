@@ -494,13 +494,21 @@ struct AdminPermit {
 #[cfg(any(feature = "kafka", test))]
 impl AdminPermit {
     fn acquire(state: Arc<AdminState>) -> Result<Self, KafkaAdminError> {
-        state
-            .active
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
-                (active < state.limit).then_some(active + 1)
-            })
-            .map_err(|_| KafkaAdminError::Busy { limit: state.limit })?;
-        Ok(Self { state })
+        let mut active = state.active.load(Ordering::Acquire);
+        loop {
+            if active >= state.limit {
+                return Err(KafkaAdminError::Busy { limit: state.limit });
+            }
+            match state.active.compare_exchange_weak(
+                active,
+                active + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Ok(Self { state }),
+                Err(current) => active = current,
+            }
+        }
     }
 }
 

@@ -158,26 +158,32 @@ fn distributed_snapshot_close_isolates_waiter_wake_and_drop_panics() {
 }
 
 struct SnapshotCloseProbe {
-    region: Weak<RegionRecord>,
+    // Finalizers are Send but need not be Sync; capture only shared state.
+    state: Weak<AtomicRegionState>,
+    inner: Weak<RwLock<RegionInner>>,
+    close_notify: Weak<crate::sync::pl::Mutex<RegionCloseState>>,
     heap_drops: Arc<AtomicUsize>,
     observations: Arc<Counts>,
 }
 
 impl SnapshotCloseProbe {
     fn observes_closed_without_locks(&self) -> bool {
-        let Some(region) = self.region.upgrade() else {
+        let (Some(state), Some(inner), Some(close_notify)) = (
+            self.state.upgrade(),
+            self.inner.upgrade(),
+            self.close_notify.upgrade(),
+        ) else {
             return false;
         };
         // Record success instead of asserting inside a callback whose panic is
         // deliberately contained. Both callbacks must observe released locks.
-        let inner_unlocked = region.inner.try_write().is_some();
-        let notify_ready = region
-            .close_notify
+        let inner_unlocked = inner.try_write().is_some();
+        let notify_ready = close_notify
             .try_lock()
             .is_some_and(|notify| notify.closed && notify.waiters.is_empty());
         inner_unlocked
             && notify_ready
-            && region.state() == RegionState::Closed
+            && state.load() == RegionState::Closed
             && self.heap_drops.load(Ordering::SeqCst) == 1
     }
 }
@@ -204,11 +210,11 @@ impl Drop for SnapshotCloseProbe {
 
 #[test]
 fn distributed_snapshot_close_notifies_after_cleanup_and_only_once() {
-    let region = Arc::new(RegionRecord::new(
+    let region = RegionRecord::new(
         RegionId::new_for_test(0, 1),
         None,
         Budget::INFINITE,
-    ));
+    );
     let heap_drops = Arc::new(AtomicUsize::new(0));
     region
         .heap_alloc(HeapDrop(Arc::clone(&heap_drops)))
@@ -219,7 +225,9 @@ fn distributed_snapshot_close_notifies_after_cleanup_and_only_once() {
         .lock()
         .waiters
         .push(Waker::from(Arc::new(SnapshotCloseProbe {
-            region: Arc::downgrade(&region),
+            state: Arc::downgrade(&region.state),
+            inner: Arc::downgrade(&region.inner),
+            close_notify: Arc::downgrade(&region.close_notify),
             heap_drops: Arc::clone(&heap_drops),
             observations: Arc::clone(&observations),
         })));
