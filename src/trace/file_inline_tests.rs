@@ -530,6 +530,171 @@ fn bounded_recovery_never_exceeds_caller_event_limit() {
     );
 }
 
+fn flushed_unfinished_v3_bytes(events: &[ReplayEvent], config: TraceFileConfig) -> (Vec<u8>, usize) {
+    let source = NamedTempFile::new().expect("create unfinished writer source");
+    let mut writer = TraceWriter::create_with_config(source.path(), config).expect("create writer");
+    writer
+        .write_metadata(&TraceMetadata::new(731))
+        .expect("write metadata");
+    for event in events {
+        writer.write_event(event).expect("write event");
+    }
+    #[cfg(feature = "trace-compression")]
+    if writer.config.compression.is_compressed() {
+        writer.flush_compressed_chunk().expect("flush event chunk");
+    }
+    writer.writer.flush().expect("flush bytes without finishing");
+
+    // Snapshot real writer output before finish or Drop can publish the
+    // count/digest. Returning bytes avoids leaking a writer to simulate a crash.
+    let bytes = std::fs::read(source.path()).expect("read unfinished writer output");
+    let count_offset = usize::try_from(writer.event_count_pos).expect("count offset fits");
+    let events_offset = count_offset + 8 + TRACE_CHECKSUM_LEN;
+    assert_eq!(writer.event_count(), events.len() as u64);
+    assert!(bytes[count_offset..events_offset].iter().all(|&byte| byte == 0));
+    (bytes, events_offset)
+}
+
+#[test]
+fn unfinished_v3_recovery_is_bounded_and_never_claims_complete() {
+    let events = sample_events();
+    for event_count in [0, 3] {
+        let expected = &events[..event_count];
+        let (bytes, _) = flushed_unfinished_v3_bytes(expected, TraceFileConfig::new());
+        let source = NamedTempFile::new().expect("create crash snapshot");
+        std::fs::write(source.path(), &bytes).expect("write unfinished snapshot");
+        assert!(matches!(
+            TraceReader::open(source.path()),
+            Err(TraceFileError::ChecksumMismatch {
+                section: "event stream"
+            })
+        ));
+        assert!(matches!(
+            TraceReader::open_with_limits(source.path(), TraceContainerLimits::default()),
+            Err(TraceFileError::ChecksumMismatch {
+                section: "event stream"
+            })
+        ));
+
+        for limit in [0, 1, event_count, event_count + 1] {
+            let recovery =
+                recover_trace_prefix(source.path(), limit).expect("recover crash prefix");
+            let recovered_count = event_count.min(limit);
+            assert_eq!(recovery.file_version, 3);
+            assert_eq!(recovery.metadata, TraceMetadata::new(731));
+            assert_eq!(recovery.declared_events, 0);
+            assert_eq!(recovery.recovered_events, expected[..recovered_count]);
+            if limit <= event_count {
+                assert_eq!(
+                    recovery.status,
+                    TraceRecoveryStatus::LimitReached { max_events: limit }
+                );
+            } else {
+                assert!(matches!(
+                    recovery.status,
+                    TraceRecoveryStatus::Partial { next_event, ref error }
+                        if next_event == event_count as u64 && error.contains("did not finalize")
+                ));
+            }
+        }
+        assert_eq!(
+            std::fs::read(source.path()).expect("read source after recovery"),
+            bytes,
+            "prefix recovery must preserve the crash snapshot"
+        );
+
+        let finalized = NamedTempFile::new().expect("create finished trace");
+        write_trace(finalized.path(), &TraceMetadata::new(731), expected).expect("finish trace");
+        let recovery =
+            recover_trace_prefix(finalized.path(), event_count).expect("recover finished trace");
+        assert_eq!(recovery.status, TraceRecoveryStatus::Complete);
+        assert_eq!(recovery.recovered_events, expected);
+    }
+}
+
+#[test]
+fn unfinished_v3_recovery_stops_at_the_first_damaged_frame() {
+    let events = sample_events();
+    let expected = &events[..3];
+    let (bytes, events_offset) = flushed_unfinished_v3_bytes(expected, TraceFileConfig::new());
+    let second_frame = events_offset + 4 + rmp_serde::to_vec(&events[0]).unwrap().len();
+    let mut malformed = bytes.clone();
+    malformed[second_frame + 4] = 0xc1; // Reserved MessagePack byte; third frame stays valid.
+    let mut oversized = bytes.clone();
+    oversized[second_frame..second_frame + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+
+    for (scenario, damaged, recovered_count) in [
+        ("truncated tail", bytes[..bytes.len() - 1].to_vec(), 2),
+        ("malformed middle", malformed, 1),
+        ("oversized middle", oversized, 1),
+    ] {
+        let source = NamedTempFile::new().expect("create damaged crash snapshot");
+        std::fs::write(source.path(), &damaged).expect("write damaged snapshot");
+        let recovery = recover_trace_prefix(source.path(), 10).expect("recover damaged prefix");
+        assert_eq!(
+            recovery.recovered_events,
+            expected[..recovered_count],
+            "scenario={scenario}"
+        );
+        assert!(
+            matches!(
+                recovery.status,
+                TraceRecoveryStatus::Partial { next_event, ref error }
+                    if next_event == recovered_count as u64 && error.contains("did not finalize")
+            ),
+            "scenario={scenario}"
+        );
+        if scenario == "oversized middle" {
+            assert!(matches!(
+                recovery.status,
+                TraceRecoveryStatus::Partial { ref error, .. } if error.contains("event_len")
+            ));
+        }
+    }
+}
+
+#[test]
+fn unfinished_v3_recovery_requires_the_exact_sentinel_and_valid_metadata() {
+    let events = sample_events();
+    let (bytes, events_offset) = flushed_unfinished_v3_bytes(&events[..1], TraceFileConfig::new());
+    let digest_offset = events_offset - TRACE_CHECKSUM_LEN;
+    let count_offset = digest_offset - 8;
+    let source = NamedTempFile::new().expect("create invalid header snapshot");
+
+    let mut damaged_metadata = bytes.clone();
+    damaged_metadata[HEADER_SIZE] ^= 1;
+    std::fs::write(source.path(), &damaged_metadata).expect("corrupt metadata");
+    assert!(matches!(
+        recover_trace_prefix(source.path(), 10),
+        Err(TraceFileError::ChecksumMismatch {
+            section: "metadata"
+        })
+    ));
+
+    let mut nonzero_digest = bytes.clone();
+    nonzero_digest[digest_offset] = 1;
+    std::fs::write(source.path(), &nonzero_digest).expect("corrupt empty-stream digest");
+    assert!(matches!(
+        recover_trace_prefix(source.path(), 10),
+        Err(TraceFileError::ChecksumMismatch {
+            section: "event stream"
+        })
+    ));
+
+    let mut nonzero_count = bytes;
+    nonzero_count[count_offset..count_offset + 8].copy_from_slice(&1u64.to_le_bytes());
+    std::fs::write(source.path(), &nonzero_count).expect("publish count without digest");
+    let recovery =
+        recover_trace_prefix(source.path(), 10).expect("recover invalid completed header");
+    assert_eq!(recovery.declared_events, 1);
+    assert!(recovery.recovered_events.is_empty());
+    assert!(matches!(
+        recovery.status,
+        TraceRecoveryStatus::Partial { next_event: 0, ref error }
+            if error == "event stream checksum mismatch"
+    ));
+}
+
 #[test]
 fn trace_file_roundtrip_serialization_summary() {
     let temp = NamedTempFile::new().expect("create temp file");
@@ -1267,6 +1432,45 @@ fn early_enospc_remains_an_error_for_later_writes_and_finish() {
 #[cfg(feature = "trace-compression")]
 mod compression_tests {
     use super::*;
+
+    #[test]
+    fn unfinished_compressed_v3_recovery_preserves_complete_chunks() {
+        let events = sample_events();
+        let expected = &events[..3];
+        let config = TraceFileConfig::new()
+            .with_compression(CompressionMode::Lz4 { level: 1 })
+            .with_chunk_size(1);
+        let (bytes, _) = flushed_unfinished_v3_bytes(expected, config);
+        let source = NamedTempFile::new().expect("create compressed crash snapshot");
+        std::fs::write(source.path(), &bytes).expect("write compressed snapshot");
+        assert!(matches!(
+            TraceReader::open(source.path()),
+            Err(TraceFileError::ChecksumMismatch {
+                section: "event stream"
+            })
+        ));
+        let recovery = recover_trace_prefix(source.path(), 10).expect("recover flushed chunks");
+        assert_eq!(recovery.recovered_events, expected);
+        assert!(matches!(
+            recovery.status,
+            TraceRecoveryStatus::Partial { next_event: 3, ref error }
+                if error.contains("did not finalize")
+        ));
+        let bounded = recover_trace_prefix(source.path(), 2).expect("bound chunk recovery");
+        assert_eq!(bounded.recovered_events, expected[..2]);
+        assert_eq!(
+            bounded.status,
+            TraceRecoveryStatus::LimitReached { max_events: 2 }
+        );
+
+        std::fs::write(source.path(), &bytes[..bytes.len() - 1]).expect("truncate final chunk");
+        let recovery = recover_trace_prefix(source.path(), 10).expect("recover complete chunks");
+        assert_eq!(recovery.recovered_events, expected[..2]);
+        assert!(matches!(
+            recovery.status,
+            TraceRecoveryStatus::Partial { next_event: 2, .. }
+        ));
+    }
 
     #[test]
     fn write_trace_with_config_writes_compressed_trace() {

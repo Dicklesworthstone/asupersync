@@ -41,6 +41,8 @@
 //! non-existing v3 destination while preserving the source as a rollback
 //! anchor. [`recover_trace_prefix`] returns only a contiguous, bounded prefix
 //! and an explicit partial/limit receipt; it never skips a corrupt record.
+//! Recovery can also inspect flushed frames from an unfinished v3 writer,
+//! without admitting that unchecked prefix as a complete replay trace.
 //!
 //! # Compression
 //!
@@ -1111,6 +1113,8 @@ pub struct TraceReader {
     events_read: u64,
     limits: TraceContainerLimits,
     failed: bool,
+    /// Only prefix recovery may admit the writer's unfinished v3 header.
+    unfinished: bool,
     events_start_pos: u64,
     compression: CompressionMode,
     expected_event_digest: Option<[u8; TRACE_CHECKSUM_LEN]>,
@@ -1155,17 +1159,23 @@ impl TraceReader {
         path: impl AsRef<Path>,
         limits: TraceContainerLimits,
     ) -> TraceFileResult<Self> {
-        Self::open_with_lz4_codec_and_limits(path, Lz4Codec::Incumbent, limits)
+        Self::open_with_lz4_codec_and_limits(path, Lz4Codec::Incumbent, limits, false)
     }
 
     fn open_with_lz4_codec(path: impl AsRef<Path>, lz4_codec: Lz4Codec) -> TraceFileResult<Self> {
-        Self::open_with_lz4_codec_and_limits(path, lz4_codec, TraceContainerLimits::default())
+        Self::open_with_lz4_codec_and_limits(
+            path,
+            lz4_codec,
+            TraceContainerLimits::default(),
+            false,
+        )
     }
 
     fn open_with_lz4_codec_and_limits(
         path: impl AsRef<Path>,
         lz4_codec: Lz4Codec,
         limits: TraceContainerLimits,
+        allow_unfinished: bool,
     ) -> TraceFileResult<Self> {
         #[cfg(not(feature = "trace-compression"))]
         let _ = lz4_codec;
@@ -1295,7 +1305,14 @@ impl TraceReader {
         };
         let events_start_pos = reader.stream_position()?;
 
-        if event_count == 0 {
+        // A writer reserves both fields as zero until finish() backpatches
+        // them. Only explicit prefix recovery accepts this exact sentinel;
+        // normal readers still require the digest of a valid empty stream.
+        let unfinished = allow_unfinished
+            && version == 3
+            && event_count == 0
+            && expected_event_digest == Some([0u8; TRACE_CHECKSUM_LEN]);
+        if event_count == 0 && !unfinished {
             if let Some(expected) = expected_event_digest {
                 verify_checksum("event stream", &expected, &sha256(&[]))?;
             }
@@ -1309,6 +1326,7 @@ impl TraceReader {
             events_read: 0,
             limits,
             failed: false,
+            unfinished,
             events_start_pos,
             compression,
             expected_event_digest,
@@ -1423,7 +1441,7 @@ impl TraceReader {
     }
 
     fn read_next_event(&mut self) -> TraceFileResult<Option<ReplayEvent>> {
-        if self.events_read >= self.event_count {
+        if !self.unfinished && self.events_read >= self.event_count {
             return Ok(None);
         }
 
@@ -1749,7 +1767,7 @@ pub struct TraceRecovery {
 pub enum TraceRecoveryStatus {
     /// Every declared event and the v3 event-stream checksum were verified.
     Complete,
-    /// A corrupt or truncated record ended recovery.
+    /// A corrupt or truncated record, or an unfinished writer, ended recovery.
     Partial {
         /// Index of the first event that could not be recovered.
         next_event: u64,
@@ -1771,14 +1789,26 @@ pub enum TraceRecoveryStatus {
 /// for the complete canonical event stream, a partial or limit-reached v3
 /// receipt is not checksum admission and must not be treated as deterministic
 /// replay proof.
+///
+/// An unfinished v3 writer leaves both its event count and event digest zero.
+/// Recovery accepts only that exact unfinished-header sentinel after verifying
+/// the metadata, then scans bounded frames without trusting an event digest.
+/// Its receipt is always `Partial` or `LimitReached`, even if every flushed
+/// frame decodes. Normal readers continue to reject the unfinished trace.
 pub fn recover_trace_prefix(
     path: impl AsRef<Path>,
     max_events: usize,
 ) -> TraceFileResult<TraceRecovery> {
-    let mut reader = TraceReader::open(path)?;
+    let mut reader = TraceReader::open_with_lz4_codec_and_limits(
+        path,
+        Lz4Codec::Incumbent,
+        TraceContainerLimits::default(),
+        true,
+    )?;
     let file_version = reader.file_version();
     let metadata = reader.metadata().clone();
     let declared_events = reader.event_count();
+    let unfinished = reader.unfinished;
     let mut recovered_events = Vec::with_capacity(
         usize::try_from(declared_events)
             .unwrap_or(usize::MAX)
@@ -1789,12 +1819,22 @@ pub fn recover_trace_prefix(
         match reader.read_event() {
             Ok(Some(event)) => recovered_events.push(event),
             Ok(None) => {
+                let status = if unfinished {
+                    TraceRecoveryStatus::Partial {
+                        next_event: recovered_events.len() as u64,
+                        error: String::from(
+                            "trace writer did not finalize event count and checksum",
+                        ),
+                    }
+                } else {
+                    TraceRecoveryStatus::Complete
+                };
                 return Ok(TraceRecovery {
                     file_version,
                     metadata,
                     declared_events,
                     recovered_events,
-                    status: TraceRecoveryStatus::Complete,
+                    status,
                 });
             }
             Err(error) => {
@@ -1804,7 +1844,13 @@ pub fn recover_trace_prefix(
                     declared_events,
                     status: TraceRecoveryStatus::Partial {
                         next_event: recovered_events.len() as u64,
-                        error: error.to_string(),
+                        error: if unfinished {
+                            format!(
+                                "trace writer did not finalize event count and checksum: {error}"
+                            )
+                        } else {
+                            error.to_string()
+                        },
                     },
                     recovered_events,
                 });
@@ -1812,7 +1858,7 @@ pub fn recover_trace_prefix(
         }
     }
 
-    let status = if recovered_events.len() as u64 == declared_events {
+    let status = if !unfinished && recovered_events.len() as u64 == declared_events {
         TraceRecoveryStatus::Complete
     } else {
         TraceRecoveryStatus::LimitReached { max_events }
