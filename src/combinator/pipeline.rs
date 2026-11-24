@@ -315,8 +315,9 @@ impl<S: Stream> PipelineSource for PipelineStream<S> {
 ///
 /// [`Self::then`] can change the item type at every bounded channel edge.
 /// Building does not spawn tasks or pull inputs. [`Self::run`] creates one
-/// worker per transform and one async sink worker; each worker processes its
-/// inputs sequentially, preserving FIFO order. Zero transforms streams the
+/// worker per sequential transform and one async sink worker. Opt-in
+/// [`Self::then_concurrent`] stages use bounded worker pools and restore input
+/// order before the next edge. Zero transforms streams the
 /// inputs straight to the sink. Empty input never invokes a transform or sink.
 ///
 /// Every normal or failing return joins all admitted workers. Cancellation,
@@ -334,11 +335,13 @@ pub struct PipelineExecution<'scope, I: PipelineSource, T, E, P: Policy> {
     ingress: mpsc::Sender<PipelineItem<I::InputItem>>,
     output: mpsc::Receiver<PipelineItem<T>>,
     workers: Vec<PipelineWorker<E>>,
+    stages: usize,
 }
 
 /// A lazy typed pipeline with one privately owned operation subtree per run.
 ///
-/// [`Self::then`] reuses the existing bounded, sequential transform workers.
+/// [`Self::then`] reuses the existing bounded, sequential transform workers;
+/// [`Self::then_concurrent`] adds an explicitly bounded concurrent stage.
 /// [`Self::run`] opens a child region under the explicit owner and admits every
 /// transform and sink there. Work-window credits and ingress sends use the
 /// original owner task's checked authority, never the region principal.
@@ -445,6 +448,30 @@ where
         let _ambient = inner.cx.clone().set_current_restricted();
         ScopedPipelineExecution {
             inner: Some(inner.then(output_capacity, transform)),
+        }
+    }
+
+    /// Appends a concurrent transform while preserving original input order.
+    ///
+    /// See [`PipelineExecution::then_concurrent`] for worker, buffering and
+    /// callback contracts. All transform and ordering workers belong to this
+    /// operation's child region and are included in its drain and close receipt.
+    #[must_use]
+    pub fn then_concurrent<U, F, Fut>(
+        mut self,
+        output_capacity: NonZeroUsize,
+        concurrency: NonZeroUsize,
+        transform: F,
+    ) -> ScopedPipelineExecution<I, U, E>
+    where
+        U: Send + 'static,
+        F: Fn(Cx, T) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Outcome<U, E>> + Send + 'static,
+    {
+        let inner = self.inner.take().expect("owned scoped pipeline builder");
+        let _ambient = inner.cx.clone().set_current_restricted();
+        ScopedPipelineExecution {
+            inner: Some(inner.then_concurrent(output_capacity, concurrency, transform)),
         }
     }
 
@@ -603,6 +630,7 @@ where
             ingress,
             output,
             workers: Vec::new(),
+            stages: 0,
         }
     }
 }
@@ -676,8 +704,9 @@ where
             ingress,
             mut output,
             mut workers,
+            stages,
         } = self;
-        let stage = workers.len();
+        let stage = stages;
         let (sender, next_output) = mpsc::channel(output_capacity.get());
         workers.push(Box::new(move |worker_cx| {
             Box::pin(async move {
@@ -728,6 +757,74 @@ where
             ingress,
             output: next_output,
             workers,
+            stages: stages + 1,
+        }
+    }
+
+    /// Appends a bounded pool of transform workers with ordered publication.
+    ///
+    /// At most `min(concurrency, max_in_flight)` transforms run simultaneously.
+    /// Each receives its actual worker context; the shared `Fn` factory can be
+    /// invoked concurrently by native workers. Use [`Self::then`] for a serial
+    /// `FnMut` factory. Each input is consumed once; transforms may execute and
+    /// complete in any order, and the next stage receives original input order.
+    ///
+    /// The requested output capacity bounds both the pool's completion channel
+    /// and the next stage's input channel. Completed out-of-order values retain
+    /// their original whole-pipeline credit until the sink acknowledges them,
+    /// so a slow first transform cannot permit unbounded source pulls or a
+    /// hidden unbounded reorder buffer. This remains an item bound, not a byte
+    /// bound on allocations made by the transform. With more than one effective
+    /// worker, one additional owned task restores order. A limit of one uses
+    /// the sequential engine without that extra task.
+    ///
+    /// A failure in any worker is observed even while an earlier input remains
+    /// pending. The existing owner cancels and joins every worker, preserves the
+    /// initiating domain error alongside a stronger cancellation or panic, and
+    /// never treats a dropped output as successful sink acknowledgement.
+    #[must_use]
+    pub fn then_concurrent<U, F, Fut>(
+        self,
+        output_capacity: NonZeroUsize,
+        concurrency: NonZeroUsize,
+        transform: F,
+    ) -> PipelineExecution<'scope, I, U, E, P>
+    where
+        U: Send + 'static,
+        F: Fn(Cx, T) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Outcome<U, E>> + Send + 'static,
+    {
+        let concurrency = concurrency.get().min(self.config.max_in_flight.get());
+        if concurrency == 1 {
+            return self.then(output_capacity, transform);
+        }
+        let Self {
+            scope,
+            cx,
+            inputs,
+            config,
+            ingress,
+            output,
+            mut workers,
+            stages,
+        } = self;
+        let output = pipeline_concurrent_workers(
+            &mut workers,
+            output,
+            output_capacity,
+            concurrency,
+            stages,
+            transform,
+        );
+        PipelineExecution {
+            scope,
+            cx,
+            inputs,
+            config,
+            ingress,
+            output,
+            workers,
+            stages: stages + 1,
         }
     }
 
@@ -766,8 +863,8 @@ where
             ingress,
             mut output,
             mut workers,
+            stages,
         } = self;
-        let stages = workers.len();
         let (ack_sender, mut acknowledgements) = mpsc::channel(config.max_in_flight.get());
         workers.push(Box::new(move |worker_cx| {
             Box::pin(async move {
@@ -894,6 +991,167 @@ where
     }
 }
 
+// Each pool member is an ordinary PipelineOwner child. A later input's
+// failure is therefore visible even while the ordering worker waits for an
+// earlier input, and the existing cancellation/severity/drain path owns all of
+// the pool. Queued and reordered values retain their ingress work credit.
+fn pipeline_concurrent_workers<T, U, E, F, Fut>(
+    workers: &mut Vec<PipelineWorker<E>>,
+    input: mpsc::Receiver<PipelineItem<T>>,
+    output_capacity: NonZeroUsize,
+    concurrency: usize,
+    stage: usize,
+    transform: F,
+) -> mpsc::Receiver<PipelineItem<U>>
+where
+    T: Send + 'static,
+    U: Send + 'static,
+    E: Send + 'static,
+    F: Fn(Cx, T) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Outcome<U, E>> + Send + 'static,
+{
+    let input = std::sync::Arc::new(crate::sync::Mutex::new(input));
+    let transform = std::sync::Arc::new(transform);
+    let (completed, completions) = mpsc::channel(output_capacity.get());
+    for _ in 0..concurrency {
+        let input = std::sync::Arc::clone(&input);
+        let transform = std::sync::Arc::clone(&transform);
+        let completed = completed.clone();
+        workers.push(Box::new(move |worker_cx| {
+            Box::pin(pipeline_concurrent_transform(
+                worker_cx, input, completed, stage, transform,
+            ))
+        }));
+    }
+    // Only worker captures keep the completion edge open. A partial spawn
+    // refusal cannot retain a hidden sender after the unadmitted builders drop.
+    drop(completed);
+    let (ordered, output) = mpsc::channel(output_capacity.get());
+    workers.push(Box::new(move |worker_cx| {
+        Box::pin(pipeline_ordered_output::<U, E>(
+            worker_cx, completions, ordered, stage,
+        ))
+    }));
+    output
+}
+
+async fn pipeline_concurrent_transform<T, U, E, F, Fut>(
+    worker_cx: Cx,
+    input: std::sync::Arc<crate::sync::Mutex<mpsc::Receiver<PipelineItem<T>>>>,
+    completed: mpsc::Sender<PipelineItem<U>>,
+    stage: usize,
+    transform: std::sync::Arc<F>,
+) -> Outcome<(), PipelineExecutionError<E>>
+where
+    T: Send + 'static,
+    U: Send + 'static,
+    E: Send + 'static,
+    F: Fn(Cx, T) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Outcome<U, E>> + Send + 'static,
+{
+    let mut quantum = 0;
+    loop {
+        // Serialize only acquisition/receive. The owned guard can migrate
+        // with this task and is released before the user factory or future.
+        let item = {
+            let mut receiver =
+                match crate::sync::OwnedMutexGuard::lock(std::sync::Arc::clone(&input), &worker_cx)
+                    .await
+                {
+                    Ok(receiver) => receiver,
+                    Err(crate::sync::LockError::Cancelled) => return pipeline_cancelled(&worker_cx),
+                    Err(error) => {
+                        return Outcome::Panicked(PanicPayload::new(format!(
+                            "pipeline concurrent input lock: {error}"
+                        )));
+                    }
+                };
+            match receiver.recv(&worker_cx).await {
+                Ok(item) => item,
+                Err(mpsc::RecvError::Disconnected) => return Outcome::Ok(()),
+                Err(_) => return pipeline_cancelled(&worker_cx),
+            }
+        };
+        let value = match transform(worker_cx.clone(), item.value).await {
+            Outcome::Ok(value) => value,
+            Outcome::Err(error) => {
+                return Outcome::Err(PipelineExecutionError::Stage {
+                    stage,
+                    input: item.index,
+                    error,
+                });
+            }
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        };
+        if let Err(error) = completed
+            .send_checked(
+                &worker_cx,
+                PipelineItem {
+                    index: item.index,
+                    value,
+                },
+            )
+            .await
+        {
+            return pipeline_send_failure(&worker_cx, Some(stage), item.index, error);
+        }
+        quantum += 1;
+        if quantum == PIPELINE_QUANTUM {
+            quantum = 0;
+            crate::runtime::yield_now().await;
+        }
+    }
+}
+
+async fn pipeline_ordered_output<U, E>(
+    worker_cx: Cx,
+    mut completions: mpsc::Receiver<PipelineItem<U>>,
+    ordered: mpsc::Sender<PipelineItem<U>>,
+    stage: usize,
+) -> Outcome<(), PipelineExecutionError<E>> {
+    let mut next = 0;
+    let mut waiting = std::collections::BTreeMap::new();
+    let mut quantum = 0;
+    loop {
+        let item = match completions.recv(&worker_cx).await {
+            Ok(item) => item,
+            Err(mpsc::RecvError::Disconnected) if waiting.is_empty() => return Outcome::Ok(()),
+            Err(mpsc::RecvError::Disconnected) => {
+                return Outcome::Err(PipelineExecutionError::Disconnected);
+            }
+            Err(_) => return pipeline_cancelled(&worker_cx),
+        };
+        assert!(item.index >= next, "pipeline completed an input twice");
+        assert!(
+            waiting.insert(item.index, item.value).is_none(),
+            "pipeline duplicate unordered output"
+        );
+        while let Some(value) = waiting.remove(&next) {
+            if let Err(error) = ordered
+                .send_checked(&worker_cx, PipelineItem { index: next, value })
+                .await
+            {
+                return pipeline_send_failure(&worker_cx, Some(stage), next, error);
+            }
+            // Ingress rejects usize::MAX before publication.
+            next += 1;
+            quantum += 1;
+            if quantum == PIPELINE_QUANTUM {
+                quantum = 0;
+                crate::runtime::yield_now().await;
+            }
+        }
+        // A whole window can arrive out of order without producing output.
+        // Charge those receives to the same bounded cooperative turn.
+        quantum += 1;
+        if quantum == PIPELINE_QUANTUM {
+            quantum = 0;
+            crate::runtime::yield_now().await;
+        }
+    }
+}
+
 const PIPELINE_QUANTUM: usize = 32;
 
 fn pipeline_cancelled<T, E>(cx: &Cx) -> Outcome<T, E> {
@@ -927,6 +1185,30 @@ fn pipeline_send_failure<T, E>(
         }
         mpsc::CheckedSendError::Channel(mpsc::SendError::Cancelled(_)) => pipeline_cancelled(cx),
         mpsc::CheckedSendError::Channel(_) => Outcome::Err(PipelineExecutionError::Disconnected),
+    }
+}
+
+// A concurrent stage can have several independent failures. Worker admission
+// order no longer describes input order, so retain the earliest logical
+// stage/input even if another failure was observed first or cancellation won.
+fn pipeline_stage_error_precedes<E>(
+    new: &PipelineExecutionError<E>,
+    previous: &PipelineExecutionError<E>,
+) -> Option<bool> {
+    match (new, previous) {
+        (
+            PipelineExecutionError::Stage {
+                stage: new_stage,
+                input: new_input,
+                ..
+            },
+            PipelineExecutionError::Stage {
+                stage: old_stage,
+                input: old_input,
+                ..
+            },
+        ) => Some((new_stage, new_input) < (old_stage, old_input)),
+        _ => None,
     }
 }
 
@@ -1032,7 +1314,8 @@ impl<E> PipelineOwner<'_, E> {
                             let old_disconnected =
                                 matches!(previous, PipelineExecutionError::Disconnected);
                             if new_disconnected == old_disconnected {
-                                index < *old_index
+                                pipeline_stage_error_precedes(new, previous)
+                                    .unwrap_or(index < *old_index)
                             } else {
                                 old_disconnected
                             }
@@ -1061,13 +1344,19 @@ impl<E> PipelineOwner<'_, E> {
             // panic or cancellation on some runs and nothing on others.
             Outcome::Err(error)
                 if !matches!(&error, PipelineExecutionError::Disconnected)
-                    && self.suppressed_error.is_none()
+                    && self.suppressed_error.as_ref().is_none_or(|previous| {
+                        pipeline_stage_error_precedes(&error, previous).unwrap_or(false)
+                    })
                     && (was_current
                         || self.failure.as_ref().is_some_and(|(_, current)| {
                             current.severity() > crate::types::outcome::Severity::Err
                         })) =>
             {
-                self.suppressed_error = Some(error);
+                if let Some(previous) = self.suppressed_error.replace(error) {
+                    // A displaced domain error can have an arbitrary Drop.
+                    // Reuse the same caught retirement path, after replacement.
+                    self.retain_suppressed(Outcome::Err(previous), false);
+                }
                 return;
             }
             other => other,
@@ -2213,3 +2502,85 @@ mod tests;
 #[cfg(test)]
 #[path = "pipeline_scoped_tests.rs"]
 mod scoped_tests;
+
+#[cfg(test)]
+mod concurrent_builder_tests {
+    use super::*;
+
+    #[test]
+    fn concurrent_stage_pool_is_capped_by_the_work_window_and_keeps_logical_stage_count() {
+        let cx = Cx::for_testing();
+        for (requested, window, first_workers) in [(1, 4, 1), (4, 1, 1), (3, 5, 4), (100, 2, 3)] {
+            let capacity = NonZeroUsize::new(1).unwrap();
+            let pipeline = ScopedPipelineExecution::new(
+                &cx,
+                0..0_usize,
+                PipelineExecutionConfig::new(capacity, NonZeroUsize::new(window).unwrap()),
+            )
+            .then_concurrent(capacity, NonZeroUsize::new(requested).unwrap(), |_, value| async move {
+                Outcome::<_, ()>::Ok(value)
+            })
+            .then(capacity, |_, value| async move { Outcome::Ok(value) });
+            let inner = pipeline.inner.as_ref().unwrap();
+            assert_eq!(inner.stages, 2);
+            assert_eq!(inner.workers.len(), first_workers + 1);
+        }
+    }
+
+    #[test]
+    fn concurrent_failures_keep_the_earliest_input_in_every_retirement_order() {
+        for order in [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ] {
+            for stronger in 0..3 {
+                let cx = Cx::for_testing();
+                let mut owner = PipelineOwner::new(cx.clone(), 1);
+                for event in order {
+                    match event {
+                        0 => owner.record(
+                            5,
+                            Outcome::Err(PipelineExecutionError::Stage {
+                                stage: 0,
+                                input: 0,
+                                error: "first input",
+                            }),
+                        ),
+                        1 => owner.record(
+                            0,
+                            Outcome::Err(PipelineExecutionError::Stage {
+                                stage: 0,
+                                input: 1,
+                                error: "second input",
+                            }),
+                        ),
+                        _ => match stronger {
+                            0 => {}
+                            1 => owner.record(9, pipeline_cancelled(&cx)),
+                            _ => owner.record(
+                                9,
+                                Outcome::Panicked(PanicPayload::new("cleanup panic")),
+                            ),
+                        },
+                    }
+                }
+                let report = owner.finish();
+                assert!(matches!(
+                    report.error(),
+                    Some(PipelineExecutionError::Stage {
+                        stage: 0,
+                        input: 0,
+                        error: "first input",
+                    })
+                ), "order={order:?}, stronger={stronger}: {report:?}");
+                assert_eq!(report.outcome.is_err(), stronger == 0);
+                assert_eq!(report.outcome.is_cancelled(), stronger == 1);
+                assert_eq!(report.outcome.is_panicked(), stronger == 2);
+            }
+        }
+    }
+}
