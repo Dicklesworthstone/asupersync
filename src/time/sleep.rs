@@ -695,7 +695,12 @@ impl Sleep {
         }
     }
 
-    fn complete_ready_registration(&self, now: Time, timer_driver: Option<TimerDriverHandle>) {
+    fn complete_ready_registration(
+        &self,
+        now: Time,
+        timer_driver: Option<TimerDriverHandle>,
+        explicit_clock: bool,
+    ) {
         let (handle, driver, fallback_handles) = self.take_active_registration();
 
         // See `cancel_active_registration`: terminal completion must release
@@ -706,7 +711,7 @@ impl Sleep {
             let driver = driver.or(timer_driver);
             let trace = Cx::current().and_then(|current| current.trace_buffer());
             if let Some(trace) = trace.as_ref() {
-                let fired_at = if self.time_getter.is_some() {
+                let fired_at = if explicit_clock || self.time_getter.is_some() {
                     driver.as_ref().map_or(now, TimerDriverHandle::now)
                 } else {
                     now.max(self.deadline)
@@ -733,6 +738,10 @@ impl Sleep {
     ///
     /// Returns `Poll::Ready(())` if the deadline has passed.
     pub fn poll_with_time(&self, now: Time) -> Poll<()> {
+        self.poll_with_observed_time(now, false)
+    }
+
+    fn poll_with_observed_time(&self, now: Time, explicit_clock: bool) -> Poll<()> {
         assert!(
             !self.completed.load(crate::sync::atomic::Ordering::Acquire),
             "Sleep polled after completion"
@@ -743,10 +752,10 @@ impl Sleep {
         // migration. A custom clock still owns its deadline: a runtime wake
         // only asks us to check that clock again. A clamped registration is
         // also only a wake to recheck the deadline.
-        if self.take_elapsed_wake(now) || now >= self.deadline {
+        if self.take_elapsed_wake(now, explicit_clock) || now >= self.deadline {
             self.completed
                 .store(true, crate::sync::atomic::Ordering::Release);
-            self.complete_ready_registration(now, self.timer_driver_for_poll());
+            self.complete_ready_registration(now, self.timer_driver_for_poll(), explicit_clock);
             Poll::Ready(())
         } else {
             Poll::Pending
@@ -757,7 +766,31 @@ impl Sleep {
     /// elapsed time. Only this timer skips the cancellation checkpoint; its
     /// wrapped operation can still observe cancellation and finish cleanup.
     pub(crate) fn poll_deadline(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        self.get_mut().poll_inner(cx, false)
+        self.poll_deadline_with_time(cx, None)
+    }
+
+    /// Polls a deadline with an optional caller-supplied clock sample. Without
+    /// one, the ordinary driver/getter clock remains authoritative. With a
+    /// sample, runtime timers provide wake hints for the remaining duration;
+    /// neither their epoch nor a latched fire can expire this wait.
+    pub(crate) fn poll_deadline_with_time(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        explicit_now: Option<Time>,
+    ) -> Poll<()> {
+        if let Some(now) = explicit_now
+            && !self.has_timer_driver_for_poll()
+        {
+            let readiness = self.poll_with_observed_time(now, true);
+            if readiness.is_pending() {
+                // A manual sample has no independently observable clock to
+                // drive a fallback thread. Retire an earlier automatic wait
+                // and leave further polling to the caller.
+                self.cancel_active_registration();
+            }
+            return readiness;
+        }
+        self.get_mut().poll_inner(cx, false, explicit_now)
     }
 
     pub(crate) fn poll_ready_with_time(&self, now: Time) -> Poll<()> {
@@ -765,12 +798,12 @@ impl Sleep {
             !self.completed.load(crate::sync::atomic::Ordering::Acquire),
             "Sleep polled after completion"
         );
-        if self.take_elapsed_wake(now) || now >= self.deadline {
+        if self.take_elapsed_wake(now, false) || now >= self.deadline {
             self.polled
                 .store(true, crate::sync::atomic::Ordering::Relaxed);
             self.completed
                 .store(true, crate::sync::atomic::Ordering::Release);
-            self.complete_ready_registration(now, self.timer_driver_for_poll());
+            self.complete_ready_registration(now, self.timer_driver_for_poll(), false);
             Poll::Ready(())
         } else {
             Poll::Pending
@@ -780,16 +813,16 @@ impl Sleep {
 
 impl Sleep {
     /// Classify the latched wake exactly once for all polling paths. A wheel
-    /// horizon or custom-clock wake may require another registration before
-    /// the logical deadline. An ordinary, full registration remains
-    /// authoritative even if polling migrates to an earlier clock.
-    fn take_elapsed_wake(&self, now: Time) -> bool {
+    /// horizon, custom-clock, or explicitly sampled wake may require another
+    /// registration before the logical deadline. An ordinary, full registration
+    /// remains authoritative even if polling migrates to an earlier clock.
+    fn take_elapsed_wake(&self, now: Time, explicit_clock: bool) -> bool {
         let full = self.ready.swap(false, Ordering::AcqRel);
         let partial = self
             .partial_ready
             .as_ref()
             .is_some_and(|ready| ready.swap(false, Ordering::AcqRel));
-        if full && (self.time_getter.is_none() || now >= self.deadline) {
+        if full && ((!explicit_clock && self.time_getter.is_none()) || now >= self.deadline) {
             return true;
         }
         if now < self.deadline && (full || partial) {
@@ -803,13 +836,18 @@ impl Future for Sleep {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        self.get_mut().poll_inner(cx, true)
+        self.get_mut().poll_inner(cx, true, None)
     }
 }
 
 impl Sleep {
     #[allow(clippy::too_many_lines)]
-    fn poll_inner(&mut self, cx: &mut Context<'_>, cancel_aware: bool) -> Poll<()> {
+    fn poll_inner(
+        &mut self,
+        cx: &mut Context<'_>,
+        cancel_aware: bool,
+        explicit_now: Option<Time>,
+    ) -> Poll<()> {
         assert!(
             !self.completed.load(crate::sync::atomic::Ordering::Acquire),
             "Sleep polled after completion"
@@ -876,7 +914,7 @@ impl Sleep {
                 // logical clock (`time_getter`) keeps the short-poll thread
                 // fallback below, since the wall-clock shared driver cannot
                 // observe an injected clock.
-                self.time_getter.is_none().then(|| {
+                (explicit_now.is_none() && self.time_getter.is_none()).then(|| {
                     // Defense-in-depth: surface the missing timer driver once so a
                     // mis-configured consumer is caught in logs instead of silently
                     // running on the fallback
@@ -885,17 +923,19 @@ impl Sleep {
                     global_fallback_timer().driver.clone()
                 })
             });
-        let now = if let Some(timer) = self.bound_timer_driver.as_ref() {
-            timer.now()
-        } else if self.time_getter.is_some() {
-            self.current_time()
-        } else {
-            timer_driver
-                .as_ref()
-                .map_or_else(|| self.current_time(), TimerDriverHandle::now)
-        };
+        let now = explicit_now.unwrap_or_else(|| {
+            if let Some(timer) = self.bound_timer_driver.as_ref() {
+                timer.now()
+            } else if self.time_getter.is_some() {
+                self.current_time()
+            } else {
+                timer_driver
+                    .as_ref()
+                    .map_or_else(|| self.current_time(), TimerDriverHandle::now)
+            }
+        });
 
-        match self.poll_with_time(now) {
+        match self.poll_with_observed_time(now, explicit_now.is_some()) {
             Poll::Ready(()) => Poll::Ready(()),
             Poll::Pending => {
                 let mut state = self.state.lock();
@@ -944,15 +984,13 @@ impl Sleep {
 
                     state.timer_driver = Some(timer.clone());
 
-                    // Custom deadlines and runtime timers can have different
-                    // epochs. Schedule only the remaining custom duration on
-                    // the driver's clock, then recheck the custom getter on wake.
-                    let timer_now = if self.time_getter.is_some() {
-                        timer.now()
-                    } else {
-                        now
-                    };
-                    let timer_deadline = if self.time_getter.is_some() {
+                    // Custom or explicitly sampled deadlines can have a
+                    // different epoch from the runtime. Schedule their remaining
+                    // duration on the driver's clock and recheck the owning
+                    // clock on wake.
+                    let relative_deadline = explicit_now.is_some() || self.time_getter.is_some();
+                    let timer_now = if relative_deadline { timer.now() } else { now };
+                    let timer_deadline = if relative_deadline {
                         timer_now.saturating_add_nanos(
                             self.deadline.as_nanos().saturating_sub(now.as_nanos()),
                         )
