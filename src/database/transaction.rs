@@ -333,6 +333,64 @@ pub(super) async fn wait_retry_delay(cx: &Cx, delay: Duration) -> Result<(), Can
     .await
 }
 
+/// Run transaction cleanup with bounded cancellation masking and an independent
+/// wake for a cancelled operation whose server has stopped responding.
+///
+/// The grace period starts only after cancellation is observed; healthy cleanup
+/// has no additional timeout. A completed cleanup result takes precedence over
+/// expiry. `None` means the grace period elapsed, and the cleanup future has been
+/// dropped before the caller retires its connection. Backend callers retain
+/// responsibility for outcome mapping and unmasked cancellation acknowledgement.
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+pub(crate) async fn run_transaction_cleanup<F>(
+    cx: &Cx,
+    cleanup_grace: Duration,
+    cleanup: F,
+) -> Option<F::Output>
+where
+    F: Future + Send,
+{
+    const MASKED_CLEANUP_POLLS: u32 = 32;
+
+    let mut cancellation = OwnedCancelRegistration::new(cx.clone());
+    let mut owner_deadline = cx.budget_deadline_sleep();
+    let mut cancellation_deadline = None;
+    let mut cleanup = std::pin::pin!(crate::combinator::commit_section(
+        cx,
+        MASKED_CLEANUP_POLLS,
+        cleanup
+    ));
+    poll_fn(|task_cx| {
+        cancellation.refresh(task_cx.waker());
+        if owner_deadline
+            .as_mut()
+            .is_some_and(|deadline| Pin::new(deadline).poll_deadline(task_cx).is_ready())
+        {
+            // Wake the cleanup's checkpoints at the owner's deadline, then
+            // leave cancellation classification to those checkpoints.
+            owner_deadline = None;
+        }
+        if let Poll::Ready(result) = cleanup.as_mut().poll(task_cx) {
+            return Poll::Ready(Some(result));
+        }
+        // A masked checkpoint can publish deadline cancellation in this poll.
+        // Check afterwards too, using the explicit owner's clock even if a
+        // different context polls this operation.
+        if cancellation_deadline.is_none() && cx.is_cancel_requested() {
+            let _owner_clock = (!cx.has_timer()).then(|| Cx::set_current(Some(cx.clone())));
+            cancellation_deadline = Some(cx.sleep_until_on_clock(cx.now() + cleanup_grace));
+        }
+        if cancellation_deadline
+            .as_mut()
+            .is_some_and(|deadline| Pin::new(deadline).poll_deadline(task_cx).is_ready())
+        {
+            return Poll::Ready(None);
+        }
+        Poll::Pending
+    })
+    .await
+}
+
 /// Apply the same replay gate and backoff to both callback forms. Taking the
 /// error classification rather than an outcome avoids retaining a shared
 /// reference to the caller's result across the delay.
@@ -407,21 +465,15 @@ mod pg {
         sync::atomic::{AtomicBool, Ordering},
     };
 
-    const HELPER_ROLLBACK_MASKED_POLLS: u32 = 1024;
-
     fn rollback_required_error() -> PgError {
         PgError::Protocol("transaction must roll back before commit".to_string())
     }
 
-    /// Roll back before propagating the body's outcome, with cancellation
-    /// masked for a bounded number of polls as in the SQLite helper. The body
-    /// may have cancelled `cx`; `rollback` then stopped at its first
-    /// checkpoint and sent nothing, so the transaction and its locks stayed
-    /// open until the connection's next operation.
+    /// Direct rollback owns its cancellation mask and cleanup deadline.
+    /// An outer mask could suppress the cancellation wake before the direct
+    /// rollback has armed its deadline, leaving a silent server parked forever.
     async fn rollback_before_propagating(tx: PgTransaction<'_>, cx: &Cx) {
-        let _ =
-            crate::combinator::commit_section(cx, HELPER_ROLLBACK_MASKED_POLLS, tx.rollback(cx))
-                .await;
+        let _ = tx.rollback(cx).await;
     }
 
     /// All callback forms use this finalizer so cancellation, poisoned

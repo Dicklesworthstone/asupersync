@@ -165,6 +165,13 @@ artifacts.
   command completion and transaction state. Invalid acknowledgements cannot
   run the callback or report a successful commit. Valid server errors are
   still drained so retryable errors retain their existing recovery behavior.
+- **PostgreSQL rollback cannot remain parked indefinitely after cancellation.**
+  Direct rollback and transaction-helper cleanup share MySQL's cancellation
+  grace driver: a silent peer is given up to 500ms or the smaller configured
+  connect timeout before the retained connection is closed with rollback debt.
+  Normal, uncancelled rollback keeps waiting for its acknowledgement. A valid
+  idle acknowledgement remains successful through the task-result boundary,
+  and helpers preserve the body's original outcome after failed cleanup.
 - **MySQL explicit rollback completes cancellation cleanup or retires the session.**
   Rollback and session-isolation restoration run with cancellation masked;
   an explicit-clock timer bounds an unresponsive exchange after cancellation

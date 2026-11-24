@@ -10886,29 +10886,52 @@ impl PgTransaction<'_> {
     }
 
     /// Rollback the transaction.
+    ///
+    /// Cancellation is masked while cleanup awaits the idle acknowledgement.
+    /// After cancellation, cleanup has at most 500ms (or the configured connect
+    /// timeout, when smaller) and a 32-poll masking budget. An unresponsive
+    /// connection is closed with its rollback debt retained. Without
+    /// cancellation, this method does not impose an additional timeout.
     pub async fn rollback(mut self, cx: &Cx) -> Outcome<(), PgError> {
         if self.finished || self.conn.inner.transaction_status == b'I' {
             trace_database_transaction(cx, "postgres", "rollback", "already_finished");
             return Outcome::Err(PgError::TransactionFinished);
         }
         trace_database_transaction(cx, "postgres", "rollback", "start");
-        // Cleanup runs with cancellation masked for a bounded number of
-        // polls. Under an already-cancelled Cx the ROLLBACK used to stop at
-        // its first checkpoint, leaving the transaction and its locks open.
-        const MASKED_ROLLBACK_POLLS: u32 = 32;
-        match crate::combinator::commit_section(
+        let cleanup_grace = self
+            .conn
+            .inner
+            .options
+            .connect_timeout
+            .unwrap_or(self.conn.inner.tls_options.connect_timeout_duration())
+            .min(std::time::Duration::from_millis(500));
+        let result = super::transaction::run_transaction_cleanup(
             cx,
-            MASKED_ROLLBACK_POLLS,
+            cleanup_grace,
             self.conn
                 .execute_transaction_control(cx, "ROLLBACK", PgTransactionControl::Rollback),
         )
-        .await
-        {
+        .await;
+        // The cleanup future no longer borrows the connection. Expiry cannot
+        // make an unanswered rollback safe to reuse; close the data socket
+        // now, even when the caller retains the connection after cancellation.
+        let result = result.unwrap_or_else(|| {
+            self.conn.inner.needs_rollback = true;
+            self.conn.abort_in_flight_exchange();
+            let _ = cx.checkpoint();
+            Outcome::Cancelled(cancelled_reason(cx))
+        });
+        match result {
             Outcome::Ok(_) => {
                 self.finished = true;
                 // Explicit rollback: abort the obligation.
                 if let Some(token) = self.obligation.take() {
                     let _ = token.abort();
+                }
+                // Preserve the acknowledged rollback through the ordinary
+                // task result boundary after cleanup's mask has ended.
+                if cx.is_cancel_requested() {
+                    let _ = cx.checkpoint();
                 }
                 trace_database_transaction(cx, "postgres", "rollback", "ok");
                 Outcome::Ok(())
@@ -10918,9 +10941,10 @@ impl PgTransaction<'_> {
                 // Under a cancelled Cx the masked ROLLBACK is best effort.
                 // When it fails, the caller still sees its own cancellation,
                 // as before the masking, and Drop marks the connection.
-                if let Some(reason) = cx.cancel_reason() {
+                if cx.cancel_reason().is_some() {
+                    let _ = cx.checkpoint();
                     trace_database_transaction(cx, "postgres", "rollback", "cancelled");
-                    return Outcome::Cancelled(reason);
+                    return Outcome::Cancelled(cancelled_reason(cx));
                 }
                 trace_database_transaction(cx, "postgres", "rollback", "err");
                 Outcome::Err(e)

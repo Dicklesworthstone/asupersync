@@ -4267,6 +4267,288 @@ mod tests {
         }
     }
 
+    // br-asupersync-2oh2u.6.5: cancellation must bound a silent rollback
+    // without inventing its acknowledgement or erasing the body's outcome.
+    #[test]
+    fn explicit_pg_rollback_finishes_after_pre_or_pending_cancellation() {
+        for workers in [1, 2] {
+            for cancel_before_poll in [false, true] {
+                for dirty in [false, true] {
+                    run_native_orphan_recovery_test(workers, move |request_cx| async move {
+                        let active_cx = Cx::current().expect("native rollback worker");
+                        let (mut conn, mut peer) = make_orphan_recovery_connection_with_peer();
+                        conn.inner.needs_discard = dirty;
+                        reply_complete(&mut peer, "BEGIN", b'T');
+                        let tx = match conn.begin(&request_cx).await {
+                            Outcome::Ok(tx) => tx,
+                            _ => panic!("expected acknowledged BEGIN"),
+                        };
+                        assert_eq!(read_frontend_frame(&mut peer), (b'Q', b"BEGIN\0".to_vec()));
+                        let reason = CancelReason::user("cancel explicit PostgreSQL rollback");
+                        if cancel_before_poll {
+                            request_cx.cancel_with_reason(reason.clone());
+                        }
+                        let mut rollback = Box::pin(tx.rollback(&request_cx));
+                        witness_managed_control_pending(
+                            rollback.as_mut(),
+                            &mut peer,
+                            &backend_message(b'Q', b"ROLLBACK\0"),
+                        )
+                        .await;
+                        if !cancel_before_poll {
+                            request_cx.cancel_with_reason(reason.clone());
+                        }
+                        std::future::poll_fn(|task_cx| {
+                            assert!(rollback.as_mut().poll(task_cx).is_pending());
+                            Poll::Ready(())
+                        })
+                        .await;
+                        reply_complete(&mut peer, "ROLLBACK", b'I');
+                        assert!(matches!(rollback.await, Outcome::Ok(())));
+                        assert_eq!(request_cx.cancel_reason(), Some(reason));
+                        assert!(!active_cx.is_cancel_requested());
+                        assert!(!conn.inner.closed);
+                        assert!(!conn.inner.needs_rollback);
+                        assert_eq!(conn.inner.transaction_status, b'I');
+                        assert_eq!(conn.needs_discard(), dirty);
+                        reply_complete(&mut peer, "UPDATE 1", b'I');
+                        assert!(matches!(
+                            conn.execute_unchecked(&active_cx, "UPDATE after_cleanup SET v = 1")
+                                .await,
+                            Outcome::Ok(1)
+                        ));
+                        assert_eq!(
+                            read_frontend_frame(&mut peer),
+                            (b'Q', b"UPDATE after_cleanup SET v = 1\0".to_vec())
+                        );
+                        conn.close().await.expect("close acknowledged rollback");
+                        assert_eq!(read_frontend_frame(&mut peer), (b'X', Vec::new()));
+                        assert_orphan_peer_closed(&mut peer, "cancelled rollback acknowledged");
+                    });
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn silent_pg_rollback_retires_on_cancel_without_forced_polls_or_peer_release() {
+        use crate::database::pool::AsyncConnectionManager;
+
+        for workers in [1, 2] {
+            for command_tag in [false, true] {
+                run_native_orphan_recovery_test(workers, move |request_cx| async move {
+                    let active_cx = Cx::current().expect("native rollback worker");
+                    let (mut conn, mut peer) = make_orphan_recovery_connection_with_peer();
+                    conn.inner.options.connect_timeout = Some(Duration::from_millis(50));
+                    reply_complete(&mut peer, "BEGIN", b'T');
+                    let tx = match conn.begin(&request_cx).await {
+                        Outcome::Ok(tx) => tx,
+                        _ => panic!("expected acknowledged BEGIN"),
+                    };
+                    assert_eq!(read_frontend_frame(&mut peer), (b'Q', b"BEGIN\0".to_vec()));
+                    if command_tag {
+                        std::io::Write::write_all(&mut peer, &command_complete_message("ROLLBACK"))
+                            .expect("write rollback tag without idle acknowledgement");
+                    }
+                    let mut rollback = Box::pin(tx.rollback(&request_cx));
+                    witness_managed_control_pending(
+                        rollback.as_mut(),
+                        &mut peer,
+                        &backend_message(b'Q', b"ROLLBACK\0"),
+                    )
+                    .await;
+                    let reason = CancelReason::user("silent PostgreSQL rollback peer");
+                    request_cx.cancel_with_reason(reason.clone());
+                    // Only the cancellation cleanup timer can release this
+                    // natural await. No response or test poll loop follows.
+                    assert!(matches!(
+                        rollback.await,
+                        Outcome::Cancelled(observed) if observed == reason
+                    ));
+                    assert_orphan_recovery_debt(&conn, false, "silent rollback");
+                    assert_eq!(conn.inner.transaction_status, b'T');
+                    let manager = PgConnectionManager::new(test_pg_connect_options());
+                    assert!(!manager.release_check(&mut conn));
+                    assert!(matches!(
+                        conn.execute_unchecked(&active_cx, "UPDATE must_not_run SET v = 1").await,
+                        Outcome::Err(PgError::ConnectionClosed)
+                    ));
+                    assert!(!active_cx.is_cancel_requested());
+                    // The caller still owns conn: timeout must already have
+                    // closed its real socket, not rely on eventual Drop.
+                    assert_orphan_peer_closed(&mut peer, "silent rollback retained connection");
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn borrowed_pg_helper_keeps_body_outcome_when_cancelled_rollback_peer_is_silent() {
+        use crate::database::transaction::{
+            ScopedTransactionFuture, with_pg_transaction_with_state,
+        };
+
+        for workers in [1, 2] {
+            for cancel_in_body in [false, true] {
+                run_native_orphan_recovery_test(workers, move |request_cx| async move {
+                    let active_cx = Cx::current().expect("native borrowed rollback worker");
+                    let (mut conn, mut peer) = make_orphan_recovery_connection_with_peer();
+                    conn.inner.options.connect_timeout = Some(Duration::from_millis(50));
+                    let owned = String::from("caller-owned PostgreSQL rollback state");
+                    let mut state = BorrowedControlState {
+                        result: owned.as_str(),
+                        calls: 0,
+                        fail_body: false,
+                        marker: std::cell::Cell::new(0),
+                    };
+                    let reason = CancelReason::user("cancel borrowed PostgreSQL cleanup");
+                    let body_reason = reason.clone();
+                    reply_complete(&mut peer, "BEGIN", b'T');
+                    let mut helper = Box::pin(with_pg_transaction_with_state(
+                        &mut conn,
+                        &request_cx,
+                        &mut state,
+                        move |_, body_cx, state| {
+                            ScopedTransactionFuture::new(async move {
+                                state.calls += 1;
+                                state.marker.set(state.calls);
+                                crate::runtime::yield_now().await;
+                                assert_eq!(state.result, "caller-owned PostgreSQL rollback state");
+                                if cancel_in_body {
+                                    body_cx.cancel_with_reason(body_reason.clone());
+                                    Outcome::<(), PgError>::Cancelled(body_reason)
+                                } else {
+                                    Outcome::Err(PgError::Protocol("original body failure".into()))
+                                }
+                            })
+                        },
+                    ));
+                    witness_managed_control_pending(
+                        helper.as_mut(),
+                        &mut peer,
+                        &ManagedControlCase::Rollback.request_frames(),
+                    )
+                    .await;
+                    if !cancel_in_body {
+                        request_cx.cancel_with_reason(reason.clone());
+                    }
+                    let outcome = helper.await;
+                    if cancel_in_body {
+                        assert!(matches!(
+                            outcome,
+                            Outcome::Cancelled(observed) if observed == reason
+                        ));
+                    } else {
+                        assert!(matches!(
+                            outcome,
+                            Outcome::Err(PgError::Protocol(message))
+                                if message == "original body failure"
+                        ));
+                    }
+                    assert_eq!(state.calls, 1);
+                    assert_eq!(state.marker.get(), 1);
+                    assert_eq!(state.result, owned);
+                    assert_orphan_recovery_debt(&conn, false, "borrowed silent rollback");
+                    assert!(matches!(
+                        conn.execute_unchecked(&active_cx, "UPDATE must_not_run SET v = 1").await,
+                        Outcome::Err(PgError::ConnectionClosed)
+                    ));
+                    assert!(!active_cx.is_cancel_requested());
+                    assert_orphan_peer_closed(&mut peer, "borrowed silent rollback");
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn healthy_pg_rollback_waits_beyond_the_cancellation_grace_for_its_acknowledgement() {
+        for workers in [1, 2] {
+            run_native_orphan_recovery_test(workers, |request_cx| async move {
+                let active_cx = Cx::current().expect("native rollback worker");
+                let (mut conn, mut peer) = make_orphan_recovery_connection_with_peer();
+                conn.inner.options.connect_timeout = Some(Duration::from_millis(20));
+                reply_complete(&mut peer, "BEGIN", b'T');
+                let tx = match conn.begin(&request_cx).await {
+                    Outcome::Ok(tx) => tx,
+                    _ => panic!("expected acknowledged BEGIN"),
+                };
+                assert_eq!(read_frontend_frame(&mut peer), (b'Q', b"BEGIN\0".to_vec()));
+                let mut rollback = Box::pin(tx.rollback(&request_cx));
+                witness_managed_control_pending(
+                    rollback.as_mut(),
+                    &mut peer,
+                    &backend_message(b'Q', b"ROLLBACK\0"),
+                )
+                .await;
+                crate::time::sleep_cx(&active_cx, Duration::from_millis(100))
+                    .await
+                    .expect("native delay beyond the configured cleanup grace");
+                std::future::poll_fn(|task_cx| {
+                    assert!(
+                        rollback.as_mut().poll(task_cx).is_pending(),
+                        "healthy rollback still needs the backend acknowledgement"
+                    );
+                    Poll::Ready(())
+                })
+                .await;
+                reply_complete(&mut peer, "ROLLBACK", b'I');
+                assert!(matches!(rollback.await, Outcome::Ok(())));
+                assert!(!request_cx.is_cancel_requested());
+                assert!(!conn.inner.closed);
+                assert!(!conn.inner.needs_rollback);
+                assert!(!conn.in_transaction());
+                drop(conn);
+                assert_eq!(read_frontend_frame(&mut peer), (b'X', Vec::new()));
+                assert_orphan_peer_closed(&mut peer, "healthy rollback acknowledged");
+            });
+        }
+    }
+
+    #[test]
+    fn acknowledged_pg_rollback_survives_its_own_task_cancellation() {
+        for workers in [1, 2] {
+            run_native_orphan_recovery_test(workers, |_| async move {
+                let parent_cx = Cx::current().expect("native rollback parent");
+                let mut child = parent_cx
+                    .spawn(|child_cx| async move {
+                        let (mut conn, mut peer) = make_orphan_recovery_connection_with_peer();
+                        reply_complete(&mut peer, "BEGIN", b'T');
+                        let tx = match conn.begin(&child_cx).await {
+                            Outcome::Ok(tx) => tx,
+                            _ => panic!("expected acknowledged BEGIN"),
+                        };
+                        assert_eq!(read_frontend_frame(&mut peer), (b'Q', b"BEGIN\0".to_vec()));
+                        child_cx.cancel_with_reason(CancelReason::user("cancel rollback owner"));
+                        let mut rollback = Box::pin(tx.rollback(&child_cx));
+                        witness_managed_control_pending(
+                            rollback.as_mut(),
+                            &mut peer,
+                            &backend_message(b'Q', b"ROLLBACK\0"),
+                        )
+                        .await;
+                        reply_complete(&mut peer, "ROLLBACK", b'I');
+                        let outcome = rollback.await;
+                        assert!(matches!(&outcome, Outcome::Ok(())));
+                        assert!(!conn.inner.closed);
+                        assert!(!conn.inner.needs_rollback);
+                        assert!(!conn.in_transaction());
+                        drop(conn);
+                        assert_eq!(read_frontend_frame(&mut peer), (b'X', Vec::new()));
+                        assert_orphan_peer_closed(&mut peer, "rollback task result");
+                        // No caller checkpoint after rollback: the method
+                        // itself must preserve the acknowledged domain result.
+                        outcome
+                    })
+                    .expect("spawn rollback owner");
+                assert!(matches!(
+                    child.join(&parent_cx).await,
+                    Ok(Outcome::Ok(()))
+                ));
+                assert!(!parent_cx.is_cancel_requested());
+            });
+        }
+    }
+
     #[test]
     fn managed_server_errors_resynchronize_without_claiming_transaction_success() {
         for workers in [1, 2] {
@@ -4984,6 +5266,7 @@ mod tests {
                         // The supplemental old-code reply is intentionally
                         // unread on the repaired path. Dispose of this fixture.
                         drop(conn);
+                        assert_eq!(read_frontend_frame(&mut peer), (b'X', Vec::new()));
                         assert_orphan_peer_closed(&mut peer, "helper refused idle commit");
                     }
                 });
