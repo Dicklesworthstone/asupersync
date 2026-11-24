@@ -1244,3 +1244,147 @@ fn native_replication_control_rejects_oversized_error_and_ambiguous_drop_without
         }
     }
 }
+
+#[test]
+fn native_slot_creation_retains_owner_cancellation_and_delivers_wire_cancel() {
+    for workers in [1, 2] {
+        let (listener, url) = listener();
+        let requested = Arc::new(AtomicBool::new(false));
+        let peer = {
+            let requested = Arc::clone(&requested);
+            std::thread::spawn(move || {
+                let mut socket = accept(&listener);
+                startup(&mut socket);
+                authenticate(&mut socket);
+                expect_slot_query(&mut socket,
+                    "CREATE_REPLICATION_SLOT \"slot_1\" LOGICAL pgoutput EXPORT_SNAPSHOT");
+                requested.store(true, Ordering::Release);
+                let mut cancel = accept(&listener);
+                let mut bytes = [0; 16];
+                cancel.read_exact(&mut bytes).unwrap();
+                assert_eq!(&bytes[0..4], &16i32.to_be_bytes());
+                assert_eq!(&bytes[4..8], &80_877_102i32.to_be_bytes());
+                assert_eq!(&bytes[8..12], &1234i32.to_be_bytes());
+                assert_eq!(&bytes[12..16], &5678i32.to_be_bytes());
+                closed(&mut socket);
+            })
+        };
+        let runtime = runtime(workers);
+        let owner = runtime.request_cx_with_budget(Budget::INFINITE);
+        let (parked_tx, parked_rx) = mpsc::channel();
+        let reason = CancelReason::user("initial replica copy abandoned");
+        let controller = {
+            let owner = owner.clone();
+            let reason = reason.clone();
+            std::thread::spawn(move || {
+                parked_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                owner.cancel_with_reason(reason);
+            })
+        };
+        runtime.block_on(async {
+            let poller = Cx::current().unwrap();
+            let wakes = cancel_waker_tokens(&poller);
+            let mut connection = ok(PgReplicationConnection::connect(&owner, &url).await);
+            let mut witnessed = false;
+            let outcome = {
+                let mut future = Box::pin(connection.create_slot(
+                    &poller, PgReplicationSlotOptions::new("slot_1").unwrap()));
+                poll_fn(|task| {
+                    let result = future.as_mut().poll(task);
+                    if result.is_pending() && !witnessed {
+                        if requested.load(Ordering::Acquire) {
+                            witnessed = true;
+                            parked_tx.send(()).unwrap();
+                        } else {
+                            task.waker().wake_by_ref();
+                        }
+                    }
+                    result
+                }).await
+            };
+            assert!(witnessed);
+            match outcome {
+                Outcome::Cancelled(actual) => assert_eq!(actual, reason),
+                other => panic!("owner cancellation was lost: {other:?}"),
+            }
+            assert!(poller.checkpoint().is_ok());
+            assert!(connection.connection.as_ref().unwrap().inner.closed);
+            assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+            assert_eq!(cancel_waker_tokens(&poller), wakes);
+        });
+        controller.join().unwrap();
+        peer.join().unwrap();
+        assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+    }
+}
+
+#[test]
+fn native_dropped_snapshot_import_closes_uncertain_transaction_and_keeps_slot_owner() {
+    use super::super::IsolationLevel;
+    for workers in [1, 2] {
+        let (listener, url) = listener();
+        let importing = Arc::new(AtomicBool::new(false));
+        let peer = {
+            let importing = Arc::clone(&importing);
+            std::thread::spawn(move || {
+                let mut socket = accept(&listener);
+                startup(&mut socket);
+                authenticate(&mut socket);
+                expect_slot_query(&mut socket,
+                    "CREATE_REPLICATION_SLOT \"slot_1\" LOGICAL pgoutput EXPORT_SNAPSHOT");
+                socket.write_all(&created_slot_response(Some("00000003-0000001B-1"))).unwrap();
+                let mut copy = snapshot_transaction_peer(&listener);
+                expect_slot_query(&mut copy,
+                    "SET TRANSACTION SNAPSHOT '00000003-0000001B-1'");
+                copy.write_all(&[b'C', 0, 0]).unwrap();
+                importing.store(true, Ordering::Release);
+                closed(&mut copy);
+                // An abandoned ordinary-connection import must not terminate
+                // the dedicated slot owner or send DROP SLOT.
+                expect_slot_query(&mut socket, "IDENTIFY_SYSTEM");
+                socket.write_all(&slot_result(
+                    &[("systemid", 25), ("timeline", 23), ("xlogpos", 25), ("dbname", 25)],
+                    &[Some("1"), Some("1"), Some("0/80"), Some("application")],
+                    "IDENTIFY_SYSTEM", b'I',
+                )).unwrap();
+                closed(&mut socket);
+            })
+        };
+        let runtime = runtime(workers);
+        runtime.block_on(async {
+            let cx = Cx::current().unwrap();
+            let wakes = cancel_waker_tokens(&cx);
+            let mut connection = ok(PgReplicationConnection::connect(&cx, &url).await);
+            let slot = ok(connection.create_slot(&cx,
+                PgReplicationSlotOptions::new("slot_1").unwrap()).await);
+            let mut copy = ok(PgConnection::connect(&cx, &url).await);
+            let mut transaction = match copy.begin_with_isolation(
+                &cx, IsolationLevel::RepeatableRead, true).await
+            {
+                Outcome::Ok(transaction) => transaction,
+                _ => panic!("snapshot transaction failed to begin"),
+            };
+            {
+                let mut future = Box::pin(slot.import_snapshot(&cx, &mut transaction));
+                poll_fn(|task| {
+                    assert!(future.as_mut().poll(task).is_pending());
+                    if importing.load(Ordering::Acquire) {
+                        Poll::Ready(())
+                    } else {
+                        task.waker().wake_by_ref();
+                        Poll::Pending
+                    }
+                }).await;
+            }
+            assert!(transaction.requires_rollback_before_commit());
+            assert!(matches!(transaction.commit(&cx).await,
+                Outcome::Err(PgError::Protocol(_))));
+            assert!(copy.inner.closed);
+            drop(slot);
+            assert_eq!(ok(connection.identify_system(&cx).await).timeline, 1);
+            assert_eq!(cancel_waker_tokens(&cx), wakes);
+        });
+        peer.join().unwrap();
+        assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+    }
+}

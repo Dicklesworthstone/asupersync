@@ -1029,7 +1029,10 @@ where
     let (ordered, output) = mpsc::channel(output_capacity.get());
     workers.push(Box::new(move |worker_cx| {
         Box::pin(pipeline_ordered_output::<U, E>(
-            worker_cx, completions, ordered, stage,
+            worker_cx,
+            completions,
+            ordered,
+            stage,
         ))
     }));
     output
@@ -1059,7 +1062,9 @@ where
                     .await
                 {
                     Ok(receiver) => receiver,
-                    Err(crate::sync::LockError::Cancelled) => return pipeline_cancelled(&worker_cx),
+                    Err(crate::sync::LockError::Cancelled) => {
+                        return pipeline_cancelled(&worker_cx);
+                    }
                     Err(error) => {
                         return Outcome::Panicked(PanicPayload::new(format!(
                             "pipeline concurrent input lock: {error}"
@@ -2517,9 +2522,11 @@ mod concurrent_builder_tests {
                 0..0_usize,
                 PipelineExecutionConfig::new(capacity, NonZeroUsize::new(window).unwrap()),
             )
-            .then_concurrent(capacity, NonZeroUsize::new(requested).unwrap(), |_, value| async move {
-                Outcome::<_, ()>::Ok(value)
-            })
+            .then_concurrent(
+                capacity,
+                NonZeroUsize::new(requested).unwrap(),
+                |_, value| async move { Outcome::<_, ()>::Ok(value) },
+            )
             .then(capacity, |_, value| async move { Outcome::Ok(value) });
             let inner = pipeline.inner.as_ref().unwrap();
             assert_eq!(inner.stages, 2);
@@ -2561,22 +2568,23 @@ mod concurrent_builder_tests {
                         _ => match stronger {
                             0 => {}
                             1 => owner.record(9, pipeline_cancelled(&cx)),
-                            _ => owner.record(
-                                9,
-                                Outcome::Panicked(PanicPayload::new("cleanup panic")),
-                            ),
+                            _ => owner
+                                .record(9, Outcome::Panicked(PanicPayload::new("cleanup panic"))),
                         },
                     }
                 }
                 let report = owner.finish();
-                assert!(matches!(
-                    report.error(),
-                    Some(PipelineExecutionError::Stage {
-                        stage: 0,
-                        input: 0,
-                        error: "first input",
-                    })
-                ), "order={order:?}, stronger={stronger}: {report:?}");
+                assert!(
+                    matches!(
+                        report.error(),
+                        Some(PipelineExecutionError::Stage {
+                            stage: 0,
+                            input: 0,
+                            error: "first input",
+                        })
+                    ),
+                    "order={order:?}, stronger={stronger}: {report:?}"
+                );
                 assert_eq!(report.outcome.is_err(), stronger == 0);
                 assert_eq!(report.outcome.is_cancelled(), stronger == 1);
                 assert_eq!(report.outcome.is_panicked(), stronger == 2);

@@ -1063,41 +1063,45 @@ async fn stream_pipeline_journey(cx: Cx, cancel: bool) {
     let source_pulls = Arc::clone(&pulls);
     let values = Arc::new(crate::sync::pl::Mutex::new(Vec::new()));
     let delivered = Arc::clone(&values);
-    let mut operation = cx.spawn(move |owner| async move {
-        let input = ChannelInput {
-            receiver,
-            // The source has no subscription to its caller's cancellation.
-            read_context: Cx::detached_cancel_context(),
-            parked: source_probe,
-            pulls: source_pulls,
-        };
-        let mut gate = Some(gate);
-        ScopedPipelineExecution::from_stream(&owner, input, config(1))
-            .then(capacity(1), |_child, value| async move {
-                Outcome::<_, ()>::Ok(value * 2)
-            })
-            .run(move |sink, value| {
-                let probe = Arc::clone(&sink_probe);
-                let gate = gate.take();
-                let delivered = Arc::clone(&delivered);
-                async move {
-                    if let Some(mut gate) = gate {
-                        let mut waiting = std::pin::pin!(gate.recv(&sink));
-                        poll_fn(|task| {
-                            let result = waiting.as_mut().poll(task);
-                            if result.is_pending() {
-                                probe.note(&probe.parked);
-                            }
-                            result
-                        }).await.unwrap();
+    let mut operation = cx
+        .spawn(move |owner| async move {
+            let input = ChannelInput {
+                receiver,
+                // The source has no subscription to its caller's cancellation.
+                read_context: Cx::detached_cancel_context(),
+                parked: source_probe,
+                pulls: source_pulls,
+            };
+            let mut gate = Some(gate);
+            ScopedPipelineExecution::from_stream(&owner, input, config(1))
+                .then(capacity(1), |_child, value| async move {
+                    Outcome::<_, ()>::Ok(value * 2)
+                })
+                .run(move |sink, value| {
+                    let probe = Arc::clone(&sink_probe);
+                    let gate = gate.take();
+                    let delivered = Arc::clone(&delivered);
+                    async move {
+                        if let Some(mut gate) = gate {
+                            let mut waiting = std::pin::pin!(gate.recv(&sink));
+                            poll_fn(|task| {
+                                let result = waiting.as_mut().poll(task);
+                                if result.is_pending() {
+                                    probe.note(&probe.parked);
+                                }
+                                result
+                            })
+                            .await
+                            .unwrap();
+                        }
+                        delivered.lock().push(value);
+                        Outcome::Ok(())
                     }
-                    delivered.lock().push(value);
-                    Outcome::Ok(())
-                }
-            })
-            .await
-            .unwrap()
-    }).unwrap();
+                })
+                .await
+                .unwrap()
+        })
+        .unwrap();
 
     source_seen.wait(|s| s.parked.load(Ordering::Acquire)).await;
     if cancel {
@@ -1133,9 +1137,8 @@ async fn stream_pipeline_journey(cx: Cx, cancel: bool) {
 #[test]
 fn scoped_pipeline_stream_backpressure_and_silent_source_cancellation() {
     for cancel in [false, true] {
-        let ((), report) = run_async_under_lab(0x32_4010, move |cx| {
-            stream_pipeline_journey(cx, cancel)
-        });
+        let ((), report) =
+            run_async_under_lab(0x32_4010, move |cx| stream_pipeline_journey(cx, cancel));
         assert!(report.quiescent && report.invariant_violations.is_empty());
     }
 }
@@ -1159,7 +1162,9 @@ fn scope_pipeline_stream_worker_failure_interrupts_a_pending_next_item() {
             parked: Arc::clone(&parked),
             pulls: Arc::new(AtomicUsize::new(0)),
         };
-        let report = cx.scope().pipeline_stream(&cx, config(2), input)
+        let report = cx
+            .scope()
+            .pipeline_stream(&cx, config(2), input)
             .then(capacity(1), move |_stage, value| {
                 let parked = Arc::clone(&parked);
                 async move {
@@ -1172,9 +1177,14 @@ fn scope_pipeline_stream_worker_failure_interrupts_a_pending_next_item() {
             })
             .run(|_sink, _value| async { panic!("failed item reached sink") })
             .await;
-        assert!(matches!(report.error(), Some(PipelineExecutionError::Stage {
-            input: 0, stage: 0, error: "failed transform"
-        })));
+        assert!(matches!(
+            report.error(),
+            Some(PipelineExecutionError::Stage {
+                input: 0,
+                stage: 0,
+                error: "failed transform"
+            })
+        ));
         assert_eq!(report.summary.admitted, 1);
         assert_eq!(report.summary.consumed, 0);
         drop(sender);
@@ -1245,7 +1255,8 @@ async fn concurrent_pipeline_ordered_journey(cx: Cx) {
                         }
                         if value == 0 {
                             let mut waiting = std::pin::pin!(
-                                seen.changed.wait_until(|| seen.release_first.load(Ordering::Acquire))
+                                seen.changed
+                                    .wait_until(|| seen.release_first.load(Ordering::Acquire))
                             );
                             poll_fn(|task| {
                                 let result = waiting.as_mut().poll(task);
@@ -1301,8 +1312,7 @@ async fn concurrent_pipeline_ordered_journey(cx: Cx) {
 
     seen.changed
         .wait_until(|| {
-            seen.first_pending.load(Ordering::Acquire)
-                && seen.completed.load(Ordering::SeqCst) == 5
+            seen.first_pending.load(Ordering::Acquire) && seen.completed.load(Ordering::SeqCst) == 5
         })
         .await;
     // Input zero is genuinely pending while every later input in the work
@@ -1316,7 +1326,9 @@ async fn concurrent_pipeline_ordered_journey(cx: Cx) {
 
     seen.release_first.store(true, Ordering::Release);
     seen.changed.notify_waiters();
-    sink_seen.wait(|state| state.parked.load(Ordering::Acquire)).await;
+    sink_seen
+        .wait(|state| state.parked.load(Ordering::Acquire))
+        .await;
     // Reordering has completed, but the first asynchronous sink effect has not
     // acknowledged. None of those six original credits may be released yet.
     assert_eq!(pulls.load(Ordering::SeqCst), 6);
@@ -1332,7 +1344,9 @@ async fn concurrent_pipeline_ordered_journey(cx: Cx) {
     assert_eq!(seen.active.load(Ordering::SeqCst), 0);
     assert_eq!(
         *delivered.lock(),
-        (0..9).map(|value| format!("item:{}", value * 2 + 1)).collect::<Vec<_>>()
+        (0..9)
+            .map(|value| format!("item:{}", value * 2 + 1))
+            .collect::<Vec<_>>()
     );
     assert!(report.close.is_ok(), "{report:?}");
 }
@@ -1356,20 +1370,20 @@ async fn concurrent_pipeline_failed_later_input_journey(cx: Cx, cleanup_panics: 
                             held_descendant(stage, sender, seen, cleanup, cleanup_panics).await;
                             Outcome::Ok(value)
                         } else {
-                            seen.wait(|state| state.parked.load(Ordering::Acquire)).await;
+                            seen.wait(|state| state.parked.load(Ordering::Acquire))
+                                .await;
                             Outcome::Err("later concurrent input failed")
                         }
                     }
                 })
-                .run(|_sink, _value| async {
-                    panic!("a failed prefix must not reach the sink")
-                })
+                .run(|_sink, _value| async { panic!("a failed prefix must not reach the sink") })
                 .await
                 .unwrap()
         })
         .unwrap();
 
-    seen.wait(|state| state.cleaning.load(Ordering::Acquire)).await;
+    seen.wait(|state| state.cleaning.load(Ordering::Acquire))
+        .await;
     // The later input's error must cancel a genuinely parked first transform.
     // Its cleanup holds a checked send permit across another Pending, so a
     // terminal report or region-close receipt at this point would be premature.
@@ -1377,16 +1391,27 @@ async fn concurrent_pipeline_failed_later_input_journey(cx: Cx, cleanup_panics: 
     assert!(!seen.retired.load(Ordering::Acquire));
     release.send_blocking(()).unwrap();
     let report = operation.join(&cx).await.unwrap();
-    assert_eq!(report.execution.outcome.is_panicked(), cleanup_panics, "{report:?}");
-    assert_eq!(report.execution.outcome.is_cancelled(), !cleanup_panics, "{report:?}");
-    assert!(matches!(
-        report.execution.error(),
-        Some(PipelineExecutionError::Stage {
-            stage: 0,
-            input: 1,
-            error: "later concurrent input failed",
-        })
-    ), "{report:?}");
+    assert_eq!(
+        report.execution.outcome.is_panicked(),
+        cleanup_panics,
+        "{report:?}"
+    );
+    assert_eq!(
+        report.execution.outcome.is_cancelled(),
+        !cleanup_panics,
+        "{report:?}"
+    );
+    assert!(
+        matches!(
+            report.execution.error(),
+            Some(PipelineExecutionError::Stage {
+                stage: 0,
+                input: 1,
+                error: "later concurrent input failed",
+            })
+        ),
+        "{report:?}"
+    );
     assert_eq!(report.execution.summary.admitted, 2);
     assert_eq!(report.execution.summary.consumed, 0);
     assert_eq!(report.execution.summary.stages, 1);
@@ -1426,7 +1451,10 @@ async fn concurrent_pipeline_small_inputs_journey(cx: Cx) {
         assert_eq!(report.summary.consumed, count);
         assert!(report.summary.max_in_flight <= window);
         assert_eq!(transformed.load(Ordering::SeqCst), count);
-        assert_eq!(*output.lock(), (0..count).map(|value| value * 3).collect::<Vec<_>>());
+        assert_eq!(
+            *output.lock(),
+            (0..count).map(|value| value * 3).collect::<Vec<_>>()
+        );
     }
 }
 
