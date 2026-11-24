@@ -244,6 +244,68 @@ fn custom_clock_context(timer: &TimerDriverHandle) -> Cx {
 }
 
 #[test]
+fn explicit_deadline_without_driver_never_starts_a_fallback_waiter() {
+    fn unrelated_clock() -> Time {
+        Time::from_secs(10_000)
+    }
+
+    let _current = Cx::set_current(None);
+    let deadline = Time::from_secs(5);
+    let mut task = Context::from_waker(Waker::noop());
+    for custom_getter in [false, true] {
+        let mut sleep = if custom_getter {
+            Sleep::with_time_getter(deadline, unrelated_clock)
+        } else {
+            Sleep::new(deadline)
+        };
+        for now in [Time::ZERO, Time::from_secs(1), Time::from_secs(4)] {
+            assert!(
+                Pin::new(&mut sleep)
+                    .poll_deadline_with_time(&mut task, Some(now))
+                    .is_pending()
+            );
+            let state = sleep.state.lock();
+            assert!(state.fallback.is_none(), "manual time has no thread waiter");
+            assert!(state.zombie_fallbacks.is_empty());
+            assert!(state.timer_handle.is_none());
+            assert!(state.timer_driver.is_none());
+            assert!(state.waker.is_none(), "manual polling retains no task waker");
+        }
+        assert!(
+            Pin::new(&mut sleep)
+                .poll_deadline_with_time(&mut task, Some(deadline))
+                .is_ready()
+        );
+    }
+}
+
+#[test]
+fn explicit_deadline_without_driver_retires_an_earlier_registration() {
+    let _current = Cx::set_current(None);
+    let clock = Arc::new(VirtualClock::new());
+    let timer = TimerDriverHandle::with_virtual_clock(clock);
+    let mut sleep = Sleep::new(Time::from_secs(5));
+    let mut task = Context::from_waker(Waker::noop());
+    {
+        let _owner = Cx::set_current(Some(custom_clock_context(&timer)));
+        assert!(Pin::new(&mut sleep).poll_deadline(&mut task).is_pending());
+        assert_eq!(timer.pending_count(), 1);
+    }
+
+    assert!(
+        Pin::new(&mut sleep)
+            .poll_deadline_with_time(&mut task, Some(Time::ZERO))
+            .is_pending()
+    );
+    assert_eq!(timer.pending_count(), 0);
+    let state = sleep.state.lock();
+    assert!(state.timer_handle.is_none());
+    assert!(state.timer_driver.is_none());
+    assert!(state.fallback.is_none());
+    assert!(state.waker.is_none());
+}
+
+#[test]
 fn custom_clock_sleep_translates_remaining_duration_across_epochs() {
     for (driver_start, custom_start) in [(100, 0), (0, 100), (100, 100)] {
         let clock = Arc::new(VirtualClock::new());
