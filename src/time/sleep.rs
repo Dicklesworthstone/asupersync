@@ -303,14 +303,6 @@ struct SleepState {
     timer_handle: Option<TimerHandle>,
     /// Timer driver used to register the current handle.
     timer_driver: Option<TimerDriverHandle>,
-    /// True when the current registration was CLAMPED because the true deadline
-    /// exceeds the driver's timer horizon: the wheel will fire early at the
-    /// horizon as a re-arm signal, so `Future::poll` must re-register for the
-    /// remaining duration instead of completing. A latched fire with
-    /// `registered_partial == false` is authoritative completion, even across a
-    /// driver migration whose clock reads before the deadline
-    /// (br-asupersync-sleep-horizon-early-youlxs).
-    registered_partial: bool,
 }
 
 #[derive(Debug)]
@@ -403,6 +395,9 @@ pub struct Sleep {
     completed: crate::sync::atomic::AtomicBool,
     /// Whether a timer/fallback wake has already made this sleep ready.
     ready: Arc<AtomicBool>,
+    /// Only the currently installed wheel-horizon wake may request a re-arm.
+    /// A dequeued waker can run after a different timer has been installed.
+    partial_ready: Option<Arc<AtomicBool>>,
     /// Shared state for background waiter thread.
     state: Arc<Mutex<SleepState>>,
 }
@@ -433,13 +428,13 @@ impl Sleep {
             polled: crate::sync::atomic::AtomicBool::new(false),
             completed: crate::sync::atomic::AtomicBool::new(false),
             ready: Arc::new(AtomicBool::new(false)),
+            partial_ready: None,
             state: Arc::new(Mutex::new(SleepState {
                 waker: None,
                 fallback: None,
                 zombie_fallbacks: Vec::new(),
                 timer_handle: None,
                 timer_driver: None,
-                registered_partial: false,
             })),
         }
     }
@@ -491,13 +486,13 @@ impl Sleep {
             polled: crate::sync::atomic::AtomicBool::new(false),
             completed: crate::sync::atomic::AtomicBool::new(false),
             ready: Arc::new(AtomicBool::new(false)),
+            partial_ready: None,
             state: Arc::new(Mutex::new(SleepState {
                 waker: None,
                 fallback: None,
                 zombie_fallbacks: Vec::new(),
                 timer_handle: None,
                 timer_driver: None,
-                registered_partial: false,
             })),
         }
     }
@@ -517,13 +512,13 @@ impl Sleep {
             polled: crate::sync::atomic::AtomicBool::new(false),
             completed: crate::sync::atomic::AtomicBool::new(false),
             ready: Arc::new(AtomicBool::new(false)),
+            partial_ready: None,
             state: Arc::new(Mutex::new(SleepState {
                 waker: None,
                 fallback: None,
                 zombie_fallbacks: Vec::new(),
                 timer_handle: None,
                 timer_driver: None,
-                registered_partial: false,
             })),
         }
     }
@@ -585,6 +580,7 @@ impl Sleep {
         self.completed
             .store(false, crate::sync::atomic::Ordering::Relaxed);
         self.ready = Arc::new(AtomicBool::new(false));
+        self.partial_ready = None;
         let (handle, driver, fallback_handles) = {
             let mut state = self.state.lock();
             state.waker = None;
@@ -593,10 +589,6 @@ impl Sleep {
                 request_stop_fallback(&fallback);
                 handles.push(fallback.join);
             }
-            // The new deadline gets a fresh registration on the next poll; clear
-            // the clamp flag so it is recomputed rather than left stale
-            // (br-asupersync-sleep-horizon-early-youlxs).
-            state.registered_partial = false;
             (
                 state.timer_handle.take(),
                 state.timer_driver.take(),
@@ -664,7 +656,6 @@ impl Sleep {
     ) {
         let mut state = self.state.lock();
         state.waker = None;
-        state.registered_partial = false;
 
         let mut fallback_handles = std::mem::take(&mut state.zombie_fallbacks);
         if let Some(fallback) = state.fallback.take() {
@@ -766,7 +757,7 @@ impl Sleep {
     /// elapsed time. Only this timer skips the cancellation checkpoint; its
     /// wrapped operation can still observe cancellation and finish cleanup.
     pub(crate) fn poll_deadline(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        self.poll_inner(cx, false)
+        self.get_mut().poll_inner(cx, false)
     }
 
     pub(crate) fn poll_ready_with_time(&self, now: Time) -> Poll<()> {
@@ -793,17 +784,18 @@ impl Sleep {
     /// the logical deadline. An ordinary, full registration remains
     /// authoritative even if polling migrates to an earlier clock.
     fn take_elapsed_wake(&self, now: Time) -> bool {
-        if !self.ready.swap(false, Ordering::AcqRel) {
-            return false;
+        let full = self.ready.swap(false, Ordering::AcqRel);
+        let partial = self
+            .partial_ready
+            .as_ref()
+            .is_some_and(|ready| ready.swap(false, Ordering::AcqRel));
+        if full && (self.time_getter.is_none() || now >= self.deadline) {
+            return true;
         }
-        if now < self.deadline {
-            let partial = self.state.lock().registered_partial;
-            if partial || self.time_getter.is_some() {
-                self.cancel_active_registration();
-                return false;
-            }
+        if now < self.deadline && (full || partial) {
+            self.cancel_active_registration();
         }
-        true
+        false
     }
 }
 
@@ -811,13 +803,13 @@ impl Future for Sleep {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        self.poll_inner(cx, true)
+        self.get_mut().poll_inner(cx, true)
     }
 }
 
 impl Sleep {
     #[allow(clippy::too_many_lines)]
-    fn poll_inner(self: Pin<&mut Self>, cx: &mut Context<'_>, cancel_aware: bool) -> Poll<()> {
+    fn poll_inner(&mut self, cx: &mut Context<'_>, cancel_aware: bool) -> Poll<()> {
         assert!(
             !self.completed.load(crate::sync::atomic::Ordering::Acquire),
             "Sleep polled after completion"
@@ -979,13 +971,20 @@ impl Sleep {
                     let registered_partial =
                         timer_deadline > timer_now.saturating_add_nanos(horizon_ns);
 
+                    // Full fires belong to this deadline across migrations. Partial
+                    // fires belong only to this registration: a detached wheel batch
+                    // must never mark its replacement's deadline as elapsed.
+                    let mut registration_waker = || {
+                        self.partial_ready =
+                            registered_partial.then(|| Arc::new(AtomicBool::new(false)));
+                        let latch = self.partial_ready.as_ref().unwrap_or(&self.ready);
+                        readiness_waker(Arc::clone(latch), cx.waker().clone())
+                    };
+
                     let mut armed = false;
                     if state.timer_handle.is_none() {
                         // Register new timer
-                        let handle = timer.register(
-                            timer_deadline,
-                            readiness_waker(Arc::clone(&self.ready), cx.waker().clone()),
-                        );
+                        let handle = timer.register(timer_deadline, registration_waker());
                         if let Some(trace) = trace.as_ref() {
                             trace.record_event(|seq| {
                                 TraceEvent::timer_scheduled(
@@ -997,17 +996,13 @@ impl Sleep {
                             });
                         }
                         state.timer_handle = Some(handle);
-                        state.registered_partial = registered_partial;
                         armed = true;
                     } else if waker_changed {
                         // Update existing timer with new waker
                         if let Some(handle) = state.timer_handle.take() {
                             let old_id = handle.id();
-                            let mut new_handle = timer.update(
-                                &handle,
-                                timer_deadline,
-                                readiness_waker(Arc::clone(&self.ready), cx.waker().clone()),
-                            );
+                            let mut new_handle =
+                                timer.update(&handle, timer_deadline, registration_waker());
                             // `update` returns a handle the wheel has already
                             // retired unchanged and registers nothing: the timer
                             // fired after this poll checked `ready`, and its wake
@@ -1021,13 +1016,8 @@ impl Sleep {
                                 if self.ready.load(Ordering::Acquire) {
                                     cx.waker().wake_by_ref();
                                 } else {
-                                    new_handle = timer.register(
-                                        timer_deadline,
-                                        readiness_waker(
-                                            Arc::clone(&self.ready),
-                                            cx.waker().clone(),
-                                        ),
-                                    );
+                                    new_handle =
+                                        timer.register(timer_deadline, registration_waker());
                                 }
                             }
                             if let Some(trace) = trace.as_ref() {
@@ -1044,7 +1034,6 @@ impl Sleep {
                                 });
                             }
                             state.timer_handle = Some(new_handle);
-                            state.registered_partial = registered_partial;
                             armed = true;
                         }
                     }
@@ -1058,6 +1047,7 @@ impl Sleep {
                     }
                 } else {
                     // No timer driver; cancel any existing registration.
+                    self.partial_ready = None;
                     if let Some(prev_driver) = state.timer_driver.take() {
                         if let Some(old_handle) = state.timer_handle.take() {
                             if let Some(trace) = trace.as_ref() {
@@ -1194,13 +1184,13 @@ impl Clone for Sleep {
             polled: crate::sync::atomic::AtomicBool::new(false), // Fresh clone hasn't been polled
             completed: crate::sync::atomic::AtomicBool::new(false),
             ready: Arc::new(AtomicBool::new(false)),
+            partial_ready: None,
             state: Arc::new(Mutex::new(SleepState {
                 waker: None,
                 fallback: None,
                 zombie_fallbacks: Vec::new(),
                 timer_handle: None, // Fresh clone has no timer registration
                 timer_driver: None,
-                registered_partial: false,
             })),
         }
     }

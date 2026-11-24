@@ -66,6 +66,44 @@ fn timer_publication_wakes_shared_reactors_only_for_earlier_deadlines() {
 }
 
 #[test]
+fn delayed_horizon_wake_cannot_complete_rearmed_sleep() {
+    use crate::time::Sleep;
+    use std::pin::Pin;
+    use std::task::Context;
+
+    let clock = Arc::new(VirtualClock::new());
+    let driver = Arc::new(TimerDriver::with_clock(Arc::clone(&clock)));
+    let handle = TimerDriverHandle::new(Arc::clone(&driver));
+    let horizon = Time::ZERO + handle.max_timer_duration();
+    let deadline = horizon + Duration::from_secs(1);
+    let mut sleep = Sleep::with_timer_driver(deadline, handle);
+
+    let mut first = Context::from_waker(Waker::noop());
+    assert!(Pin::new(&mut sleep).poll_deadline(&mut first).is_pending());
+    clock.set(horizon);
+    let batch = driver.collect_expired();
+    assert_eq!(batch.len(), 1);
+
+    // The old registration has left the wheel, but its wake has not run.
+    // Polling on a different task installs a full timer for the final second.
+    let flag = Arc::new(AtomicBool::new(false));
+    let replacement = waker_that_sets(Arc::clone(&flag));
+    let mut next = Context::from_waker(&replacement);
+    assert!(Pin::new(&mut sleep).poll_deadline(&mut next).is_pending());
+    assert_eq!(driver.next_deadline(), Some(deadline));
+    for stale in batch {
+        stale.wake();
+    }
+    assert!(sleep.poll_with_time(horizon).is_pending());
+    assert_eq!(driver.pending_count(), 1, "replacement must stay armed");
+
+    clock.set(deadline);
+    assert_eq!(driver.process_timers(), 1);
+    assert!(flag.load(Ordering::Acquire));
+    assert!(Pin::new(&mut sleep).poll_deadline(&mut next).is_ready());
+}
+
+#[test]
 fn timer_publication_compares_the_clamped_wake_deadline() {
     use crate::runtime::reactor::LabReactor;
 

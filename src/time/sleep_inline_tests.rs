@@ -352,7 +352,7 @@ fn custom_clock_horizon_wake_does_not_complete_the_wait() {
     let waker = noop_waker();
     let mut cx = Context::from_waker(&waker);
     assert!(Pin::new(&mut sleep).poll(&mut cx).is_pending());
-    assert!(sleep.state.lock().registered_partial);
+    assert!(sleep.partial_ready.is_some());
 
     let horizon = duration_to_nanos(timer.max_timer_duration());
     clock.set(Time::from_secs(100).saturating_add_nanos(horizon));
