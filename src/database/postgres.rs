@@ -4078,16 +4078,10 @@ struct PgConnectionInner {
     explicitly_closed: bool,
     /// Whether a rollback is needed before the next operation (orphaned transaction).
     needs_rollback: bool,
-    /// br-asupersync-yl4gu1: whether this connection must NOT be returned
-    /// to a pool. Set when a `PgTransaction` was dropped without commit
-    /// AND the rollback could not be issued synchronously (which is the
-    /// always case in Drop). The pool's return path checks this flag and
-    /// closes the connection instead of recycling it — preventing the
-    /// next tenant from inheriting an `idle_in_transaction` backend with
-    /// locks held. Combined with the existing `needs_rollback` flag,
-    /// callers that DO continue using the same connection (without
-    /// returning to a pool) still get the ROLLBACK on the next op; the
-    /// pool case (drop-then-return) gets a clean conn close instead.
+    /// Persistent session dirtiness from commands such as SET/RESET/DISCARD.
+    /// Rolling back a later transaction does not prove that earlier session
+    /// changes were undone. Temporary pool exclusion for an orphaned
+    /// transaction is derived from `needs_rollback` by `needs_discard()`.
     needs_discard: bool,
     /// Counter for generating unique prepared statement names. It carries
     /// over a transparent reconnect, so a name is never reused.
@@ -5395,6 +5389,7 @@ impl PgConnection {
         let mut reader = MessageReader::new(data);
         let name = reader.read_cstring()?.to_string();
         let value = reader.read_cstring()?.to_string();
+        reader.ensure_consumed("ParameterStatus")?;
         let bytes = name.len().saturating_add(value.len());
         if bytes > MAX_SERVER_PARAMETER_BYTES
             || (self.inner.parameters.len() >= MAX_SERVER_PARAMETERS
@@ -7574,21 +7569,18 @@ impl PgConnection {
             Outcome::Ok(_) => {}
             Outcome::Err(err) => {
                 self.inner.needs_rollback = true;
-                self.inner.needs_discard = true;
                 cx.trace(&format!(
                     "begin_with_isolation cleanup rollback failed; marking connection for orphan cleanup: {err}"
                 ));
             }
             Outcome::Cancelled(reason) => {
                 self.inner.needs_rollback = true;
-                self.inner.needs_discard = true;
                 cx.trace(&format!(
                     "begin_with_isolation cleanup rollback was cancelled; marking connection for orphan cleanup: {reason}"
                 ));
             }
             Outcome::Panicked(_) => {
                 self.inner.needs_rollback = true;
-                self.inner.needs_discard = true;
                 cx.trace(
                     "begin_with_isolation cleanup rollback panicked; marking connection for orphan cleanup",
                 );
@@ -7622,10 +7614,11 @@ impl PgConnection {
     /// close the connection (`Self::close`) instead of returning it
     /// to the idle list. Failing to do so leaks an
     /// `idle_in_transaction` backend with locks held to the next
-    /// tenant.
+    /// tenant. Successful orphan rollback releases that temporary exclusion,
+    /// but does not clear independent session dirtiness from SET/RESET/DISCARD.
     #[must_use]
     pub fn needs_discard(&self) -> bool {
-        self.inner.needs_discard
+        self.inner.needs_discard || self.inner.needs_rollback
     }
 
     /// Returns the prepared-statement cache effectiveness counters
@@ -8782,9 +8775,9 @@ impl PgConnection {
 
     /// Clear an orphaned transaction left by a dropped `PgTransaction`.
     ///
-    /// If `needs_rollback` is set, sends a ROLLBACK command and drains
-    /// to `ReadyForQuery` before returning. This prevents the connection
-    /// from being stuck in an aborted-transaction state.
+    /// If `needs_rollback` is set, require a successful ROLLBACK completion
+    /// and an idle `ReadyForQuery` before admitting any caller operation.
+    /// A synchronization marker alone does not prove rollback succeeded.
     async fn clear_orphaned_transaction(&mut self, cx: &Cx) -> Result<(), PgError> {
         if !self.inner.needs_rollback {
             return Ok(());
@@ -8800,29 +8793,80 @@ impl PgConnection {
         let msg = buf.build_message(FrontendMessage::Query as u8)?;
 
         if let Err(e) = self.write_all(cx, &msg).await {
-            let _ = self.inner.stream.shutdown(std::net::Shutdown::Both);
+            self.abort_in_flight_exchange();
             return Err(e);
         }
 
-        if let Err(e) = self.drain_to_ready(cx).await {
-            // Drain errors during rollback are suppressed since the rollback
-            // itself is the priority operation and a drain failure at that
-            // point is non-fatal.
-            let _ = self.inner.stream.shutdown(std::net::Shutdown::Both);
-            cx.trace(&format!("Failed to drain after ROLLBACK: {e}"));
+        if let Err(e) = self.read_orphaned_rollback_response(cx).await {
+            // Never send queued caller SQL after a refused or unproven
+            // rollback, even if the peer sent a ReadyForQuery marker.
+            self.abort_in_flight_exchange();
+            cx.trace(&format!("Failed to acknowledge orphaned ROLLBACK: {e}"));
             return Err(e);
         }
 
-        // Successfully rolled back, restore connection state.
+        // Only this transaction's debt was resolved. Session dirtiness may
+        // predate BEGIN and must still prevent returning the connection to a pool.
         self.inner.needs_rollback = false;
-        // br-asupersync-yl4gu1: rollback completed cleanly, so the
-        // connection is safe to recycle into the pool again. Clear
-        // the discard flag now that the orphaned-transaction state
-        // is provably resolved.
-        self.inner.needs_discard = false;
         self.inner.closed = false;
 
         Ok(())
+    }
+
+    /// Validate the response to the single fixed ROLLBACK recovery command.
+    /// Keep the connection closed until both command success and transaction
+    /// termination have been established; generic error draining cannot do this.
+    async fn read_orphaned_rollback_response(&mut self, cx: &Cx) -> Result<(), PgError> {
+        let mut completed = false;
+        loop {
+            if cx.checkpoint().is_err() {
+                return self.finish_io_result(cx, Err(cancelled_error(cx))).await;
+            }
+            let (msg_type, data) = self.read_message(cx).await?;
+            match msg_type {
+                b'C' => {
+                    if completed {
+                        return Err(PgError::Protocol(
+                            "orphaned ROLLBACK received duplicate CommandComplete".to_string(),
+                        ));
+                    }
+                    let mut reader = MessageReader::new(&data);
+                    let tag = reader.read_cstring()?;
+                    reader.ensure_consumed("orphaned ROLLBACK CommandComplete")?;
+                    if tag != "ROLLBACK" {
+                        return Err(PgError::Protocol(format!(
+                            "orphaned ROLLBACK received unexpected command tag: {tag:?}"
+                        )));
+                    }
+                    completed = true;
+                }
+                b'Z' => {
+                    let status = Self::parse_ready_for_query_transaction_status(&data)?;
+                    if !completed {
+                        return Err(PgError::Protocol(
+                            "orphaned ROLLBACK reached ReadyForQuery without CommandComplete"
+                                .to_string(),
+                        ));
+                    }
+                    if status != b'I' {
+                        return Err(PgError::Protocol(format!(
+                            "orphaned ROLLBACK did not end the transaction: ReadyForQuery {status:#04X}"
+                        )));
+                    }
+                    self.handle_ready_for_query(&data)?;
+                    return Ok(());
+                }
+                b'E' => return Err(self.parse_error_response(&data).unwrap_or_else(|err| err)),
+                _ => {
+                    if !self.handle_async_backend_message(msg_type, &data)? {
+                        return Err(unexpected_backend_message(
+                            "orphaned ROLLBACK response",
+                            msg_type,
+                        ));
+                    }
+                }
+            }
+        }
     }
 
     /// Write data to the stream using async I/O and flush.
@@ -10600,7 +10644,6 @@ impl PgTransaction<'_> {
 
     pub(crate) fn poison_for_rollback(&mut self) {
         self.conn.inner.needs_rollback = true;
-        self.conn.inner.needs_discard = true;
     }
 
     /// Keep a live transaction handle from entering the connection's orphan
@@ -10808,12 +10851,10 @@ impl Drop for PgTransaction<'_> {
     /// open on the server — the pool's next tenant inherited an
     /// `idle_in_transaction` backend with locks held.
     ///
-    /// Setting `needs_discard = true` ensures the pool's return path
-    /// (expected to call `PgConnection::needs_discard()` before
-    /// recycling) closes the connection instead. Both flags stay
-    /// set in tandem so callers that DO continue using the same
-    /// connection without a pool round-trip still get the inline
-    /// ROLLBACK fast path.
+    /// `PgConnection::needs_discard()` includes outstanding rollback debt,
+    /// so the pool's return path closes the connection instead. Direct
+    /// callers can still recover with the inline ROLLBACK fast path without
+    /// losing any independent session-discard reason.
     fn drop(&mut self) {
         // Resolve the obligation first: a transaction dropped without an
         // explicit commit rolls back, so abort() is the correct discharge.
