@@ -1203,66 +1203,219 @@ fn legacy_state_task_keeps_cancellation_dominant_result_attribution() {
 
 #[test]
 fn acknowledged_cancellation_can_finish_async_cleanup_before_join_completes() {
-    let runtime = RuntimeBuilder::current_thread()
-        .build()
-        .expect("build current-thread runtime");
+    use asupersync::cx::ChildRegionSpec;
+    use std::future::{Future, poll_fn};
+    use std::task::{Wake, Waker};
 
-    runtime.block_on(runtime.handle().spawn(async {
-        let cx: Cx = Cx::current().expect("runtime task installs a current Cx");
-        let mutex = Arc::new(Mutex::new(()));
-        let holder = mutex
-            .try_lock_owned()
-            .expect("seed mutex must be available");
-        let cleanup_completed = Arc::new(AtomicBool::new(false));
-        let waiter_mutex = Arc::clone(&mutex);
-        let waiter_cleanup_completed = Arc::clone(&cleanup_completed);
-        let mut waiter = cx
-            .spawn(move |waiter_cx| async move {
-                let result = OwnedMutexGuard::lock(waiter_mutex, &waiter_cx)
+    struct ForwardWake {
+        target: Waker,
+        calls: AtomicUsize,
+    }
+
+    impl Wake for ForwardWake {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.target.wake_by_ref();
+        }
+    }
+
+    struct Finalized(Arc<AtomicUsize>);
+
+    impl Drop for Finalized {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    async fn witness_pending<F: Future>(future: F, entered: oneshot::Sender<()>) -> F::Output {
+        let mut future = std::pin::pin!(future);
+        let mut entered = Some(entered);
+        poll_fn(|task| {
+            let result = future.as_mut().poll(task);
+            if result.is_pending()
+                && let Some(entered) = entered.take()
+            {
+                entered
+                    .send_blocking(())
+                    .expect("operation Pending witness must be accepted");
+            }
+            result
+        })
+        .await
+    }
+
+    for (workers, local) in [(1, false), (1, true), (2, false), (2, true)] {
+        let runtime = if workers == 1 {
+            RuntimeBuilder::current_thread()
+        } else {
+            RuntimeBuilder::multi_thread().worker_threads(workers)
+        }
+        .build()
+        .expect("build native cleanup runtime");
+        let finalized = Arc::new(AtomicUsize::new(0));
+        let owner_finalized = Arc::clone(&finalized);
+
+        runtime.block_on(runtime.handle().spawn(async move {
+            let cx = Cx::current().expect("runtime task installs a current Cx");
+            asupersync::time::timeout(cx.now(), Duration::from_secs(10), async {
+                let region = cx
+                    .open_child_region(ChildRegionSpec::inherit())
+                    .await
+                    .expect("open owned cleanup region");
+                region
+                    .retain_until_finalized(Finalized(Arc::clone(&owner_finalized)))
+                    .await
+                    .expect("retain the region finalizer until actual cleanup");
+                let mutex = Arc::new(Mutex::new(()));
+                let holder = mutex
+                    .try_lock_owned()
+                    .expect("seed mutex must be available");
+                let cleanup_completed = Arc::new(AtomicBool::new(false));
+                let waiter_mutex = Arc::clone(&mutex);
+                let waiter_cleanup_completed = Arc::clone(&cleanup_completed);
+                let (entered, mut operation_parked) = oneshot::channel();
+                let (parked, mut cleanup_parked) = oneshot::channel();
+                let (release, mut cleanup) = oneshot::channel::<u32>();
+                let child_body = move |waiter_cx: Cx| async move {
+                    let result = witness_pending(
+                        OwnedMutexGuard::lock(waiter_mutex, &waiter_cx),
+                        entered,
+                    )
                     .await
                     .map(drop);
-                if matches!(result, Err(LockError::Cancelled)) {
-                    // Deliberately cross another Pending after the primitive's
-                    // checkpoint acknowledged cancellation. The spawn/result
-                    // boundary must not mistake protocol cleanup for an
-                    // unresponsive cancellation-blind future.
+                    assert!(matches!(result, Err(LockError::Cancelled)));
+
+                    // Keep the original additional Pending, then prove cleanup
+                    // can also park until a real external wake. A self-waking
+                    // yield alone missed the mask-exit loop reported in #90.
                     yield_now().await;
+                    let mut cleanup = std::pin::pin!(cleanup.recv(&waiter_cx));
+                    let mut parked = Some(parked);
+                    let mut forwarding: Option<Arc<ForwardWake>> = None;
+                    let value = poll_fn(|task| {
+                        let forwarding = forwarding.get_or_insert_with(|| {
+                            Arc::new(ForwardWake {
+                                target: task.waker().clone(),
+                                calls: AtomicUsize::new(0),
+                            })
+                        });
+                        let waker = Waker::from(Arc::clone(forwarding));
+                        let mut watched = Context::from_waker(&waker);
+                        let result = waiter_cx.masked(|| cleanup.as_mut().poll(&mut watched));
+                        if result.is_pending() && parked.is_some() {
+                            let delivered = forwarding.calls.load(Ordering::SeqCst);
+                            assert!(
+                                delivered > 0,
+                                "a new masked cleanup subscriber must receive its unmask wake",
+                            );
+                            // The parent cannot release cleanup before its
+                            // witness. Reusing this exact Waker isolates repeat
+                            // unmask delivery from scheduling and channel events.
+                            for _ in 0..3 {
+                                assert!(
+                                    waiter_cx
+                                        .masked(|| cleanup.as_mut().poll(&mut watched))
+                                        .is_pending(),
+                                    "cleanup must remain pending before its external release",
+                                );
+                                assert_eq!(
+                                    forwarding.calls.load(Ordering::SeqCst),
+                                    delivered,
+                                    "unchanged masked cleanup must not republish cancellation wakes",
+                                );
+                            }
+                            parked
+                                .take()
+                                .expect("first cleanup Pending owns the witness")
+                                .send_blocking(())
+                                .expect("cleanup Pending witness must be accepted");
+                        }
+                        result
+                    })
+                    .await
+                    .expect("masked cleanup must receive its external release");
+                    assert_eq!(value, 37);
                     waiter_cleanup_completed.store(true, Ordering::Release);
+                    result
+                };
+                let mut waiter = if local {
+                    region.cx().spawn_local(child_body)
+                } else {
+                    region.cx().spawn(child_body)
                 }
-                result
+                .expect("runtime-backed Cx must admit waiter task");
+
+                operation_parked
+                    .recv(&cx)
+                    .await
+                    .expect("waiter must publish its operation Pending witness");
+                assert_eq!(mutex.waiters(), 1, "waiter must be parked before abort");
+                waiter.abort();
+                cleanup_parked
+                    .recv(&cx)
+                    .await
+                    .expect("acknowledged cancellation must reach parked masked cleanup");
+                assert!(!waiter.is_finished(), "parked cleanup must keep the task live");
+                assert!(!cleanup_completed.load(Ordering::Acquire));
+                assert_eq!(owner_finalized.load(Ordering::SeqCst), 0);
+                assert_eq!(
+                    mutex.waiters(),
+                    0,
+                    "cleanup must unlink the mutex waiter before the holder unlocks",
+                );
+
+                let mut join = std::pin::pin!(waiter.join(&cx));
+                poll_fn(|task| {
+                    assert!(
+                        join.as_mut().poll(task).is_pending(),
+                        "the typed result must not publish before cleanup finishes",
+                    );
+                    Poll::Ready(())
+                })
+                .await;
+                release
+                    .send_blocking(37)
+                    .expect("release the genuinely parked cleanup receiver");
+                let result = join.await;
+                assert!(
+                    matches!(result, Ok(Err(LockError::Cancelled))),
+                    "cleanup must preserve the operation-level cancellation result; got {result:?}",
+                );
+                assert!(
+                    cleanup_completed.load(Ordering::Acquire),
+                    "a task that acknowledged cancellation must finish asynchronous protocol cleanup",
+                );
+                assert_eq!(mutex.waiters(), 0);
+                drop(holder);
+                region.close().await.expect("cleanup region must retire");
             })
-            .expect("runtime-backed Cx must admit waiter task");
-
-        for _ in 0..256 {
-            if mutex.waiters() == 1 {
-                break;
-            }
-            yield_now().await;
-        }
+            .await
+            .expect("native masked cleanup and region retirement must complete");
+        }));
         assert_eq!(
-            mutex.waiters(),
+            finalized.load(Ordering::SeqCst),
             1,
-            "waiter must be genuinely parked before abort",
+            "cleanup region finalizer must run exactly once; workers={workers} local={local}",
         );
-
-        waiter.abort();
-        let result = waiter.join(&cx).await;
-        assert!(
-            matches!(result, Ok(Err(LockError::Cancelled))),
-            "cleanup must preserve the operation-level cancellation result; got {result:?}",
-        );
-        assert!(
-            cleanup_completed.load(Ordering::Acquire),
-            "a task that acknowledged cancellation must finish asynchronous protocol cleanup",
-        );
-
+        // The spawned parent can publish its result before its worker retires
+        // the task record. Observe actual drain instead of racing that tail.
+        let report = runtime.shutdown_drained(Duration::from_secs(5));
         assert_eq!(
-            mutex.waiters(),
-            0,
-            "cleanup must unlink the mutex waiter before the holder unlocks",
+            report.outcome,
+            asupersync::runtime::RootDrainOutcome::Quiescent,
         );
-        drop(holder);
-    }));
+        assert_eq!(report.live_tasks, 0);
+        assert_eq!(report.live_regions, 0);
+        assert_eq!(report.pending_obligations, 0);
+        assert_eq!(report.pending_spawns, 0);
+        assert_eq!(report.queued_finalizers, 0);
+        assert!(!report.has_pending_obligation_posts);
+        assert!(runtime.is_quiescent());
+    }
 }
 
 #[test]

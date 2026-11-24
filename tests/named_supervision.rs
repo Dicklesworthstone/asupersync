@@ -380,6 +380,12 @@ async fn replace_fences_stale_lease(cx: Cx) {
 }
 
 async fn abandoned_controller_retains_name_through_cleanup(cx: Cx) {
+    for spawned in [false, true] {
+        abandoned_controller_cleanup_case(&cx, spawned).await;
+    }
+}
+
+async fn abandoned_controller_cleanup_case(cx: &Cx, spawned: bool) {
     let registry = Arc::new(Mutex::new(NameRegistry::new()));
     let (ready, mut started) = oneshot::channel();
     let ready = Arc::new(Mutex::new(Some(ready)));
@@ -402,7 +408,10 @@ async fn abandoned_controller_retains_name_through_cleanup(cx: Cx) {
                 let descendant = child
                     .spawn(move |descendant| async move {
                         let (_keep_sender, mut stop) = mpsc::channel::<()>(1);
-                        assert!(witnessed(stop.recv(&descendant), parked).await.is_err());
+                        assert_eq!(
+                            witnessed(stop.recv(&descendant), parked).await,
+                            Err(mpsc::RecvError::Cancelled),
+                        );
                         let mut cleanup = pin!(cleanup.recv(&descendant));
                         witnessed(
                             poll_fn(|task| descendant.masked(|| cleanup.as_mut().poll(task))),
@@ -416,28 +425,38 @@ async fn abandoned_controller_retains_name_through_cleanup(cx: Cx) {
                 descendant_started.recv(&child).await.unwrap();
                 let (_keep_sender, mut stop) = mpsc::channel::<()>(1);
                 ready.send_blocking(generation).unwrap();
-                assert!(stop.recv(&child).await.is_err());
+                assert_eq!(stop.recv(&child).await, Err(mpsc::RecvError::Cancelled));
                 drop(descendant);
                 Outcome::Cancelled(child.cancel_reason().unwrap())
             }
         },
     );
     let managed = bind(&registry, NameCollisionPolicy::Fail, binding);
-    let mut controller = Box::pin(managed.run(&cx));
-    let generation = {
-        let mut started = pin!(started.recv(&cx));
-        poll_fn(|task| {
-            assert!(
-                controller.as_mut().poll(task).is_pending(),
-                "controller must be live before abandonment"
-            );
-            started.as_mut().poll(task)
-        })
-        .await
-        .unwrap()
+    let generation = if spawned {
+        let controller = managed.spawn(cx).unwrap();
+        // The child's ready signal follows its descendant's actual Pending
+        // receive, so dropping the handle cancels an admitted, parked tree.
+        let generation = started.recv(cx).await.unwrap();
+        drop(controller);
+        generation
+    } else {
+        let mut controller = Box::pin(managed.run(cx));
+        let generation = {
+            let mut started = pin!(started.recv(cx));
+            poll_fn(|task| {
+                assert!(
+                    controller.as_mut().poll(task).is_pending(),
+                    "controller must be live before abandonment"
+                );
+                started.as_mut().poll(task)
+            })
+            .await
+            .unwrap()
+        };
+        drop(controller);
+        generation
     };
-    drop(controller);
-    cleanup_parked.recv(&cx).await.unwrap();
+    cleanup_parked.recv(cx).await.unwrap();
     assert_eq!(registry.lock().whereis("service"), Some(generation.task));
     assert!(!cleaned.load(Ordering::Acquire));
 
@@ -454,7 +473,7 @@ async fn abandoned_controller_retains_name_through_cleanup(cx: Cx) {
         )
     };
     let refused = bind(&registry, NameCollisionPolicy::Fail, make_binding())
-        .run(&cx)
+        .run(cx)
         .await;
     assert!(matches!(
         refused.outcome,
@@ -476,13 +495,13 @@ async fn abandoned_controller_retains_name_through_cleanup(cx: Cx) {
     }
     assert!(cleaned.load(Ordering::Acquire));
     let restarted = bind(&registry, NameCollisionPolicy::Fail, make_binding())
-        .run(&cx)
+        .run(cx)
         .await;
     assert!(restarted.outcome.is_ok(), "{restarted:?}");
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert!(registry.lock().is_empty());
     eprintln!(
-        "NAMED_SUPERVISOR scenario=abandoned_controller generation={generation:?} cleanup_finished=true registry=empty"
+        "NAMED_SUPERVISOR scenario=abandoned_controller spawned={spawned} generation={generation:?} cleanup_finished=true registry=empty"
     );
 }
 
