@@ -1021,3 +1021,163 @@ fn scoped_pipeline_unrun_builder_and_unpolled_future_drop_borrowed_non_send_capt
         }
     }
 }
+
+// Observe actual source polls, including the parked read before any input is sent.
+struct ChannelInput {
+    receiver: mpsc::Receiver<usize>,
+    read_context: Cx,
+    parked: Arc<Progress>,
+    pulls: Arc<AtomicUsize>,
+}
+
+impl Stream for ChannelInput {
+    type Item = usize;
+
+    fn poll_next(self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        match this.receiver.poll_recv(&this.read_context, task) {
+            Poll::Pending => {
+                if !this.parked.parked.load(Ordering::Acquire) {
+                    this.parked.note(&this.parked.parked);
+                }
+                Poll::Pending
+            }
+            Poll::Ready(Ok(value)) => {
+                this.pulls.fetch_add(1, Ordering::SeqCst);
+                Poll::Ready(Some(value))
+            }
+            Poll::Ready(Err(mpsc::RecvError::Disconnected)) => Poll::Ready(None),
+            Poll::Ready(Err(error)) => panic!("unexpected source error: {error:?}"),
+        }
+    }
+}
+
+async fn stream_pipeline_journey(cx: Cx, cancel: bool) {
+    let (send, receiver) = mpsc::channel(4);
+    let (release, gate) = oneshot::channel();
+    let source_seen = Arc::new(Progress::default());
+    let sink_seen = Arc::new(Progress::default());
+    let source_probe = Arc::clone(&source_seen);
+    let sink_probe = Arc::clone(&sink_seen);
+    let pulls = Arc::new(AtomicUsize::new(0));
+    let source_pulls = Arc::clone(&pulls);
+    let values = Arc::new(crate::sync::pl::Mutex::new(Vec::new()));
+    let delivered = Arc::clone(&values);
+    let mut operation = cx.spawn(move |owner| async move {
+        let input = ChannelInput {
+            receiver,
+            // The source has no subscription to its caller's cancellation.
+            read_context: Cx::detached_cancel_context(),
+            parked: source_probe,
+            pulls: source_pulls,
+        };
+        let mut gate = Some(gate);
+        ScopedPipelineExecution::from_stream(&owner, input, config(1))
+            .then(capacity(1), |_child, value| async move {
+                Outcome::<_, ()>::Ok(value * 2)
+            })
+            .run(move |sink, value| {
+                let probe = Arc::clone(&sink_probe);
+                let gate = gate.take();
+                let delivered = Arc::clone(&delivered);
+                async move {
+                    if let Some(mut gate) = gate {
+                        let mut waiting = std::pin::pin!(gate.recv(&sink));
+                        poll_fn(|task| {
+                            let result = waiting.as_mut().poll(task);
+                            if result.is_pending() {
+                                probe.note(&probe.parked);
+                            }
+                            result
+                        }).await.unwrap();
+                    }
+                    delivered.lock().push(value);
+                    Outcome::Ok(())
+                }
+            })
+            .await
+            .unwrap()
+    }).unwrap();
+
+    source_seen.wait(|s| s.parked.load(Ordering::Acquire)).await;
+    if cancel {
+        let reason = CancelReason::user("stop pipeline with silent input");
+        operation.abort_with_reason(reason.clone());
+        // Keep the sender alive and never send: only cancellation can end this wait.
+        let report = operation.join(&cx).await.unwrap();
+        assert!(matches!(report.execution.outcome, Outcome::Cancelled(_)));
+        assert_eq!(report.owner_cancellation, Some(reason));
+        assert_eq!(report.execution.summary.admitted, 0);
+        assert_eq!(pulls.load(Ordering::SeqCst), 0);
+        assert!(report.close.is_ok());
+        drop(send);
+        return;
+    }
+    for value in 1..=3 {
+        send.try_send(value).unwrap();
+    }
+    drop(send);
+    sink_seen.wait(|s| s.parked.load(Ordering::Acquire)).await;
+    // Two values are available in the source. The first sink receipt still
+    // owns the only work credit, so neither may have been pulled.
+    assert_eq!(pulls.load(Ordering::SeqCst), 1);
+    release.send_blocking(()).unwrap();
+    let report = operation.join(&cx).await.unwrap();
+    assert!(report.execution.outcome.is_ok());
+    assert_eq!(report.execution.summary.consumed, 3);
+    assert_eq!(report.execution.summary.max_in_flight, 1);
+    assert_eq!(*values.lock(), vec![2, 4, 6]);
+    assert!(report.close.is_ok());
+}
+
+#[test]
+fn scoped_pipeline_stream_backpressure_and_silent_source_cancellation() {
+    for cancel in [false, true] {
+        let ((), report) = run_async_under_lab(0x32_4010, move |cx| {
+            stream_pipeline_journey(cx, cancel)
+        });
+        assert!(report.quiescent && report.invariant_violations.is_empty());
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn native_scoped_pipeline_stream_backpressure_and_silent_source_cancellation() {
+    native(|cx| stream_pipeline_journey(cx, false));
+    native(|cx| stream_pipeline_journey(cx, true));
+}
+
+#[test]
+fn scope_pipeline_stream_worker_failure_interrupts_a_pending_next_item() {
+    let ((), report) = run_async_under_lab(0x32_4011, |cx| async move {
+        let (sender, receiver) = mpsc::channel(1);
+        sender.try_send(7).unwrap();
+        let parked = Arc::new(Progress::default());
+        let input = ChannelInput {
+            receiver,
+            read_context: Cx::detached_cancel_context(),
+            parked: Arc::clone(&parked),
+            pulls: Arc::new(AtomicUsize::new(0)),
+        };
+        let report = cx.scope().pipeline_stream(&cx, config(2), input)
+            .then(capacity(1), move |_stage, value| {
+                let parked = Arc::clone(&parked);
+                async move {
+                    assert_eq!(value, 7);
+                    // The next source poll must be parked before this error,
+                    // so the worker's own completion wakes the coordinator.
+                    parked.wait(|s| s.parked.load(Ordering::Acquire)).await;
+                    Outcome::<usize, _>::Err("failed transform")
+                }
+            })
+            .run(|_sink, _value| async { panic!("failed item reached sink") })
+            .await;
+        assert!(matches!(report.error(), Some(PipelineExecutionError::Stage {
+            input: 0, stage: 0, error: "failed transform"
+        })));
+        assert_eq!(report.summary.admitted, 1);
+        assert_eq!(report.summary.consumed, 0);
+        drop(sender);
+    });
+    assert!(report.quiescent && report.invariant_violations.is_empty());
+}
