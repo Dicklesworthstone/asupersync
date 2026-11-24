@@ -26,6 +26,9 @@ use crate::stream::Stream;
 pub use super::decode::{ContentDecodeError, ContentDecodeLimits, ContentDecodedBody};
 pub use super::encode::{ContentEncodeError, ContentEncodeLimits, ContentEncodedBody};
 
+mod reader;
+pub use reader::BodyReader;
+
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod admission;
 

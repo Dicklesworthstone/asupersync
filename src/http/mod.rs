@@ -93,7 +93,7 @@ pub use auto::{
 #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
 pub use auto::{HttpAutoStreamingListener, HttpAutoStreamingListenerStats};
 pub use body::{
-    Body, Empty, Frame, Full, HeaderMap, HeaderName, HeaderValue, ReaderBody, SizeHint,
+    Body, BodyReader, Empty, Frame, Full, HeaderMap, HeaderName, HeaderValue, ReaderBody, SizeHint,
 };
 pub use h1::{
     ClientError, ClientRequestBuilder, HttpClient, HttpClientBuilder, HttpClientConfig, Method,
