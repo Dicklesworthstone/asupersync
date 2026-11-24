@@ -6752,6 +6752,9 @@ fn report_feeds_the_oracle_eprocess_monitor() {
 
     let run = lab.run_until_quiescent_with_report();
     assert!(run.steps_delta > 0, "the run advanced the lab");
+    assert!(lab.state.task(task_id).is_none(), "the completed record retired");
+    assert_eq!(lab.oracles.task_leak.task_count(), 1);
+    assert_eq!(lab.oracles.task_leak.completed_count(), 1);
     let observed = ["task_leak", "quiescence"];
     for name in observed {
         let entry = run.oracle_report.entry(name).expect("reported invariant");
@@ -6789,6 +6792,8 @@ fn report_feeds_the_oracle_eprocess_monitor() {
 
     // A plain report does not advance the lab, so it adds no evidence.
     let _ = lab.report();
+    assert_eq!(lab.oracles.task_leak.task_count(), 1);
+    assert_eq!(lab.oracles.task_leak.completed_count(), 1);
     for name in observed {
         assert_eq!(
             observations(&lab, name),
@@ -6798,6 +6803,112 @@ fn report_feeds_the_oracle_eprocess_monitor() {
     }
     for name in ["obligation_leak", "actor_leak", "runtime_epoch"] {
         assert_eq!(observations(&lab, name), 0);
+    }
+}
+
+#[test]
+fn task_leak_record_sampling_preserves_strict_spawn_events_and_latched_failures() {
+    use crate::lab::oracle::TaskLeakOracle;
+
+    let region = RegionId::new_for_test(90, 0);
+    let task = TaskId::new_for_test(91, 0);
+    let mut record = TaskRecord::new_with_time(task, region, Budget::INFINITE, Time::ZERO);
+    let mut oracle = TaskLeakOracle::new();
+    oracle.observe_runtime_task(&record, Time::ZERO);
+    assert!(record.start_running());
+    assert!(record.complete(Outcome::Ok(())));
+    oracle.observe_runtime_task(&record, Time::from_nanos(1));
+    oracle.on_region_close(region, Time::from_nanos(2));
+
+    for _ in 0..3 {
+        oracle.observe_runtime_task(&record, Time::from_nanos(3));
+        assert!(oracle.check(Time::from_nanos(3)).is_ok());
+        assert_eq!(oracle.task_count(), 1);
+        assert_eq!(oracle.completed_count(), 1);
+        assert_eq!(oracle.closed_region_count(), 1);
+    }
+
+    // Sampling the same record is idempotent, but an actual post-close spawn
+    // event remains invalid even if it repeats an already completed TaskId.
+    oracle.on_spawn(task, region, Time::from_nanos(4));
+    assert_eq!(
+        oracle.check(Time::from_nanos(4)).unwrap_err().leaked_tasks,
+        vec![task],
+    );
+
+    let late_task = TaskId::new_for_test(92, 0);
+    let mut late = TaskRecord::new_with_time(late_task, region, Budget::INFINITE, Time::ZERO);
+    let mut failed = TaskLeakOracle::new();
+    failed.observe_runtime_task(&late, Time::ZERO);
+    failed.on_region_close(region, Time::from_nanos(1));
+    assert!(late.start_running());
+    assert!(late.complete(Outcome::Ok(())));
+    failed.observe_runtime_task(&late, Time::from_nanos(2));
+    assert_eq!(
+        failed.check(Time::from_nanos(2)).unwrap_err().leaked_tasks,
+        vec![late_task],
+        "a later completion receipt must not erase an earlier close violation",
+    );
+}
+
+#[test]
+fn task_leak_report_retains_a_task_retired_without_terminal_evidence() {
+    let mut lab = LabRuntime::new(
+        LabConfig::new(0x90_1e_a7)
+            .max_steps(16)
+            .with_cancellation_oracle(false),
+    );
+    let root = lab.state.create_root_region(Budget::INFINITE);
+    let (task, _handle) = lab
+        .state
+        .create_task(root, Budget::INFINITE, std::future::pending::<()>())
+        .unwrap();
+    lab.scheduler.lock().schedule(task, 0);
+    lab.step_for_test();
+    assert!(matches!(lab.state.task(task).unwrap().state, TaskState::Running));
+    assert_eq!(lab.oracles.task_leak.task_count(), 1);
+    assert_eq!(lab.oracles.task_leak.completed_count(), 0);
+
+    // Inject a broken scheduler retirement: forget a genuinely polled task
+    // without ever committing a terminal TaskRecord. The oracle must retain
+    // that missing completion after both task and region records disappear.
+    let abandoned = lab.state.remove_stored_future(task).unwrap();
+    let (waiters, observer) = lab.state.task_completed(task).into_parts();
+    assert!(waiters.is_empty());
+    observer.dispatch();
+    drop(abandoned);
+    assert!(lab.state.task(task).is_none());
+    lab.state
+        .close_region_command(root, &CancelReason::user("missing task completion witness"));
+    assert!(
+        lab.state.finalizer_history().iter().any(|event| matches!(
+            event,
+            crate::runtime::state::FinalizerHistoryEvent::RegionClosed { region, .. }
+                if *region == root
+        )),
+        "the fixture must produce an actual runtime region-close event",
+    );
+
+    for _ in 0..2 {
+        let report = lab.report();
+        assert!(report.quiescent);
+        assert!(!report.lab_test_passed());
+        let entry = report.oracle_report.entry("task_leak").unwrap();
+        assert!(!entry.passed);
+        assert_eq!(entry.stats.entities_tracked, 1);
+        assert_eq!(entry.stats.events_recorded, 2);
+        assert!(
+            report
+                .invariant_violations
+                .iter()
+                .any(|violation| violation == "oracle:task_leak"),
+        );
+        let failure = lab.oracles.task_leak.check(lab.now()).unwrap_err();
+        assert_eq!(failure.region, root);
+        assert_eq!(failure.leaked_tasks, vec![task]);
+        assert_eq!(lab.oracles.task_leak.task_count(), 1);
+        assert_eq!(lab.oracles.task_leak.completed_count(), 0);
+        assert_eq!(lab.oracles.task_leak.closed_region_count(), 1);
     }
 }
 

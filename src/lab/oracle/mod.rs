@@ -381,7 +381,8 @@ impl OracleSuite {
             post_order.push(id);
         }
 
-        self.task_leak.reset();
+        // Preserve lifecycle receipts collected before task records retire.
+        // Reporting supplements that history; only an explicit reset clears it.
         self.obligation_leak.snapshot_from_state(state, now);
         self.quiescence.snapshot_from_state(state, now);
         self.finalizer.reset();
@@ -672,17 +673,11 @@ impl OracleSuite {
             );
         }
 
-        let mut tasks = Vec::new();
-        for (_, task) in state.tasks_iter() {
-            tasks.push((task.id, task.owner, task.state.is_terminal()));
-        }
-        tasks.sort_by_key(|(task, _, _)| *task);
+        let mut tasks: Vec<_> = state.tasks_iter().map(|(_, task)| task).collect();
+        tasks.sort_by_key(|task| task.id);
 
-        for (task_id, region_id, terminal) in tasks {
-            self.task_leak.on_spawn(task_id, region_id, now);
-            if terminal {
-                self.task_leak.on_complete(task_id, now);
-            }
+        for task in tasks {
+            self.task_leak.observe_runtime_task(task, now);
         }
 
         // A closed region leaves the runtime's table in the walk that closes

@@ -5588,6 +5588,9 @@ impl LabRuntime {
         let Some(record) = self.state.task(task_id) else {
             return;
         };
+        self.oracles
+            .task_leak
+            .observe_runtime_task(record, self.virtual_time);
         if self.config.has_cancellation_oracle() {
             // Observe ordinary region/handle requests before counting the next
             // delivered poll. Waiting for consume_cancel_ack would make a task

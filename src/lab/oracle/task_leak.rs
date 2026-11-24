@@ -112,6 +112,21 @@ impl TaskLeakOracle {
         }
     }
 
+    /// Samples an authoritative record without replaying an observed spawn.
+    /// A terminal receipt must be sampled before its record is retired.
+    pub(crate) fn observe_runtime_task(&mut self, task: &crate::record::TaskRecord, now: Time) {
+        let observed = self
+            .tasks_by_region
+            .get(&task.owner)
+            .is_some_and(|tasks| tasks.contains(&task.id));
+        if !observed {
+            self.on_spawn(task.id, task.owner, task.created_at());
+        }
+        if task.state.is_terminal() {
+            self.on_complete(task.id, now);
+        }
+    }
+
     /// Records a task spawn event.
     pub fn on_spawn(&mut self, task: TaskId, region: RegionId, _time: Time) {
         self.tasks_by_region.entry(region).or_default().insert(task);
