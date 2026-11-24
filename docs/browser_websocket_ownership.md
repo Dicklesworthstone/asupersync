@@ -1,8 +1,8 @@
 # Owned asynchronous browser WebSockets
 
 `RegionHandle.adoptWebSocket(socket, options)` transfers a connecting or open
-native WebSocket into an existing SDK region. It adds awaitable opening and
-receiving, a bounded inbox, native stream consumption, and a complete asynchronous
+native WebSocket into an existing SDK region. It adds awaitable opening, sending
+and receiving, a bounded inbox, native stream consumption, and a complete asynchronous
 cleanup barrier. It does not create a connection or grant network authority.
 The existing `openWebSocket` and low-level WebSocket ABI remain unchanged.
 
@@ -112,6 +112,35 @@ native `bufferedAmount` exceeds `maxSendBufferedBytes`. It creates no send queue
 or polling timer. A successful send means the native host accepted the message;
 it is not a peer acknowledgement or a transport-level flow-control guarantee.
 Applications needing retries or acknowledgements supply their own protocol.
+
+`sendWhenReady(string | Uint8Array)` returns a `Promise<Outcome<void>>` and waits
+for room under that same native send-buffer cap. Await `opened` before sending.
+Use it to pace a producer without implementing a polling loop in application
+code:
+
+```ts
+for await (const message of outgoingMessages) {
+  const sent = await socket.sendWhenReady(message);
+  if (sent.outcome !== "ok") {
+    reportSendFailure(sent);
+    break;
+  }
+}
+```
+
+Only one send may wait at a time; a competing call is refused rather than added
+to an unbounded queue. A pending binary message is copied into a right-sized
+snapshot, so later mutation of the caller's array cannot change the admitted
+bytes or retain a large backing buffer through a small subview. Strings are
+immutable and charged by UTF-8 length. A message that can never fit under either
+configured limit is refused immediately.
+
+The adapter owns at most one host timer while waiting for `bufferedAmount` to
+fall. Hosts without usable timers can still use synchronous `send()`; they
+cannot wait for send credit. Closing, cancellation, and transport failure retire
+the pending send and its timer. A settled send remains a local native-buffer
+admission receipt, not proof that the peer received or committed the message.
+Continue to await `closed` or successful `retire()` for socket cleanup.
 
 ## Native Streams and parent cancellation
 

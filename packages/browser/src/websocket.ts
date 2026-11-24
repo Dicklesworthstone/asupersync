@@ -33,6 +33,9 @@ export interface BrowserWebSocketHandle {
   toReadableStream(): Outcome<ReadableStream<BrowserWebSocketMessage>>;
   /** Synchronous admission to native buffering, not delivery acknowledgement. */
   send(value: BrowserWebSocketMessage): Outcome<void>;
+  /** Wait for native buffer credit on an open socket. One owned message may wait;
+   * binary data is snapshotted. Success acknowledges local buffering only. */
+  sendWhenReady(value: BrowserWebSocketMessage): Promise<Outcome<void>>;
   close(options?: BrowserWebSocketCloseOptions): Promise<Outcome<void>>;
   cancel(reason?: string): Promise<Outcome<void>>;
   /** Independent cleanup receipt; retries refused cancellation/publication. */
@@ -138,6 +141,24 @@ const BUFFER_BYTES = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "byt
 const TYPED = Object.getPrototypeOf(Uint8Array.prototype);
 const TYPED_BYTES = Object.getOwnPropertyDescriptor(TYPED, "byteLength")!.get!;
 const TYPED_TAG = Object.getOwnPropertyDescriptor(TYPED, Symbol.toStringTag)!.get!;
+const TYPED_SET = TYPED.set;
+
+interface SendTimers {
+  schedule(callback: () => void): unknown;
+  clear(token: unknown): void;
+}
+interface PendingSend {
+  value: BrowserWebSocketMessage | null;
+  bytes: number;
+  resolve(outcome: Outcome<void>): void;
+  timers?: SendTimers;
+}
+interface SendTimer {
+  token: unknown;
+  armed: boolean;
+  clearing: boolean;
+  clear(token: unknown): void;
+}
 
 interface Host {
   prototype: object;
@@ -152,6 +173,7 @@ interface Host {
   remove: EventTarget["removeEventListener"];
   data: (this: MessageEvent) => unknown;
   Stream: typeof ReadableStream | undefined;
+  sendTimers(): SendTimers;
   signal?: AbortSignal;
   aborted?: (this: AbortSignal) => boolean;
 }
@@ -174,6 +196,14 @@ function prepare(host: Record<string, unknown> | undefined, socket: WebSocket, o
     add: EventTargetClass.prototype.addEventListener, remove: EventTargetClass.prototype.removeEventListener,
     data: Object.getOwnPropertyDescriptor(MessageEventClass.prototype, "data")?.get!,
     Stream: typeof host?.ReadableStream === "function" ? host.ReadableStream as typeof ReadableStream : undefined,
+    sendTimers() {
+      // Only backpressured sends need timers. Import, adoption and synchronous
+      // sends remain available in hosts without this optional capability.
+      const schedule = host?.setTimeout, clear = host?.clearTimeout;
+      if (typeof schedule !== "function" || typeof clear !== "function") throw new TypeError("native timers are unavailable");
+      return { schedule: callback => Reflect.apply(schedule, host, [callback, 8]),
+        clear: token => { Reflect.apply(clear, host, [token]); } };
+    },
   };
   if (Object.getPrototypeOf(socket) !== prototype || [native.state, native.buffered, native.protocol, native.extensions,
     native.binary, native.send, native.close, native.add, native.remove, native.data].some(fn => typeof fn !== "function")) {
@@ -222,6 +252,8 @@ export function createBrowserWebSocketManager(dependencies: {
     queuedBytes = 0;
     wake: (() => void) | null = null;
     receiving = false;
+    pendingSend: PendingSend | null = null;
+    sendTimer: SendTimer | null = null;
     converted = false;
     stream: ReadableStream<BrowserWebSocketMessage> | null = null;
     streamController: ReadableStreamDefaultController<BrowserWebSocketMessage> | null = null;
@@ -251,6 +283,7 @@ export function createBrowserWebSocketManager(dependencies: {
         opened: this.opened.promise, closed: this.closed.promise,
         receive: () => this.receive(false), toReadableStream: () => this.toReadableStream(),
         send: (value: BrowserWebSocketMessage) => this.send(value),
+        sendWhenReady: (value: BrowserWebSocketMessage) => this.sendWhenReady(value),
         close: (options?: BrowserWebSocketCloseOptions) => this.close(options),
         cancel: (reason?: string) => this.cancel(reason), retire: (reason?: string) => this.retire(reason),
       });
@@ -333,6 +366,7 @@ export function createBrowserWebSocketManager(dependencies: {
         this.operation = clean ? ok(undefined) : fail("WebSocket closed abnormally");
       }
       this.opened.resolve(this.operation.outcome === "ok" ? fail("WebSocket closed before opening") : this.operation);
+      this.stopSending();
       this.nativeClosed.resolve(); this.notify();
       void this.joinRetirement();
     }
@@ -349,6 +383,7 @@ export function createBrowserWebSocketManager(dependencies: {
       }
       this.closing = true; this.needsCancel = true;
       this.reason = this.operation.outcome === "cancelled" ? this.operation.cancellation.message ?? "WebSocket cancelled" : "WebSocket failed";
+      this.stopSending();
       this.clearQueue(); this.opened.resolve(this.operation as Failure); this.notify();
       void this.joinRetirement();
     }
@@ -423,6 +458,107 @@ export function createBrowserWebSocketManager(dependencies: {
         Reflect.apply(native.send, this.socket, [value]); return ok(undefined);
       } catch { return fail("WebSocket send failed"); }
     }
+    sendWhenReady(value: BrowserWebSocketMessage): Promise<Outcome<void>> {
+      if (this.pendingSend || this.sendTimer) return Promise.resolve(fail("WebSocket already has a pending send", "compatibility_rejected"));
+      if (this.closing || this.hostClosed || this.released) return Promise.resolve(this.unsentOutcome());
+      const receipt = deferred<Outcome<void>>();
+      const entry: PendingSend = { value: null, bytes: 0, resolve: receipt.resolve };
+      // Reserve before calling host accessors, which can reenter cancellation
+      // or another send. Only the private bounded snapshot survives this call.
+      this.pendingSend = entry;
+      try {
+        const state = Reflect.apply(this.prepared.native.state, this.socket, []);
+        if (this.pendingSend !== entry) return receipt.promise;
+        if (state !== 1) this.finishSend(entry, fail("WebSocket is not open", "compatibility_rejected"));
+        else {
+          if (typeof value === "string") entry.bytes = textBytes(value, this.prepared.maxMessageBytes);
+          else {
+            if (Reflect.apply(TYPED_TAG, value, []) !== "Uint8Array") throw new TypeError("unsupported send payload");
+            entry.bytes = Reflect.apply(TYPED_BYTES, value, []);
+          }
+          if (entry.bytes > this.prepared.maxMessageBytes || entry.bytes > this.prepared.maxSendBufferedBytes) {
+            this.finishSend(entry, fail("WebSocket send buffer limit exceeded", "capability_denied"));
+          } else {
+            if (typeof value === "string") entry.value = value;
+            else {
+              const snapshot = new Uint8Array(entry.bytes);
+              // The intrinsic validates detached/out-of-bounds views and copies
+              // their actual range, ignoring caller iterators and shadowed fields.
+              Reflect.apply(TYPED_SET, snapshot, [value]); entry.value = snapshot;
+            }
+            this.pumpSend(entry);
+          }
+        }
+      } catch { this.finishSend(entry, fail("WebSocket send payload is unsupported", "compatibility_rejected")); }
+      return receipt.promise;
+    }
+    unsentOutcome(): Failure {
+      return this.operation && this.operation.outcome !== "ok" ? this.operation
+        : fail("WebSocket closed before the waiting message was sent", "compatibility_rejected");
+    }
+    finishSend(entry: PendingSend, outcome: Outcome<void>): void {
+      if (this.pendingSend !== entry) return;
+      this.pendingSend = null; entry.value = null;
+      this.clearSendTimer(); entry.resolve(outcome);
+    }
+    stopSending(): void {
+      if (this.pendingSend) this.finishSend(this.pendingSend, this.unsentOutcome());
+      else this.clearSendTimer();
+    }
+    clearSendTimer(): Failure | null {
+      const timer = this.sendTimer;
+      if (!timer || !timer.armed || timer.clearing) return null;
+      timer.clearing = true;
+      try {
+        timer.clear(timer.token);
+        if (this.sendTimer === timer) this.sendTimer = null;
+        return null;
+      } catch { return fail("WebSocket send timer cleanup failed"); }
+      finally { timer.clearing = false; }
+    }
+    pumpSend(entry: PendingSend): void {
+      if (this.pendingSend !== entry) return;
+      try {
+        const native = this.prepared.native;
+        const buffered = Reflect.apply(native.buffered, this.socket, []);
+        const state = Reflect.apply(native.state, this.socket, []);
+        const ownerClosing = dependencies.isClosing(this.scopeKey) || !dependencies.isTracked(this.scopeKey);
+        if (this.pendingSend !== entry) return;
+        if (this.closing || this.hostClosed || this.released || state !== 1 || ownerClosing) {
+          this.finishSend(entry, this.unsentOutcome()); return;
+        }
+        if (!Number.isSafeInteger(buffered) || buffered < 0) {
+          this.finishSend(entry, fail("WebSocket send buffering observation failed")); return;
+        }
+        if (entry.bytes <= this.prepared.maxSendBufferedBytes - buffered) {
+          Reflect.apply(native.send, this.socket, [entry.value]);
+          this.finishSend(entry, ok(undefined)); return;
+        }
+        try { entry.timers ??= native.sendTimers(); }
+        catch { this.finishSend(entry, fail("WebSocket waiting send requires native timers", "compatibility_rejected")); return; }
+        if (this.pendingSend !== entry) return;
+        const timer: SendTimer = { token: undefined, armed: false, clearing: false, clear: entry.timers.clear };
+        this.sendTimer = timer;
+        let scheduling = true, firedInline = false;
+        try {
+          timer.token = entry.timers.schedule(() => {
+            if (scheduling) { firedInline = true; return; }
+            if (this.sendTimer !== timer) return;
+            this.sendTimer = null;
+            this.pumpSend(entry);
+          });
+          timer.armed = true; scheduling = false;
+          if (firedInline) this.finishSend(entry, fail("WebSocket send timer did not defer polling", "compatibility_rejected"));
+          // Cancellation may run inside timer installation before its token is
+          // returned. Retire that token without retaining the cancelled payload.
+          if (this.pendingSend !== entry) this.clearSendTimer();
+        } catch {
+          scheduling = false;
+          if (this.sendTimer === timer) this.sendTimer = null;
+          this.finishSend(entry, fail("WebSocket send timer scheduling failed"));
+        }
+      } catch { this.finishSend(entry, fail("WebSocket send failed")); }
+    }
     close(options: BrowserWebSocketCloseOptions = {}): Promise<Outcome<void>> {
       try {
         const code = options.code ?? 1000, reason = options.reason ?? "";
@@ -432,6 +568,7 @@ export function createBrowserWebSocketManager(dependencies: {
           this.closeCode = code; this.closeReason = reason; this.closing = true;
           this.operation = ok(undefined);
           this.opened.resolve(fail("WebSocket closed before opening"));
+          this.stopSending();
         }
         return this.joinRetirement().then(receipt => receipt.outcome === "ok" ? this.closed.promise : receipt);
       } catch { return Promise.resolve(fail("invalid WebSocket close options", "compatibility_rejected")); }
@@ -499,6 +636,7 @@ export function createBrowserWebSocketManager(dependencies: {
           // A caller/owner may cancel while a graceful handshake is pending.
           // Observe that strengthening before publishing Cancelled to the ABI.
           admitCancellation();
+          issue ??= this.clearSendTimer();
           for (const [type, listener] of this.listeners) {
             try { Reflect.apply(this.prepared.native.remove, this.socket, [type, listener]); this.listeners.delete(type); }
             catch { issue ??= fail("WebSocket listener cleanup failed"); }

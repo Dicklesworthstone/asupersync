@@ -114,6 +114,25 @@ function fixture(t, faults = {}, globals = {}) {
   return { manager, adopt, calls, tasks, scopes, closing, host };
 }
 
+function sendTimers(faults = {}) {
+  const live = new Map(), scheduled = [], cleared = [];
+  let next = 0;
+  return { live, scheduled, cleared, host: {
+    setTimeout(callback, delay) {
+      const token = ++next; live.set(token, callback); scheduled.push({ token, delay });
+      faults.onSchedule?.(); return token;
+    },
+    clearTimeout(token) {
+      if (faults.refuseClear) throw new Error("private timer cleanup detail");
+      cleared.push(token); live.delete(token);
+    },
+  }, fire() {
+    assert.equal(live.size, 1, "one owned polling timer");
+    const [token, callback] = live.entries().next().value;
+    live.delete(token); callback();
+  } };
+}
+
 test("module import needs no WebSocket globals; unavailable adoption has no effects", t => {
   const f = fixture(t, {}, { WebSocket: undefined });
   assert.equal(f.adopt(new Socket()).outcome, "err"); assert.equal(f.calls.spawn.length, 0);
@@ -222,6 +241,91 @@ test("send rechecks a close reentered from a native buffering observation", asyn
   const socket = new Socket({ state: 1 }), f = fixture(t), handle = value(f.adopt(socket));
   socket.fault.onBuffered = () => { void handle.cancel(); };
   assert.equal(handle.send("late").outcome, "err"); assert.equal(socket.sent.length, 0);
+});
+test("sendWhenReady waits for bounded credit, snapshots exact views and refuses competing waits", async t => {
+  const timers = sendTimers(), f = fixture(t, {}, timers.host), socket = new Socket({ state: 1 });
+  const handle = value(f.adopt(socket, { maxMessageBytes: 4, maxSendBufferedBytes: 5 }));
+  socket.buffered = 3;
+  const source = Uint8Array.of(9, 1, 2, 3, 8), view = source.subarray(1, 4);
+  Object.defineProperties(view, { byteLength: { value: 0 }, buffer: { get() { assert.fail("shadowed buffer"); } },
+    [Symbol.iterator]: { value() { assert.fail("caller iterator"); } } });
+  const sent = handle.sendWhenReady(view); source.fill(99);
+  await pending(sent); assert.equal(socket.sent.length, 0); assert.equal(timers.live.size, 1);
+  const excess = await handle.sendWhenReady("next");
+  assert.equal(excess.outcome, "err"); assert.equal(excess.failure.code, "compatibility_rejected");
+  timers.fire(); await pending(sent); assert.equal(timers.live.size, 1); assert.equal(socket.sent.length, 0);
+  socket.buffered = 2; timers.fire(); assert.equal((await sent).outcome, "ok");
+  assert.deepEqual(Array.from(socket.sent[0]), [1, 2, 3]); assert.notEqual(socket.sent[0], view);
+  assert.equal(socket.sent[0].buffer.byteLength, 3, "no retained larger backing store");
+  assert.equal(timers.live.size, 0); assert.equal(f.calls.join.length, 0);
+  assert.ok(timers.scheduled.every(timer => timer.delay > 0), "no microtask or zero-delay spin");
+  assert.equal((await handle.sendWhenReady("x")).outcome, "ok"); assert.equal(socket.sent.length, 2);
+});
+test("sendWhenReady requires OPEN and only requires timers when native credit is unavailable", async t => {
+  const f = fixture(t), socket = new Socket(), handle = value(f.adopt(socket, { maxSendBufferedBytes: 3 }));
+  assert.equal((await handle.sendWhenReady("x")).failure.code, "compatibility_rejected");
+  socket.open(); assert.equal((await handle.sendWhenReady("é")).outcome, "ok");
+  socket.buffered = 2;
+  assert.equal((await handle.sendWhenReady("é")).failure.code, "compatibility_rejected");
+  assert.equal(handle.send("x").outcome, "ok", "missing timers does not break synchronous send");
+  socket.buffered = 0; assert.equal((await handle.sendWhenReady("x")).outcome, "ok");
+  assert.equal(socket.sent.length, 3); assert.equal(f.calls.cancel.length, 0);
+});
+test("sendWhenReady rejects impossible sizes, unsupported and detached payloads without polling", async t => {
+  const timers = sendTimers(), f = fixture(t, {}, timers.host), socket = new Socket({ state: 1 });
+  const handle = value(f.adopt(socket, { maxMessageBytes: 4, maxSendBufferedBytes: 3 })); socket.buffered = 3;
+  for (const payload of ["😀", "abcde", Uint8Array.of(1, 2, 3, 4)]) {
+    assert.equal((await handle.sendWhenReady(payload)).failure.code, "capability_denied");
+  }
+  const detached = Uint8Array.of(1, 2); structuredClone(detached.buffer, { transfer: [detached.buffer] });
+  for (const payload of [detached, new DataView(new ArrayBuffer(1)), { toString() { assert.fail("must not format"); } }]) {
+    assert.equal((await handle.sendWhenReady(payload)).outcome, "err");
+  }
+  assert.equal(timers.scheduled.length, 0); assert.equal(socket.sent.length, 0);
+  socket.buffered = 0; assert.equal((await handle.sendWhenReady(new Uint8Array())).outcome, "ok");
+});
+for (const mode of ["cancel", "close", "signal", "scope", "remote"]) {
+  test(`sendWhenReady ${mode} retires polling and never sends after shutdown`, async t => {
+    const timers = sendTimers(), f = fixture(t, {}, timers.host), socket = new Socket({ state: 1 });
+    const parent = new AbortController(), handle = value(f.adopt(socket, { maxSendBufferedBytes: 2, signal: parent.signal }));
+    socket.buffered = 2; const sent = handle.sendWhenReady("x");
+    const stale = timers.live.values().next().value; await pending(sent);
+    let terminal;
+    if (mode === "cancel") terminal = handle.cancel();
+    else if (mode === "close") terminal = handle.close();
+    else if (mode === "signal") { parent.abort(); terminal = handle.closed; }
+    else if (mode === "scope") terminal = f.manager.drainScopes(f.scopes, "runtime_close");
+    else { socket.finish(); terminal = handle.closed; }
+    const outcome = await sent;
+    assert.equal(outcome.outcome, mode === "close" || mode === "remote" ? "err" : "cancelled");
+    assert.equal(timers.live.size, 0); socket.buffered = 0; stale(); await turn();
+    assert.equal(socket.sent.length, 0, "retired callbacks cannot admit a late message");
+    if (mode !== "remote") {
+      await pending(terminal); assert.equal(f.calls.join.length, 0); assert.equal(f.tasks.size, 1);
+      socket.finish();
+    }
+    await terminal; assert.equal(f.tasks.size, 0); assert.equal(f.calls.join.length, 1);
+  });
+}
+test("sendWhenReady rechecks cancellation during timer acquisition and native admission", async t => {
+  const timerFaults = {}, timers = sendTimers(timerFaults), f = fixture(t, {}, timers.host), socket = new Socket({ state: 1 });
+  const handle = value(f.adopt(socket, { maxSendBufferedBytes: 2 })); socket.buffered = 2;
+  timerFaults.onSchedule = () => { void handle.cancel(); };
+  assert.equal((await handle.sendWhenReady("x")).outcome, "cancelled");
+  assert.equal(timers.live.size, 0); assert.equal(socket.sent.length, 0);
+  const other = new Socket({ state: 1 }), otherHandle = value(f.adopt(other));
+  other.fault.onBuffered = () => { void otherHandle.cancel(); };
+  assert.equal((await otherHandle.sendWhenReady("x")).outcome, "cancelled"); assert.equal(other.sent.length, 0);
+});
+test("sendWhenReady timer cleanup refusal retains ownership until retirement succeeds", async t => {
+  const timerFaults = { refuseClear: true }, timers = sendTimers(timerFaults), f = fixture(t, {}, timers.host);
+  const socket = new Socket({ state: 1 }), handle = value(f.adopt(socket, { maxSendBufferedBytes: 1 }));
+  socket.buffered = 1; const sent = handle.sendWhenReady("x"), cancelled = handle.cancel();
+  assert.equal((await sent).outcome, "cancelled"); await turn(); socket.finish();
+  assert.equal((await cancelled).outcome, "err"); assert.equal(f.calls.join.length, 0); assert.equal(f.tasks.size, 1);
+  assert.equal(timers.live.size, 1); timerFaults.refuseClear = false;
+  assert.equal((await handle.retire()).outcome, "ok"); assert.equal(timers.live.size, 0); assert.equal(f.tasks.size, 0);
+  assert.equal(socket.sent.length, 0); assert.equal(f.calls.join.length, 1);
 });
 test("graceful close validates code/reason then waits for the clean handshake", async t => {
   const f = fixture(t), socket = new Socket({ state: 1 }), handle = value(f.adopt(socket));
@@ -401,4 +505,35 @@ test("real native WebSocket exchanges exact messages and joins only after peer c
   const closed = handle.close(); await remote.closing; await pending(closed); assert.equal(calls.length, 0);
   await remote.finish(); assert.equal((await closed).outcome, "ok"); await remote.disconnected;
   assert.equal(calls.length, 1); assert.equal(remote.received.find(message => message.opcode === 1).payload.toString(), "outbound");
+});
+test("sendWhenReady pipelines ordered messages through a real native WebSocket with bounded buffering", { timeout: 5000 }, async t => {
+  const remote = await peer(t), socket = new WebSocket(remote.url), calls = [], live = new Set();
+  let polls = 0;
+  const host = { WebSocket, EventTarget, MessageEvent, AbortSignal, ReadableStream,
+    setTimeout(callback, delay) {
+      polls += 1;
+      const token = setTimeout(() => { live.delete(token); callback(); }, delay);
+      live.add(token); assert.equal(live.size, 1); return token;
+    },
+    clearTimeout(token) { clearTimeout(token); live.delete(token); },
+  };
+  const manager = api.createBrowserWebSocketManager({ globalObject: () => host, isTracked: () => true, isClosing: () => false });
+  const handle = value(manager.adopt("region:real:PRIVATE_AUTHORITY", () => ok({ key: "task:real", cancel: () => ok(undefined),
+    join: outcome => { calls.push(outcome); assert.equal(socket.readyState, WebSocket.CLOSED); noListeners(socket);
+      assert.equal(live.size, 0); return outcome; } }), socket, { maxMessageBytes: 4, maxSendBufferedBytes: 4 }));
+  t.after(() => handle.retire());
+  assert.equal((await handle.opened).outcome, "ok"); await remote.connected;
+  const expected = [];
+  for (let i = 0; i < 12; i += 1) {
+    const payload = i % 2 ? Uint8Array.of(i, 0, 255) : `m${String(i).padStart(2, "0")}`;
+    expected.push({ opcode: typeof payload === "string" ? 1 : 2, payload: Buffer.from(payload) });
+    assert.equal((await handle.sendWhenReady(payload)).outcome, "ok");
+    assert.ok(socket.bufferedAmount <= 4, "admitted native payload stays within configured byte credit");
+  }
+  assert.ok(polls > 0, "real native bufferedAmount required asynchronous credit polling");
+  assert.equal(live.size, 0); assert.equal(calls.length, 0);
+  const closed = handle.close(); await remote.closing; await pending(closed); assert.equal(calls.length, 0);
+  await remote.finish(); assert.equal((await closed).outcome, "ok"); await remote.disconnected;
+  assert.deepEqual(remote.received.filter(message => message.opcode !== 8), expected);
+  assert.equal(calls.length, 1); assert.equal(live.size, 0);
 });
