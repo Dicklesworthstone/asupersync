@@ -2,7 +2,7 @@ use super::*;
 use proptest::prelude::{Just, Strategy, any};
 use std::sync::Arc;
 
-type TestEncodeTaskHandle = crate::runtime::TaskHandle<Result<ParallelEncodedBlock, String>>;
+type TestEncodeTaskHandle = ParallelEncodeHandle<Result<ParallelEncodedBlock, String>>;
 
 struct TimedEncodeBarrier {
     parties: usize,
@@ -8480,6 +8480,12 @@ fn parallel_encode_region_error_drains_claimed_and_queued_pool_work() {
     let (claimed_started_tx, claimed_started_rx) = std::sync::mpsc::channel();
     let claimed_cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let claimed_cancelled_in_task = Arc::clone(&claimed_cancelled);
+    let queued_invoked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let queued_invoked_in_task = Arc::clone(&queued_invoked);
+    let observer_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let observer_started_in_task = Arc::clone(&observer_started);
+    let cancellation_observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cancellation_observed_in_task = Arc::clone(&cancellation_observed);
     let task_handles = Arc::new(std::sync::Mutex::new(
         None::<(TestEncodeTaskHandle, TestEncodeTaskHandle)>,
     ));
@@ -8500,6 +8506,17 @@ fn parallel_encode_region_error_drains_claimed_and_queued_pool_work() {
             let observed_pool_in_body = observed_pool.clone();
             let body_result =
                 run_in_parallel_encode_region(&cx, |encode_cx, encode_tracker| async move {
+                    let _observer = encode_cx
+                        .spawn(move |child| async move {
+                            observer_started_in_task
+                                .store(true, std::sync::atomic::Ordering::Release);
+                            while child.checkpoint().is_ok() {
+                                crate::runtime::yield_now().await;
+                            }
+                            cancellation_observed_in_task
+                                .store(true, std::sync::atomic::Ordering::Release);
+                        })
+                        .expect("admit a cooperative encode-region cancellation observer");
                     let claimed = encode_tracker
                         .spawn_blocking(&encode_cx, move |child| {
                             claimed_started_tx
@@ -8510,21 +8527,35 @@ fn parallel_encode_region_error_drains_claimed_and_queued_pool_work() {
                             }
                             claimed_cancelled_in_task
                                 .store(true, std::sync::atomic::Ordering::Release);
+                            // Keep the pool occupied until a separately admitted
+                            // child has observed the region's cancellation wave.
+                            let deadline = Instant::now() + Duration::from_secs(10);
+                            while !cancellation_observed.load(std::sync::atomic::Ordering::Acquire) {
+                                assert!(
+                                    Instant::now() < deadline,
+                                    "region cancellation observer must run"
+                                );
+                                std::thread::park_timeout(Duration::from_millis(1));
+                            }
                             Err::<ParallelEncodedBlock, String>(
                                 "claimed encode observed operation-region cancellation".to_string(),
                             )
                         })
                         .expect("claimed block encode spawns through the production tracker");
-                    let queued = spawn_parallel_encode_block(
-                        &encode_cx,
-                        &encode_tracker,
-                        config,
-                        object_id,
-                        1,
-                        queued_bytes,
-                        3,
-                    )
-                    .expect("queued block encode spawns through production helper");
+                    let queued = encode_tracker
+                        .spawn_blocking(&encode_cx, move |_child| {
+                            queued_invoked_in_task
+                                .store(true, std::sync::atomic::Ordering::Release);
+                            let started = Instant::now();
+                            let symbols =
+                                encode_block_symbols(&config, object_id, 1, &queued_bytes, 3)?;
+                            Ok::<_, String>(ParallelEncodedBlock {
+                                symbols,
+                                encode_micros: duration_micros_saturating(started.elapsed()),
+                                kernel: crate::raptorq::gf256::active_kernel(),
+                            })
+                        })
+                        .expect("queued real block encode spawns through production tracker");
                     *stored_task_handles
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner) =
@@ -8534,6 +8565,7 @@ fn parallel_encode_region_error_drains_claimed_and_queued_pool_work() {
                         std::time::Instant::now() + std::time::Duration::from_secs(10);
                     let mut claimed_started = false;
                     while !claimed_started
+                        || !observer_started.load(std::sync::atomic::Ordering::Acquire)
                         || observed_pool_in_body.busy_threads() != 1
                         || observed_pool_in_body.pending_count() != 1
                     {
@@ -8594,24 +8626,265 @@ fn parallel_encode_region_error_drains_claimed_and_queued_pool_work() {
         claimed_cancelled.load(std::sync::atomic::Ordering::Acquire),
         "the claimed closure must acknowledge its child-region cancellation"
     );
+    assert!(
+        !queued_invoked.load(std::sync::atomic::Ordering::Acquire),
+        "region cancellation must prevent queued encode invocation even while its handle is retained"
+    );
 
     assert!(
         matches!(
-            claimed.try_join(),
-            Err(crate::runtime::task_handle::JoinError::Cancelled(_))
+            runtime.block_on(join_parallel_encode_block(&Cx::for_testing(), &mut claimed)),
+            Err(RqError::Cancelled)
         ),
-        "claimed encode wrapper must retain cancellation attribution"
+        "the production sender join must retain claimed-worker cancellation"
     );
     assert!(
         matches!(
-            queued.try_join(),
-            Err(crate::runtime::task_handle::JoinError::Cancelled(_))
+            runtime.block_on(join_parallel_encode_block(&Cx::for_testing(), &mut queued)),
+            Err(RqError::Cancelled)
         ),
-        "queued encode wrapper must retain cancellation attribution"
+        "the production sender join must retain queued-worker cancellation"
     );
     assert_eq!(pool.pending_count(), 0, "pool queue remains drained");
     assert_eq!(pool.busy_threads(), 0, "pool has no orphaned encode work");
     assert!(runtime.is_quiescent(), "runtime returns to quiescence");
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn parallel_encode_dropped_transfer_does_not_start_queued_body() {
+    use std::sync::atomic::Ordering;
+
+    struct QueuedCapture {
+        state: Arc<NativeRqDecodeState>,
+        dropping: std::sync::mpsc::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    }
+
+    impl Drop for QueuedCapture {
+        fn drop(&mut self) {
+            self.state.dropping.store(true, Ordering::SeqCst);
+            let _ = self.dropping.send(());
+            if self.release.recv_timeout(Duration::from_secs(10)).is_err() {
+                self.state.timed_out.store(true, Ordering::SeqCst);
+            }
+            self.state.retired.store(true, Ordering::SeqCst);
+        }
+    }
+
+    let runtime = crate::runtime::RuntimeBuilder::current_thread()
+        .blocking_threads(1, 1)
+        .build()
+        .expect("native encode cancellation runtime");
+    runtime.block_on(async {
+        let cx = Cx::current().expect("native sender context");
+        let (mut blocker, mut blocker_gate) = gated_native_rq_decode(&cx, false);
+        wait_for_native_rq_decode(
+            || blocker_gate.state.started.load(Ordering::SeqCst),
+            "occupy the real blocking worker before queueing encode",
+        )
+        .await;
+        let outer = cx
+            .open_child_region(crate::cx::ChildRegionSpec::inherit())
+            .await
+            .expect("sender parent region");
+        let outer_cx = outer.cx().clone();
+        let state = Arc::new(NativeRqDecodeState::default());
+        let (dropping_tx, dropping_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let capture = QueuedCapture {
+            state: Arc::clone(&state),
+            dropping: dropping_tx,
+            release: release_rx,
+        };
+        // This gate also releases the destructor during assertion unwinding.
+        let mut queued_gate = NativeRqDecodeGate {
+            state: Arc::clone(&state),
+            work: None,
+            capture: Some(release_tx),
+        };
+        let body_state = Arc::clone(&state);
+        let observer_context = Arc::new(std::sync::Mutex::new(None::<Cx>));
+        let observed_context = Arc::clone(&observer_context);
+        let mut transfer = Box::pin(run_in_parallel_encode_region(
+            &outer_cx,
+            move |encode_cx, tracker| async move {
+                let observer = encode_cx
+                    .spawn(move |child| async move {
+                        *observed_context.lock().expect("observer context lock") =
+                            Some(child.clone());
+                        while child.checkpoint().is_ok() {
+                            crate::runtime::yield_now().await;
+                        }
+                    })
+                    .expect("admit cancellation observer in the encode region");
+                let queued = tracker
+                    .spawn_blocking(&encode_cx, move |_child| {
+                        let _capture = capture;
+                        // Like the production matrix encode, this body cannot
+                        // check cancellation while executing its CPU kernel.
+                        body_state.started.store(true, Ordering::SeqCst);
+                    })
+                    .expect("queue through the production encode tracker");
+                std::future::pending::<()>().await;
+                drop(queued);
+                drop(observer);
+                Ok::<(), RqError>(())
+            },
+        ));
+        let pool = cx.blocking_pool_handle().expect("native pool");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            assert!(native_rq_decode_wait_is_pending(transfer.as_mut()).await);
+            if pool.pending_count() == 1
+                && observer_context
+                    .lock()
+                    .expect("observer context lock")
+                    .is_some()
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "encode must reach the real pool queue"
+            );
+            crate::runtime::yield_now().await;
+        }
+        assert!(!state.started.load(Ordering::SeqCst));
+        assert!(!state.dropping.load(Ordering::SeqCst));
+
+        drop(transfer);
+        blocker_gate.release_work();
+        blocker_gate.release_capture();
+        // Do not poll the current-thread scheduler between dropping the sender
+        // and the pool claiming its queued job. Ordinary TaskHandle drop could
+        // otherwise appear safe because wrapper cancellation happened to win.
+        // The drained handle must synchronously fence invocation at this point.
+        dropping_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("pool must retire the cancelled queued closure's capture");
+        assert!(
+            !state.started.load(Ordering::SeqCst),
+            "dropping the transfer must prevent queued encode body invocation"
+        );
+        assert!(!state.retired.load(Ordering::SeqCst));
+
+        let mut close = Box::pin(outer.close());
+        assert!(native_rq_decode_wait_is_pending(close.as_mut()).await);
+        wait_for_native_rq_decode(
+            || {
+                observer_context
+                    .lock()
+                    .expect("observer context lock")
+                    .as_ref()
+                    .is_some_and(Cx::is_cancel_requested)
+            },
+            "dropping the sender must cancel its admitted region children",
+        )
+        .await;
+        assert!(
+            native_rq_decode_wait_is_pending(close.as_mut()).await,
+            "region close must retain the queued encode's physical capture"
+        );
+        queued_gate.release_capture();
+        close
+            .await
+            .expect("sender region closes after capture retirement");
+        blocker
+            .handle
+            .join()
+            .await
+            .expect("blocker join")
+            .expect("blocker work");
+        blocker_gate.assert_retired();
+        queued_gate.assert_retired();
+        assert!(!state.started.load(Ordering::SeqCst));
+        assert_eq!(pool.pending_count(), 0);
+    });
+    assert_native_rq_runtime_retired(runtime);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn parallel_encode_native_join_preserves_cancellation_and_worker_errors() {
+    use std::sync::atomic::Ordering;
+
+    let runtime = crate::runtime::RuntimeBuilder::current_thread()
+        .blocking_threads(1, 1)
+        .build()
+        .expect("native encode join runtime");
+    runtime.block_on(async {
+        let cx = Cx::current().expect("native sender context");
+        let tracker = ParallelEncodeTracker::default();
+        let (mut blocker, mut gate) = gated_native_rq_decode(&cx, false);
+        wait_for_native_rq_decode(
+            || gate.state.started.load(Ordering::SeqCst),
+            "occupy the native pool before the production encode producer",
+        )
+        .await;
+        let mut queued = spawn_parallel_encode_block(
+            &cx,
+            &tracker,
+            crate::config::EncodingConfig {
+                repair_overhead: 1.0,
+                max_block_size: 128,
+                symbol_size: 128,
+                encoding_parallelism: 1,
+                decoding_parallelism: 1,
+            },
+            ObjectId::new_for_test(0xF209),
+            0,
+            vec![7; 128],
+            0,
+        )
+        .expect("actual production encode producer admits the job");
+        let pool = cx.blocking_pool_handle().expect("native encode pool");
+        wait_for_native_rq_decode(
+            || pool.pending_count() == 1,
+            "actual encode job must be queued before cancellation",
+        )
+        .await;
+        queued.abort_with_reason(crate::types::CancelReason::user("cancel queued encode"));
+        gate.release_work();
+        gate.release_capture();
+        assert!(
+            matches!(join_parallel_encode_block(&cx, &mut queued).await, Err(RqError::Cancelled)),
+            "the production sender adapter must preserve native queued cancellation"
+        );
+        blocker
+            .handle
+            .join()
+            .await
+            .expect("blocker join")
+            .expect("blocker work");
+        gate.assert_retired();
+
+        let mut failed = tracker
+            .spawn_blocking(&cx, |_child| {
+                Err::<ParallelEncodedBlock, String>("native encode failure sentinel".into())
+            })
+            .expect("admit actual failing encode worker");
+        assert!(
+            matches!(join_parallel_encode_block(&cx, &mut failed).await,
+                Err(RqError::Coding(message)) if message == "native encode failure sentinel"),
+            "a worker's completed encode failure must remain a coding error"
+        );
+        let mut panicked = tracker
+            .spawn_blocking(&cx, |_child| -> Result<ParallelEncodedBlock, String> {
+                panic!("native encode panic sentinel");
+            })
+            .expect("admit actual panicking encode worker");
+        assert!(
+            matches!(join_parallel_encode_block(&cx, &mut panicked).await,
+                Err(RqError::Coding(message))
+                    if message.contains("encode task failed")
+                        && message.contains("native encode panic sentinel")),
+            "worker panic must retain its encode diagnostic"
+        );
+        tracker.drain().await;
+        assert_eq!(pool.pending_count(), 0);
+    });
+    assert_native_rq_runtime_retired(runtime);
 }
 
 #[test]

@@ -9868,6 +9868,36 @@ struct ParallelEncodeTracker {
 
 struct ParallelEncodeCompletion(Arc<AtomicBool>);
 
+enum ParallelEncodeHandle<T> {
+    Inline(crate::runtime::TaskHandle<T>),
+    Native(
+        crate::runtime::spawn_blocking::DrainedBlockingHandle<
+            Result<T, crate::types::CancelReason>,
+        >,
+    ),
+}
+
+impl<T> ParallelEncodeHandle<T> {
+    fn abort_with_reason(&self, reason: crate::types::CancelReason) {
+        match self {
+            Self::Inline(handle) => handle.abort_with_reason(reason),
+            Self::Native(handle) => handle.abort_with_reason(reason),
+        }
+    }
+
+    async fn join(&mut self, cx: &Cx) -> Result<T, crate::runtime::JoinError> {
+        match self {
+            Self::Inline(handle) => handle.join(cx).await,
+            // Retire captures before exposing cancellation. A panic wins over
+            // cancellation, and a value already produced stays caller-owned.
+            Self::Native(handle) => handle
+                .join()
+                .await?
+                .map_err(crate::runtime::JoinError::Cancelled),
+        }
+    }
+}
+
 impl Drop for ParallelEncodeCompletion {
     fn drop(&mut self) {
         self.0.store(true, Ordering::Release);
@@ -9879,22 +9909,67 @@ impl ParallelEncodeTracker {
         &self,
         cx: &Cx,
         body: F,
-    ) -> Result<crate::runtime::TaskHandle<T>, RqError>
+    ) -> Result<ParallelEncodeHandle<T>, RqError>
     where
         T: Send + 'static,
         F: FnOnce(Cx) -> T + Send + 'static,
     {
+        let pool = cx.blocking_pool_handle();
+        if let Some(pool) = &pool {
+            // Unlike decoder fallback, sender encoding has always refused a
+            // forbidden pool. Neither refusal may bypass admission inline.
+            if pool.forbids_blocking() {
+                return Err(RqError::Coding(
+                    "encode spawn failed: RuntimeUnavailable".to_string(),
+                ));
+            }
+            if matches!(
+                pool.admission_policy(),
+                crate::runtime::BlockingAdmissionPolicy::BoundedBytes { .. }
+            ) {
+                return Err(RqError::Coding(
+                    "parallel RQ encode requires a blocking pool accepting uncharged work"
+                        .to_string(),
+                ));
+            }
+        }
         let completed = Arc::new(AtomicBool::new(false));
         self.completions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(Arc::clone(&completed));
         let completion = ParallelEncodeCompletion(completed);
-        cx.spawn_blocking(move |child| {
-            let _completion = completion;
-            body(child)
-        })
-        .map_err(|error| RqError::Coding(format!("encode spawn failed: {error:?}")))
+        let spawned = if pool.is_some() {
+            cx.spawn_blocking_drained(move |child| {
+                let _completion = completion;
+                // Region close also cancels handles retained outside the
+                // operation future. Check before entering expensive encoding,
+                // in addition to the drained handle's queued-work claim fence.
+                child.checkpoint().map_err(|_| {
+                    child
+                        .cancel_reason()
+                        .unwrap_or_else(crate::types::CancelReason::parent_cancelled)
+                })?;
+                let value = body(child.clone());
+                // Match ordinary blocking-task cancellation dominance while
+                // retaining the physical closure and its captures until done.
+                child.checkpoint().map_err(|_| {
+                    child
+                        .cancel_reason()
+                        .unwrap_or_else(crate::types::CancelReason::parent_cancelled)
+                })?;
+                Ok(value)
+            })
+            .map(ParallelEncodeHandle::Native)
+        } else {
+            // The no-pool path remains an admitted deterministic inline task.
+            cx.spawn_blocking(move |child| {
+                let _completion = completion;
+                body(child)
+            })
+            .map(ParallelEncodeHandle::Inline)
+        };
+        spawned.map_err(|error| RqError::Coding(format!("encode spawn failed: {error:?}")))
     }
 
     async fn drain(&self) {
@@ -9921,7 +9996,7 @@ fn spawn_parallel_encode_block(
     sbn: u8,
     data: Vec<u8>,
     repair_count: usize,
-) -> Result<crate::runtime::TaskHandle<Result<ParallelEncodedBlock, String>>, RqError> {
+) -> Result<ParallelEncodeHandle<Result<ParallelEncodedBlock, String>>, RqError> {
     tracker.spawn_blocking(cx, move |_child| {
         let started = Instant::now();
         let symbols = encode_block_symbols(&cfg, object_id, sbn, &data, repair_count)?;
@@ -9932,6 +10007,20 @@ fn spawn_parallel_encode_block(
             kernel: crate::raptorq::gf256::active_kernel(),
         })
     })
+}
+
+async fn join_parallel_encode_block(
+    cx: &Cx,
+    handle: &mut ParallelEncodeHandle<Result<ParallelEncodedBlock, String>>,
+) -> Result<ParallelEncodedBlock, RqError> {
+    match handle.join(cx).await {
+        Ok(Ok(encoded)) => Ok(encoded),
+        Ok(Err(error)) => Err(RqError::Coding(error)),
+        Err(crate::runtime::JoinError::Cancelled(_)) => Err(RqError::Cancelled),
+        Err(join_error) => Err(RqError::Coding(format!(
+            "encode task failed: {join_error:?}"
+        ))),
+    }
 }
 
 async fn run_in_parallel_encode_region<T, F, Fut>(cx: &Cx, body: F) -> Result<T, RqError>
@@ -9950,11 +10039,9 @@ where
         .close()
         .await
         .map_err(|error| RqError::Coding(format!("parallel encode region close failed: {error}")));
-    // `Cx::spawn_blocking` cancellation is deliberately soft. Child-region close resolves the
-    // region-owned wrappers, while the pool may either finish a claimed CPU closure or drop/run a
-    // queued closure according to the wrapper/pool race. Wait for every tracked closure to finish
-    // or be dropped before returning, so an encode error cannot leave encode code running behind
-    // the transfer. Pool-handle terminal bookkeeping is observed separately by the regression.
+    // Pooled jobs remain region-owned until physical retirement, and a cancelled
+    // queued job cannot begin encoding. Retain the completion backstop for both
+    // native and deterministic inline execution without applying late results.
     tracker.drain().await;
     match (body_result, close_result) {
         (Ok(value), Ok(())) => Ok(value),
@@ -10182,10 +10269,19 @@ where
                         usize,
                         usize,
                         RepairCursorPlan,
-                        crate::runtime::TaskHandle<Result<ParallelEncodedBlock, String>>,
+                        ParallelEncodeHandle<Result<ParallelEncodedBlock, String>>,
                     )> = Vec::new();
                     for window_start in (0..blocks.len()).step_by(par_batch) {
                         if cx.checkpoint().is_err() {
+                            let reason = cx.cancel_reason().unwrap_or_else(
+                                crate::types::CancelReason::parent_cancelled,
+                            );
+                            // Caller cancellation can be local to its Cx.
+                            // Fence every queued block before waiting for any
+                            // claimed solve in the operation's child region.
+                            for (_, _, _, handle) in &pending {
+                                handle.abort_with_reason(reason.clone());
+                            }
                             for (_, _, _, mut handle) in pending.drain(..) {
                                 let _ = handle.join(&encode_cx).await;
                             }
@@ -10230,15 +10326,8 @@ where
                         for (block_index, source_symbols, repair_plan, mut handle) in
                             pending.drain(..)
                         {
-                            let encoded = match handle.join(&encode_cx).await {
-                                Ok(Ok(encoded)) => encoded,
-                                Ok(Err(e)) => return Err(RqError::Coding(e)),
-                                Err(join_err) => {
-                                    return Err(RqError::Coding(format!(
-                                        "encode task failed: {join_err:?}"
-                                    )));
-                                }
-                            };
+                            let encoded =
+                                join_parallel_encode_block(&encode_cx, &mut handle).await?;
                             trace_parallel_encode_block(
                                 cx,
                                 blocks[block_index].sbn,
@@ -10286,15 +10375,8 @@ where
                     }
                     let mut ring_occupancy = pending.len();
                     for (block_index, source_symbols, repair_plan, mut handle) in pending {
-                        let encoded = match handle.join(&encode_cx).await {
-                            Ok(Ok(encoded)) => encoded,
-                            Ok(Err(e)) => return Err(RqError::Coding(e)),
-                            Err(join_err) => {
-                                return Err(RqError::Coding(format!(
-                                    "encode task failed: {join_err:?}"
-                                )));
-                            }
-                        };
+                        let encoded =
+                            join_parallel_encode_block(&encode_cx, &mut handle).await?;
                         trace_parallel_encode_block(
                             cx,
                             blocks[block_index].sbn,
