@@ -152,6 +152,14 @@ artifacts.
   rollback debt. Successful recovery clears that debt without erasing
   independent session dirtiness, so a prior session change cannot silently
   become eligible for pool reuse.
+- **PostgreSQL transaction guards stop after an acknowledged transaction end.**
+  Once the server reports an idle session, further guarded statements,
+  savepoints, commit, and rollback return `TransactionFinished` without
+  sending SQL that would run in autocommit mode. Transaction helpers cannot
+  turn an already-ended transaction into a successful no-op commit. Dropping
+  such a guard preserves an acknowledged, open idle connection without
+  inventing rollback debt; failed transaction blocks still support savepoint
+  recovery, and independent connection dirtiness remains intact.
 - **PostgreSQL managed transaction boundaries verify server completion.**
   Begin, commit, rollback, and failed-begin cleanup require the expected
   command completion and transaction state. Invalid acknowledgements cannot

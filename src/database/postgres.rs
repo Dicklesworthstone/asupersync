@@ -10739,6 +10739,10 @@ fn build_close_msg(target: u8, name: &str) -> Result<Vec<u8>, PgError> {
 /// The transaction will be rolled back on drop if not committed.
 /// Dropping an unresolved savepoint requires a full rollback: subsequent
 /// statements through this handle are refused before any SQL is sent.
+/// If caller-issued SQL leaves the server idle, this handle is finished:
+/// later statements, commit, and rollback return [`PgError::TransactionFinished`].
+/// A raw command that ends and restarts a transaction within one exchange
+/// does not expose an idle boundary; callers remain responsible for such SQL.
 pub struct PgTransaction<'a> {
     conn: &'a mut PgConnection,
     finished: bool,
@@ -10805,7 +10809,7 @@ impl PgTransaction<'_> {
     /// connection would roll the transaction back and run that statement in
     /// autocommit mode instead of inside this transaction.
     fn check_open(&self) -> Result<(), PgError> {
-        if self.finished {
+        if self.finished || self.conn.inner.transaction_status == b'I' {
             return Err(PgError::TransactionFinished);
         }
         if self.conn.inner.needs_rollback {
@@ -10816,6 +10820,8 @@ impl PgTransaction<'_> {
         // A server-side failed block ('E') is still a live transaction:
         // ROLLBACK TO SAVEPOINT must remain usable to recover it. Likewise,
         // needs_discard alone concerns pool reuse, not transaction validity.
+        // ReadyForQuery 'I', however, proves caller-issued SQL ended the
+        // transaction. A later statement must not escape into autocommit.
         Ok(())
     }
 
@@ -10827,7 +10833,7 @@ impl PgTransaction<'_> {
 
     /// Commit the transaction.
     pub async fn commit(mut self, cx: &Cx) -> Outcome<(), PgError> {
-        if self.finished {
+        if self.finished || self.conn.inner.transaction_status == b'I' {
             trace_database_transaction(cx, "postgres", "commit", "already_finished");
             return Outcome::Err(PgError::TransactionFinished);
         }
@@ -10881,7 +10887,7 @@ impl PgTransaction<'_> {
 
     /// Rollback the transaction.
     pub async fn rollback(mut self, cx: &Cx) -> Outcome<(), PgError> {
-        if self.finished {
+        if self.finished || self.conn.inner.transaction_status == b'I' {
             trace_database_transaction(cx, "postgres", "rollback", "already_finished");
             return Outcome::Err(PgError::TransactionFinished);
         }
@@ -11014,14 +11020,19 @@ impl Drop for PgTransaction<'_> {
     /// callers can still recover with the inline ROLLBACK fast path without
     /// losing any independent session-discard reason.
     fn drop(&mut self) {
-        // Resolve the obligation first: a transaction dropped without an
-        // explicit commit rolls back, so abort() is the correct discharge.
-        // This also disarms the token's own leak panic. Aborting an
-        // already-taken (committed/rolled-back) obligation is a no-op.
+        // Resolve an unconsumed local obligation without manufacturing a
+        // managed-commit proof. Caller-issued SQL may already have ended
+        // the physical transaction; aborting this token does not claim that
+        // those effects were rolled back.
         if let Some(token) = self.obligation.take() {
             let _ = token.abort();
         }
-        if !self.finished {
+        // An acknowledged idle session owes no new rollback. Preserve any
+        // existing debt and independent discard reason, and keep uncertain
+        // exchanges quarantined even when their last known status was idle.
+        if !self.finished
+            && (self.conn.inner.closed || self.conn.inner.transaction_status != b'I')
+        {
             self.poison_for_rollback();
         }
     }

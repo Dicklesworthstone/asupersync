@@ -3212,6 +3212,7 @@ mod tests {
     #[test]
     fn cancelled_commit_marks_connection_for_rollback() {
         let mut conn = make_test_connection();
+        conn.inner.transaction_status = b'T';
         let cx = cancelled_cx();
 
         let outcome = run(async {
@@ -3232,6 +3233,7 @@ mod tests {
     #[test]
     fn cancelled_rollback_marks_connection_for_rollback() {
         let mut conn = make_test_connection();
+        conn.inner.transaction_status = b'T';
         let cx = cancelled_cx();
 
         let outcome = run(async {
@@ -4746,6 +4748,444 @@ mod tests {
                     }
                 }
             });
+        }
+    }
+
+    fn assert_pg_transaction_finished<T>(
+        future: impl std::future::Future<Output = Outcome<T, PgError>>,
+    ) {
+        let mut future = std::pin::pin!(future);
+        let mut context = Context::from_waker(std::task::Waker::noop());
+        assert!(
+            matches!(
+                future.as_mut().poll(&mut context),
+                Poll::Ready(Outcome::Err(PgError::TransactionFinished))
+            ),
+            "an idle transaction handle must refuse before starting wire I/O"
+        );
+    }
+
+    fn assert_no_pg_transaction_request(peer: &mut std::net::TcpStream) {
+        peer.set_nonblocking(true).expect("inspect transaction requests");
+        assert!(matches!(
+            std::io::Read::read(peer, &mut [0_u8; 1]),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock
+        ));
+        peer.set_nonblocking(false).expect("restore transaction peer");
+    }
+
+    // br-asupersync-2oh2u.6.5: a live Rust guard cannot authorize later
+    // autocommit work after the backend acknowledges an idle transaction.
+    #[test]
+    fn idle_transaction_handles_refuse_statements_and_terminal_success() {
+        use crate::database::transaction::PgSavepoint;
+
+        for workers in [1, 2] {
+            run_native_orphan_recovery_test(workers, |cx| async move {
+                for sql in ["COMMIT", "ROLLBACK"] {
+                    for finish in ["commit", "rollback", "drop"] {
+                        for dirty in [false, true] {
+                            let (mut conn, mut peer) = make_orphan_recovery_connection_with_peer();
+                            conn.inner.needs_discard = dirty;
+                            reply_complete(&mut peer, "BEGIN", b'T');
+                            let mut tx = match conn.begin(&cx).await {
+                                Outcome::Ok(tx) => tx,
+                                _ => panic!("expected acknowledged BEGIN"),
+                            };
+                            assert_eq!(
+                                read_frontend_frame(&mut peer),
+                                (b'Q', b"BEGIN\0".to_vec())
+                            );
+                            assert_eq!(tx.conn.inner.transaction_status, b'T');
+
+                            // A command tag alone does not finish the handle.
+                            // Wait for the actual operation and request before
+                            // publishing the idle ReadyForQuery boundary.
+                            std::io::Write::write_all(&mut peer, &command_complete_message(sql))
+                                .expect("write caller-issued terminal command tag");
+                            let mut ending = Box::pin(tx.execute_unchecked(&cx, sql));
+                            witness_managed_control_pending(
+                                ending.as_mut(),
+                                &mut peer,
+                                &backend_message(b'Q', format!("{sql}\0").as_bytes()),
+                            )
+                            .await;
+                            std::io::Write::write_all(&mut peer, &ready_for_query(b'I'))
+                                .expect("acknowledge caller-issued transaction end");
+                            assert!(matches!(ending.await, Outcome::Ok(0)));
+                            assert_eq!(tx.conn.inner.transaction_status, b'I');
+                            assert!(!tx.conn.inner.closed);
+
+                            assert_pg_transaction_finished(tx.query_unchecked(&cx, "SELECT 1"));
+                            assert_pg_transaction_finished(
+                                tx.execute_unchecked(&cx, "UPDATE must_not_run SET v = 1"),
+                            );
+                            assert_pg_transaction_finished(
+                                tx.query_params(&cx, "SELECT $1", &[&1_i32]),
+                            );
+                            assert_pg_transaction_finished(tx.execute_params(
+                                &cx,
+                                "UPDATE must_not_run SET v = $1",
+                                &[&1_i32],
+                            ));
+                            let statement = PgStatement {
+                                name: "held_statement".to_string(),
+                                sql: "SELECT 1".to_string(),
+                                param_oids: Vec::new(),
+                                columns: Vec::new(),
+                                session_generation: tx.conn.inner.session_generation,
+                            };
+                            assert_pg_transaction_finished(tx.query_cursor_prepared(
+                                &cx,
+                                &statement,
+                                &[],
+                                PgCursorConfig::new(1, 128).unwrap(),
+                            ));
+                            assert_pg_transaction_finished(tx.query_cursor_params(
+                                &cx,
+                                "SELECT $1",
+                                &[&1_i32],
+                                PgCursorConfig::new(1, 128).unwrap(),
+                            ));
+                            assert_pg_transaction_finished(PgSavepoint::new(
+                                &mut tx, &cx, "too_late",
+                            ));
+                            match finish {
+                                "commit" => assert_pg_transaction_finished(tx.commit(&cx)),
+                                "rollback" => assert_pg_transaction_finished(tx.rollback(&cx)),
+                                "drop" => drop(tx),
+                                _ => unreachable!(),
+                            }
+                            assert_no_pg_transaction_request(&mut peer);
+                            assert!(!conn.inner.closed);
+                            assert!(!conn.inner.needs_rollback, "idle creates no new cleanup debt");
+                            assert_eq!(conn.needs_discard(), dirty);
+
+                            // Connection-level work is still valid after the
+                            // handle ends; it must not send an orphan ROLLBACK.
+                            reply_complete(&mut peer, "UPDATE 1", b'I');
+                            assert!(matches!(
+                                conn.execute_unchecked(&cx, "UPDATE after_end SET v = 1").await,
+                                Outcome::Ok(1)
+                            ));
+                            assert_eq!(
+                                read_frontend_frame(&mut peer),
+                                (b'Q', b"UPDATE after_end SET v = 1\0".to_vec())
+                            );
+                            conn.close().await.expect("close idle connection");
+                            assert_eq!(read_frontend_frame(&mut peer), (b'X', Vec::new()));
+                            assert_orphan_peer_closed(&mut peer, "finished transaction handle");
+                        }
+                    }
+                }
+            });
+        }
+    }
+
+    async fn borrowed_raw_end_body<'env>(
+        tx: &mut PgTransaction<'_>,
+        cx: &Cx,
+        state: &mut BorrowedControlState<'env>,
+    ) -> Outcome<&'env str, PgError> {
+        state.calls += 1;
+        state.marker.set(state.calls);
+        tx.execute_unchecked(cx, state.result).await.map(|_| state.result)
+    }
+
+    #[test]
+    fn borrowed_helpers_refuse_success_after_the_body_ends_its_transaction() {
+        use crate::database::transaction::{
+            RetryPolicy, ScopedTransactionFuture, TransactionReplaySafety,
+            with_pg_transaction_retry_with_state, with_pg_transaction_with_state,
+        };
+
+        for workers in [1, 2] {
+            for retry in [false, true] {
+                run_native_orphan_recovery_test(workers, move |cx| async move {
+                    for command in ["COMMIT", "ROLLBACK"] {
+                        let (mut conn, mut peer) = make_orphan_recovery_connection_with_peer();
+                        reply_complete(&mut peer, "BEGIN", b'T');
+                        std::io::Write::write_all(&mut peer, &command_complete_message(command))
+                            .expect("write body command completion");
+                        let sql = String::from(command);
+                        // Local, non-Clone state is Send but not Sync. The
+                        // callback's successful value borrows caller memory.
+                        let mut state = BorrowedControlState {
+                            result: sql.as_str(),
+                            calls: 0,
+                            fail_body: false,
+                            marker: std::cell::Cell::new(0),
+                        };
+                        let policy = RetryPolicy {
+                            max_retries: 1,
+                            base_delay: Duration::ZERO,
+                            max_delay: Duration::ZERO,
+                        };
+                        let mut helper = Box::pin(async {
+                            if retry {
+                                with_pg_transaction_retry_with_state(
+                                    &mut conn,
+                                    &cx,
+                                    &policy,
+                                    TransactionReplaySafety::ReplaySafe,
+                                    &mut state,
+                                    |tx, cx, state| {
+                                        ScopedTransactionFuture::new(borrowed_raw_end_body(
+                                            tx, cx, state,
+                                        ))
+                                    },
+                                )
+                                .await
+                            } else {
+                                with_pg_transaction_with_state(
+                                    &mut conn,
+                                    &cx,
+                                    &mut state,
+                                    |tx, cx, state| {
+                                        ScopedTransactionFuture::new(borrowed_raw_end_body(
+                                            tx, cx, state,
+                                        ))
+                                    },
+                                )
+                                .await
+                            }
+                        });
+                        let requests = [
+                            backend_message(b'Q', b"BEGIN\0"),
+                            backend_message(b'Q', format!("{command}\0").as_bytes()),
+                        ]
+                        .concat();
+                        witness_managed_control_pending(helper.as_mut(), &mut peer, &requests)
+                            .await;
+                        // Let the old implementation complete its erroneous
+                        // second COMMIT, so it fails the exact result oracle
+                        // instead of merely timing out. The repair consumes
+                        // only the first ReadyForQuery and sends no COMMIT.
+                        std::io::Write::write_all(
+                            &mut peer,
+                            &[
+                                ready_for_query(b'I'),
+                                command_complete_message("COMMIT"),
+                                ready_for_query(b'I'),
+                            ]
+                            .concat(),
+                        )
+                        .expect("release body end and old-code terminal reply");
+                        assert!(matches!(
+                            helper.await,
+                            Outcome::Err(PgError::TransactionFinished)
+                        ));
+                        assert_eq!(state.calls, 1, "a finished transaction must not replay");
+                        assert_eq!(state.marker.get(), state.calls);
+                        assert!(!conn.inner.closed);
+                        assert!(!conn.inner.needs_rollback);
+                        assert!(!conn.needs_discard());
+                        assert_no_pg_transaction_request(&mut peer);
+                        // The supplemental old-code reply is intentionally
+                        // unread on the repaired path. Dispose of this fixture.
+                        drop(conn);
+                        assert_orphan_peer_closed(&mut peer, "helper refused idle commit");
+                    }
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn extended_transaction_end_preserves_success_or_server_error_then_finishes_the_handle() {
+        for workers in [1, 2] {
+            run_native_orphan_recovery_test(workers, |cx| async move {
+                for query_rows in [false, true] {
+                    for refused in [false, true] {
+                        let (mut conn, mut peer) = make_orphan_recovery_connection_with_peer();
+                        reply_complete(&mut peer, "BEGIN", b'T');
+                        let mut tx = match conn.begin(&cx).await {
+                            Outcome::Ok(tx) => tx,
+                            _ => panic!("expected transaction"),
+                        };
+                        assert_eq!(read_frontend_frame(&mut peer), (b'Q', b"BEGIN\0".to_vec()));
+                        reply_parse_bind_complete(&mut peer);
+                        if query_rows {
+                            std::io::Write::write_all(&mut peer, &backend_message(b'n', &[]))
+                                .expect("write portal NoData");
+                        }
+                        let reply = if refused {
+                            error_response_message("40001", "raw commit serialization failure")
+                        } else {
+                            command_complete_message("COMMIT")
+                        };
+                        std::io::Write::write_all(&mut peer, &reply)
+                            .expect("write raw extended COMMIT result");
+                        let mut requests = build_parse_msg("", "COMMIT", &[]).unwrap();
+                        requests.extend(build_bind_msg("", "", &[], Format::Text).unwrap());
+                        if query_rows {
+                            requests.extend(build_describe_msg(b'P', "").unwrap());
+                        }
+                        requests.extend(build_execute_msg("", 0).unwrap());
+                        requests.extend(build_sync_msg().unwrap());
+                        let mut ending = Box::pin(async {
+                            if query_rows {
+                                tx.query_params(&cx, "COMMIT", &[]).await.map(drop)
+                            } else {
+                                tx.execute_params(&cx, "COMMIT", &[]).await.map(drop)
+                            }
+                        });
+                        witness_managed_control_pending(ending.as_mut(), &mut peer, &requests)
+                            .await;
+                        std::io::Write::write_all(&mut peer, &ready_for_query(b'I'))
+                            .expect("acknowledge extended transaction end");
+                        let outcome = ending.await;
+                        if refused {
+                            assert!(matches!(
+                                outcome,
+                                Outcome::Err(PgError::Server { code, message, .. })
+                                    if code == "40001" && message == "raw commit serialization failure"
+                            ));
+                        } else {
+                            assert!(matches!(outcome, Outcome::Ok(())));
+                        }
+                        assert_eq!(tx.conn.inner.transaction_status, b'I');
+                        assert_pg_transaction_finished(tx.query_unchecked(&cx, "SELECT 1"));
+                        assert_pg_transaction_finished(tx.commit(&cx));
+                        assert_no_pg_transaction_request(&mut peer);
+                        assert!(!conn.inner.closed);
+                        assert!(!conn.needs_discard());
+                        conn.close().await.expect("close ended extended transaction");
+                        assert_eq!(read_frontend_frame(&mut peer), (b'X', Vec::new()));
+                        assert_orphan_peer_closed(&mut peer, "extended transaction end");
+                    }
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn active_empty_queries_and_failed_block_savepoint_recovery_still_commit() {
+        use crate::database::transaction::PgSavepoint;
+
+        for workers in [1, 2] {
+            run_native_orphan_recovery_test(workers, |cx| async move {
+                let (mut conn, mut peer) = make_orphan_recovery_connection_with_peer();
+                reply_complete(&mut peer, "BEGIN", b'T');
+                let mut tx = match conn.begin(&cx).await {
+                    Outcome::Ok(tx) => tx,
+                    _ => panic!("expected transaction"),
+                };
+                assert_eq!(read_frontend_frame(&mut peer), (b'Q', b"BEGIN\0".to_vec()));
+                std::io::Write::write_all(
+                    &mut peer,
+                    &[backend_message(b'I', &[]), ready_for_query(b'T')].concat(),
+                )
+                .expect("write empty query reply in active transaction");
+                assert!(matches!(tx.execute_unchecked(&cx, "").await, Outcome::Ok(0)));
+                assert_eq!(read_frontend_frame(&mut peer), (b'Q', vec![0]));
+                reply_complete(&mut peer, "SAVEPOINT", b'T');
+                let mut savepoint = match PgSavepoint::new(&mut tx, &cx, "recoverable").await {
+                    Outcome::Ok(savepoint) => savepoint,
+                    other => panic!("expected savepoint: {other:?}"),
+                };
+                assert_eq!(
+                    read_frontend_frame(&mut peer),
+                    (b'Q', b"SAVEPOINT recoverable\0".to_vec())
+                );
+                std::io::Write::write_all(
+                    &mut peer,
+                    &[
+                        error_response_message("23505", "duplicate key"),
+                        ready_for_query(b'E'),
+                    ]
+                    .concat(),
+                )
+                .expect("write recoverable statement error");
+                assert!(matches!(
+                    savepoint
+                        .transaction()
+                        .execute_unchecked(&cx, "INSERT INTO t VALUES (1)")
+                        .await,
+                    Outcome::Err(PgError::Server { code, .. }) if code == "23505"
+                ));
+                assert_eq!(
+                    read_frontend_frame(&mut peer),
+                    (b'Q', b"INSERT INTO t VALUES (1)\0".to_vec())
+                );
+                assert_eq!(savepoint.transaction().conn.inner.transaction_status, b'E');
+                savepoint.transaction().conn.inner.needs_discard = true;
+                reply_complete(&mut peer, "ROLLBACK", b'T');
+                reply_complete(&mut peer, "RELEASE", b'T');
+                assert!(matches!(savepoint.rollback(&cx).await, Outcome::Ok(())));
+                assert_eq!(
+                    read_frontend_frame(&mut peer),
+                    (b'Q', b"ROLLBACK TO SAVEPOINT recoverable\0".to_vec())
+                );
+                assert_eq!(
+                    read_frontend_frame(&mut peer),
+                    (b'Q', b"RELEASE SAVEPOINT recoverable\0".to_vec())
+                );
+                assert_eq!(tx.conn.inner.transaction_status, b'T');
+                reply_complete(&mut peer, "UPDATE 1", b'T');
+                assert!(matches!(
+                    tx.execute_unchecked(&cx, "UPDATE recovered SET v = 1").await,
+                    Outcome::Ok(1)
+                ));
+                assert_eq!(
+                    read_frontend_frame(&mut peer),
+                    (b'Q', b"UPDATE recovered SET v = 1\0".to_vec())
+                );
+                reply_complete(&mut peer, "COMMIT", b'I');
+                assert!(matches!(tx.commit(&cx).await, Outcome::Ok(())));
+                assert_eq!(read_frontend_frame(&mut peer), (b'Q', b"COMMIT\0".to_vec()));
+                assert!(!conn.inner.closed);
+                assert!(!conn.inner.needs_rollback);
+                assert!(conn.needs_discard(), "independent session dirtiness is preserved");
+                conn.close().await.expect("close recovered transaction");
+                assert_eq!(read_frontend_frame(&mut peer), (b'X', Vec::new()));
+                assert_orphan_peer_closed(&mut peer, "savepoint recovery remains active");
+            });
+        }
+    }
+
+    #[test]
+    fn interrupted_caller_issued_commit_keeps_debt_until_idle_is_acknowledged() {
+        for workers in [1, 2] {
+            for cancel in [false, true] {
+                run_native_orphan_recovery_test(workers, move |request_cx| async move {
+                    let active_cx = Cx::current().expect("native worker context");
+                    let (mut conn, mut peer) = make_orphan_recovery_connection_with_peer();
+                    reply_complete(&mut peer, "BEGIN", b'T');
+                    let mut tx = match conn.begin(&request_cx).await {
+                        Outcome::Ok(tx) => tx,
+                        _ => panic!("expected transaction"),
+                    };
+                    assert_eq!(read_frontend_frame(&mut peer), (b'Q', b"BEGIN\0".to_vec()));
+                    std::io::Write::write_all(&mut peer, &command_complete_message("COMMIT"))
+                        .expect("write commit tag without idle acknowledgement");
+                    let mut pending = Box::pin(tx.execute_unchecked(&request_cx, "COMMIT"));
+                    witness_managed_control_pending(
+                        pending.as_mut(),
+                        &mut peer,
+                        &backend_message(b'Q', b"COMMIT\0"),
+                    )
+                    .await;
+                    if cancel {
+                        let reason = CancelReason::user("interrupt caller-issued commit");
+                        request_cx.cancel_with_reason(reason.clone());
+                        assert!(matches!(
+                            pending.await,
+                            Outcome::Cancelled(observed) if observed == reason
+                        ));
+                    } else {
+                        drop(pending);
+                    }
+                    drop(tx);
+                    assert_orphan_recovery_debt(&conn, false, "unacknowledged caller commit");
+                    assert!(matches!(
+                        conn.execute_unchecked(&active_cx, "UPDATE must_not_run SET v = 1").await,
+                        Outcome::Err(PgError::ConnectionClosed)
+                    ));
+                    drop(conn);
+                    assert_orphan_peer_closed(&mut peer, "interrupted caller-issued commit");
+                });
+            }
         }
     }
 
@@ -15564,6 +16004,7 @@ mod tests {
         // explicit commit must: (a) discharge the obligation via abort (no
         // leak panic / drop bomb), and (b) poison the connection for rollback.
         let mut conn = make_test_connection();
+        conn.inner.transaction_status = b'T';
         let cx = Cx::for_testing();
         {
             let tx = PgTransaction {
