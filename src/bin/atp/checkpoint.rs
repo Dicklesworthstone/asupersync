@@ -226,6 +226,9 @@ mod supported {
         .map_err(|error| Failure::new("tls_configuration", format!("{error:?}")))?;
         let timeout = Duration::from_secs(options.timeout_secs);
         let config = QuicConfig {
+            // Checkpoints target the same receivers as `atp send --transport quic`.
+            // Keep the library's established default geometry unchanged.
+            symbol_size: super::super::resolved_symbol_size(None, true),
             max_transfer_bytes: options.max_bytes,
             idle_timeout: timeout,
             handshake_timeout: timeout,

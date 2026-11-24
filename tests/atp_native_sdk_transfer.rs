@@ -222,7 +222,9 @@ async fn transfer(
 ) -> (SendReport, ReceiveReport) {
     let cx = Cx::current().expect("native root context");
     let timeout = Duration::from_secs(20);
-    let sender = native_client("native-sdk-sender", sender_config("localhost", timeout), 1);
+    let send_config = sender_config("localhost", timeout);
+    let read_bound = u64::try_from(send_config.chunk_size).unwrap();
+    let sender = native_client("native-sdk-sender", send_config, 1);
     let receiver_client = native_client("native-sdk-receiver", receiver_config(timeout), 1);
     let receiver = receiver_client
         .bind_receiver(
@@ -238,7 +240,16 @@ async fn transfer(
     assert_eq!(receiver_client.active_transfers(), 1);
     let progress = Arc::new(Mutex::new(ObservedProgress::default()));
     let observed = Arc::clone(&progress);
-    let observe = move |snapshot| observed.lock().unwrap().record(snapshot);
+    let observe = move |snapshot: NativeSendProgress| {
+        let mut observed = observed.lock().unwrap();
+        if let Some(previous) = observed.latest {
+            assert!(
+                snapshot.raw_bytes_queued.saturating_sub(previous.raw_bytes_queued) <= read_bound,
+                "source-stream progress exceeded the configured read bound: {previous:?} -> {snapshot:?}, bound {read_bound}",
+            );
+        }
+        observed.record(snapshot);
+    };
     let (sent, received) = if scoped_workers {
         let scope = cx.scope();
         let mut receive = receiver.spawn(&cx, &scope).expect("admit receiver child");

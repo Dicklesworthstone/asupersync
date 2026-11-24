@@ -8673,8 +8673,10 @@ async fn send_native_source_stream_entries_pumped(
     let flush_chunk = usize::try_from(QUIC_SOURCE_STREAM_FLUSH_BYTES).unwrap_or(usize::MAX);
     let piece = max_chunk.min(flush_chunk).max(1);
     // A framed (compressed) stream reads one codec chunk per frame; a raw
-    // stream reads one write's worth at a time.
-    let read_len = chunk_codec.map_or(piece, |accept| {
+    // stream also honors the configured read bound, including packed files.
+    // Packet sizing must not erase intermediate progress or enlarge the
+    // caller's requested read buffer.
+    let read_len = chunk_codec.map_or(piece.min(config.chunk_size.max(1)), |accept| {
         usize::try_from(accept.max_chunk_raw)
             .unwrap_or(piece)
             .max(1)
