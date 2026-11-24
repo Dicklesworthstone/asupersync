@@ -888,6 +888,59 @@ mod tests {
         }
     }
 
+    #[test]
+    fn full_quic_sender_rejects_contradictory_terminal_receipts() {
+        let manifest = sample_manifest();
+        let valid = sample_receipt();
+        validate_full_receipt(&manifest, &valid).expect("matching full transfer proof");
+
+        for invalid in [
+            ReceiveReceipt {
+                sha_ok: false,
+                ..valid.clone()
+            },
+            ReceiveReceipt {
+                merkle_ok: false,
+                ..valid.clone()
+            },
+            ReceiveReceipt {
+                bytes_received: 0,
+                ..valid.clone()
+            },
+            ReceiveReceipt {
+                files: 0,
+                ..valid.clone()
+            },
+            ReceiveReceipt {
+                reason: Some("failed".into()),
+                ..valid.clone()
+            },
+        ] {
+            let (cx, mut client, _server) = established_pair();
+            let mut control = QuicFrameTransport::open(&cx, &mut client).unwrap();
+            let result = finish_sender_transfer(
+                &cx,
+                &mut client,
+                &mut control,
+                &manifest,
+                "127.0.0.1:4433".parse().unwrap(),
+                invalid,
+                0,
+                0,
+            );
+            assert!(matches!(result, Err(QuicTransportError::Integrity(_))));
+        }
+        let refused = ReceiveReceipt {
+            committed: false,
+            reason: Some("metadata denied".into()),
+            ..valid
+        };
+        assert!(matches!(
+            validate_full_receipt(&manifest, &refused),
+            Err(QuicTransportError::Integrity(reason)) if reason == "metadata denied"
+        ));
+    }
+
     fn varied_bytes(len: usize, seed: u8) -> Vec<u8> {
         (0..len)
             .map(|i| {

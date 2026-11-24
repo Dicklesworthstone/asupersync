@@ -5844,15 +5844,9 @@ fn finish_sender_transfer(
     symbols_sent: u64,
     feedback_rounds: u32,
 ) -> Result<SendReport, QuicTransportError> {
-    send_close(cx, conn, control)?;
-    if !receipt.committed {
-        return Err(QuicTransportError::Integrity(
-            receipt
-                .reason
-                .clone()
-                .unwrap_or_else(|| "receiver did not commit".to_string()),
-        ));
-    }
+    let close = send_close(cx, conn, control);
+    validate_full_receipt(manifest, &receipt)?;
+    close?;
 
     Ok(SendReport {
         transfer_id: manifest.transfer_id.clone(),
@@ -7339,6 +7333,35 @@ fn packed_member_slice<'a>(bytes: &'a [u8], member: &PackedMember) -> Option<&'a
     let len = usize::try_from(member.len).ok()?;
     let end = start.checked_add(len)?;
     bytes.get(start..end)
+}
+
+/// Validate a full-object proof against the manifest the sender actually sent.
+/// No-op and changed-chunk proofs have their own transfer accounting.
+fn validate_full_receipt(
+    manifest: &TransferManifest,
+    receipt: &ReceiveReceipt,
+) -> Result<(), QuicTransportError> {
+    if !receipt.committed {
+        return Err(QuicTransportError::Integrity(
+            receipt
+                .reason
+                .clone()
+                .unwrap_or_else(|| "receiver did not commit".to_string()),
+        ));
+    }
+    if !receipt.sha_ok || !receipt.merkle_ok || receipt.reason.is_some() {
+        return Err(QuicTransportError::Integrity(
+            "committed QUIC proof contains a failed integrity check or a failure reason".into(),
+        ));
+    }
+    if receipt.bytes_received != manifest.total_bytes
+        || receipt.files != manifest_logical_files(manifest)
+    {
+        return Err(QuicTransportError::Integrity(
+            "committed QUIC proof totals disagree with the full-object manifest".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Logical file count: packed entries contribute one per member.
@@ -9321,15 +9344,9 @@ fn finish_native_sender_transfer(
     symbols_sent: u64,
     feedback_rounds: u32,
 ) -> Result<SendReport, QuicTransportError> {
-    send_native_close(cx, conn, control)?;
-    if !receipt.committed {
-        return Err(QuicTransportError::Integrity(
-            receipt
-                .reason
-                .clone()
-                .unwrap_or_else(|| "receiver did not commit".to_string()),
-        ));
-    }
+    let close = send_native_close(cx, conn, control);
+    validate_full_receipt(manifest, &receipt)?;
+    close?;
 
     Ok(SendReport {
         transfer_id: manifest.transfer_id.clone(),

@@ -8435,6 +8435,22 @@ async fn drive_native_source_stream_flush(
     }
 }
 
+/// A Close failure must not replace a peer's refusal or invalid Proof.
+async fn acknowledge_full_receipt(
+    cx: &Cx,
+    link: &mut QuicLink,
+    control: &mut NativeQuicFrameTransport,
+    manifest: &TransferManifest,
+    receipt: &ReceiveReceipt,
+) -> Result<(), QuicTransportError> {
+    let close = match super::send_native_close(cx, &mut link.conn, control) {
+        Ok(()) => link.flush(cx).await.map(|_| ()),
+        Err(error) => Err(error),
+    };
+    super::validate_full_receipt(manifest, receipt)?;
+    close
+}
+
 /// Read control frames the receiver sent while the source stream is still
 /// queueing. The sender otherwise reads control only after its last byte, so
 /// a refusal that arrived mid-stream went unheard until the sender's own
@@ -8479,8 +8495,9 @@ async fn check_source_stream_control(
                 if receipt.committed {
                     *early = Some(frame);
                 } else {
-                    super::send_native_close(cx, &mut link.conn, control)?;
-                    link.flush(cx).await?;
+                    if super::send_native_close(cx, &mut link.conn, control).is_ok() {
+                        let _ = link.flush(cx).await;
+                    }
                     return Err(QuicTransportError::Integrity(
                         receipt
                             .reason
@@ -9522,16 +9539,7 @@ async fn run_sender_session(
                 match reply_frame.frame_type() {
                     FrameType::Proof => {
                         let receipt = super::parse_json::<ReceiveReceipt>(&reply_frame)?;
-                        super::send_native_close(cx, &mut link.conn, &mut control)?;
-                        link.flush(cx).await?;
-                        if !receipt.committed {
-                            return Err(QuicTransportError::Integrity(
-                                receipt
-                                    .reason
-                                    .clone()
-                                    .unwrap_or_else(|| "receiver did not commit".to_string()),
-                            ));
-                        }
+                        acknowledge_full_receipt(cx, link, &mut control, manifest, &receipt).await?;
                         return Ok(SendReport {
                             transfer_id: manifest.transfer_id.clone(),
                             bytes_sent: manifest.total_bytes,
@@ -9656,16 +9664,7 @@ async fn run_sender_session(
                     feedback_rounds,
                     symbols_sent
                 ));
-                super::send_native_close(cx, &mut link.conn, &mut control)?;
-                link.flush(cx).await?;
-                if !receipt.committed {
-                    return Err(QuicTransportError::Integrity(
-                        receipt
-                            .reason
-                            .clone()
-                            .unwrap_or_else(|| "receiver did not commit".to_string()),
-                    ));
-                }
+                acknowledge_full_receipt(cx, link, &mut control, manifest, &receipt).await?;
                 return Ok(SendReport {
                     transfer_id: manifest.transfer_id.clone(),
                     bytes_sent: manifest.total_bytes,
