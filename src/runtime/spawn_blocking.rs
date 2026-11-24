@@ -88,9 +88,12 @@ impl<T> DrainedBlockingHandle<T> {
 
     /// Request attributed cancellation. A queued closure cannot pass the claim
     /// gate after this call; a running closure observes its own cancelled Cx.
+    /// Once the pool has published its result, even if the runtime task has
+    /// yet to retire, the completed closure's Cx is left alone.
     pub fn abort_with_reason(&self, reason: crate::types::CancelReason) {
-        self.state.cancel(reason.clone());
-        self.task.abort_with_reason(reason);
+        if self.state.cancel_if_unfinished(reason.clone()) {
+            self.task.abort_with_reason(reason);
+        }
     }
 
     /// Join actual closure retirement without a cancellation shortcut.

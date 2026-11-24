@@ -160,6 +160,34 @@ fn drained_join_cannot_publish_a_late_result_after_observed_task_teardown() {
 }
 
 #[test]
+fn drained_abort_preserves_a_published_result_before_task_retirement() {
+    use crate::runtime::task_handle::{RetirementBarrier, TaskHandle};
+    use crate::types::CancelReason;
+
+    let child = Cx::for_testing();
+    let (sender, receiver) = crate::channel::oneshot::channel();
+    let barrier = RetirementBarrier::pending();
+    let task = TaskHandle::with_retirement_barrier_for_test(
+        child.task_id(),
+        receiver,
+        Arc::downgrade(&child.inner),
+        Arc::clone(&barrier),
+    );
+    let state = DrainedBlockingState::new();
+    let mut handle = DrainedBlockingHandle::new(task, Arc::clone(&state));
+    state.finish(Ok(child.clone()));
+    assert!(!handle.is_finished());
+    handle.abort_with_reason(CancelReason::shutdown());
+    assert!(state.inner.lock().cancel.is_none());
+    assert!(!child.is_cancel_requested());
+    sender.send_blocking(Ok(())).unwrap();
+    barrier.open_and_wake();
+    let returned = future::block_on(handle.join()).unwrap();
+    handle.abort();
+    assert!(!returned.is_cancel_requested());
+}
+
+#[test]
 fn drained_cancellable_join_preserves_published_result_until_retirement() {
     use crate::runtime::JoinError;
     use crate::runtime::task_handle::{RetirementBarrier, TaskHandle};
