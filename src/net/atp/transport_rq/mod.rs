@@ -7852,7 +7852,35 @@ struct EntryDecoder {
 
 struct PendingDecode {
     block_sbn: u8,
-    handle: crate::runtime::TaskHandle<BlockDecodeOutcome>,
+    handle: crate::runtime::spawn_blocking::DrainedBlockingHandle<
+        Result<BlockDecodeOutcome, RqError>,
+    >,
+}
+
+async fn cancel_and_drain_rq_decodes<T>(
+    cx: &Cx,
+    decoders: &mut [EntryDecoder],
+    result: Result<T, RqError>,
+) -> Result<T, RqError> {
+    let reason = cx
+        .cancel_reason()
+        .unwrap_or_else(crate::types::CancelReason::parent_cancelled);
+    // Prevent every queued solve from starting before awaiting any running
+    // solve. Drained handles also retain region ownership if this future drops.
+    for decoder in decoders.iter() {
+        for pending in &decoder.pending_decodes {
+            pending.handle.abort_with_reason(reason.clone());
+        }
+    }
+    for decoder in decoders {
+        while let Some(mut pending) = decoder.pending_decodes.pop() {
+            // Retire physical captures even after a sibling panic or caller
+            // cancellation. Cleanup never applies late results or replaces the
+            // original receive outcome, and promises no wall-clock timeout.
+            let _ = pending.handle.join().await;
+        }
+    }
+    result
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -12356,6 +12384,8 @@ pub async fn receive_connection_with_options(
     }
     .await;
 
+    let receive_result = cancel_and_drain_rq_decodes(cx, &mut decoders, receive_result).await;
+
     // Close every cached staging handle before cooperative removal. The armed
     // guard remains a cancellation/error backstop if Windows AV or sharing
     // contention still makes this explicit cleanup fail.
@@ -13098,6 +13128,32 @@ async fn feed_symbol(
     Ok(feed.accepted)
 }
 
+fn rq_decode_pool_available(cx: &Cx) -> Result<bool, RqError> {
+    let Some(pool) = cx.blocking_pool_handle() else {
+        return Ok(false);
+    };
+    if matches!(
+        pool.admission_policy(),
+        crate::runtime::BlockingAdmissionPolicy::BoundedBytes { .. }
+    ) {
+        // Decode jobs are submitted without a byte charge. Do not bypass the
+        // byte budget inline or misclassify this refusal as cancellation.
+        return Err(RqError::Coding(
+            "parallel RQ decode requires a blocking pool accepting uncharged work".to_string(),
+        ));
+    }
+    Ok(!pool.forbids_blocking())
+}
+
+fn run_rq_decode_job(cx: &Cx, job: BlockDecodeJob) -> Result<BlockDecodeOutcome, RqError> {
+    cx.checkpoint().map_err(|_| RqError::Cancelled)?;
+    let outcome = run_block_decode_job(job);
+    // Drained blocking tasks preserve the closure's result. A cancellation
+    // during the solve must therefore be part of that result explicitly.
+    cx.checkpoint().map_err(|_| RqError::Cancelled)?;
+    Ok(outcome)
+}
+
 async fn dispatch_decode_job(
     cx: &Cx,
     dec: &mut EntryDecoder,
@@ -13140,7 +13196,7 @@ async fn dispatch_decode_job(
             finalize_decode_outcome(
                 cx,
                 dec,
-                run_block_decode_job(job),
+                run_rq_decode_job(cx, job)?,
                 false,
                 transfer_decode_width,
             )
@@ -13200,7 +13256,13 @@ async fn dispatch_decode_job(
     }
 
     let retry_job = job.clone();
-    match cx.spawn_blocking(move |_child| run_block_decode_job(job)) {
+    let spawn_result = if rq_decode_pool_available(cx)? {
+        cx.spawn_blocking_drained(move |child| run_rq_decode_job(&child, job))
+    } else {
+        // Keep the deterministic no-pool and forbidden-pool inline fallback.
+        Err(crate::runtime::state::SpawnError::RuntimeUnavailable)
+    };
+    match spawn_result {
         Ok(handle) => {
             dec.pending_decodes
                 .push(PendingDecode { block_sbn, handle });
@@ -13221,7 +13283,7 @@ async fn dispatch_decode_job(
                 finalize_decode_outcome(
                     cx,
                     dec,
-                    run_block_decode_job(retry_job),
+                    run_rq_decode_job(cx, retry_job)?,
                     false,
                     transfer_decode_width,
                 )
@@ -13258,7 +13320,7 @@ async fn dispatch_decode_job(
                 ));
             }
             let restore_job = retry_job.clone();
-            match cx.spawn_blocking(move |_child| run_block_decode_job(retry_job)) {
+            match cx.spawn_blocking_drained(move |child| run_rq_decode_job(&child, retry_job)) {
                 Ok(handle) => {
                     dec.pending_decodes
                         .push(PendingDecode { block_sbn, handle });
@@ -16894,7 +16956,7 @@ async fn queue_stale_decode_retry(
 
     let entry_decode_width = entry_decode_width_budget(dec, transfer_decode_width);
     if entry_decode_width <= 1 {
-        let outcome = run_block_decode_job(job);
+        let outcome = run_rq_decode_job(cx, job)?;
         let decode_elapsed = outcome.elapsed();
         stats.record_attempt(outcome.kind(), decode_elapsed);
         let Some(pipeline) = dec.pipeline.as_mut() else {
@@ -16938,7 +17000,12 @@ async fn queue_stale_decode_retry(
     }
 
     let inline_job = job.clone();
-    match cx.spawn_blocking(move |_child| run_block_decode_job(job)) {
+    let spawn_result = if rq_decode_pool_available(cx)? {
+        cx.spawn_blocking_drained(move |child| run_rq_decode_job(&child, job))
+    } else {
+        Err(crate::runtime::state::SpawnError::RuntimeUnavailable)
+    };
+    match spawn_result {
         Ok(handle) => {
             dec.pending_decodes
                 .push(PendingDecode { block_sbn, handle });
@@ -16947,7 +17014,7 @@ async fn queue_stale_decode_retry(
         }
         Err(crate::runtime::state::SpawnError::RuntimeUnavailable) => {
             stats.record_spawn_denial();
-            let outcome = run_block_decode_job(inline_job);
+            let outcome = run_rq_decode_job(cx, inline_job)?;
             let decode_elapsed = outcome.elapsed();
             stats.record_attempt(outcome.kind(), decode_elapsed);
             let Some(pipeline) = dec.pipeline.as_mut() else {
@@ -17068,12 +17135,18 @@ async fn join_pending_decode(
 ) -> Result<RqDecodeRoundStats, RqError> {
     let block_sbn = pending.block_sbn;
     let join_start = Instant::now();
-    let outcome = pending.handle.join(cx).await.map_err(|join_err| {
-        RqError::Coding(format!(
-            "decode task failed for entry {} block {}: {join_err:?}",
+    // Always retire the physical closure before observing caller cancellation.
+    // Preserve a worker panic's contextual diagnostic when both happened.
+    let outcome = pending.handle.join().await.map_err(|join_err| match join_err {
+        crate::runtime::JoinError::Cancelled(_) => RqError::Cancelled,
+        other => RqError::Coding(format!(
+            "decode task failed for entry {} block {}: {other:?}",
             dec.index, block_sbn
-        ))
-    })?;
+        )),
+    })??;
+    // The worker may have finished before cancellation arrived. Do not persist
+    // its successful block into an already-cancelled receive operation.
+    cx.checkpoint().map_err(|_| RqError::Cancelled)?;
     let join_wait = join_start.elapsed();
     let mut stats =
         finalize_decode_outcome(cx, dec, outcome, allow_spawn_decode, transfer_decode_width)

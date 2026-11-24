@@ -417,6 +417,608 @@ fn decode_width_fixture_entry(size: u64, max_block_size: usize, symbol_size: u16
     }
 }
 
+// br-asupersync-atp-dataplane-redesign-317hxr: exercise real native blocking
+// workers, including captured resources whose destruction outlives decode.
+#[cfg(not(target_arch = "wasm32"))]
+fn native_rq_decoder(size: u64, max_block_size: usize, symbol_size: u16) -> EntryDecoder {
+    let mut decoder = decode_width_fixture_entry(size, max_block_size, symbol_size);
+    decoder.index = 7;
+    let mut pipeline = DecodingPipeline::new(DecodingConfig {
+        symbol_size,
+        max_block_size,
+        repair_overhead: 1.0,
+        min_overhead: 0,
+        max_buffered_symbols: 0,
+        block_timeout: Duration::ZERO,
+        verify_auth: false,
+    });
+    pipeline
+        .set_object_params(object_params_for(
+            decoder.object_id,
+            size,
+            symbol_size,
+            max_block_size as u64,
+        ))
+        .expect("native decoder geometry");
+    decoder.pipeline = Some(pipeline);
+    decoder
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn native_rq_first_block_job(decoder: &mut EntryDecoder, symbol_size: u16) -> BlockDecodeJob {
+    let source_count = decoder.max_block_size / usize::from(symbol_size);
+    for esi in 0..source_count {
+        let symbol = AuthenticatedSymbol::new_unauthenticated(Symbol::new(
+            SymbolId::new(decoder.object_id, 0, esi as u32),
+            vec![7_u8; usize::from(symbol_size)],
+            SymbolKind::Source,
+        ));
+        let deferred = decoder
+            .pipeline
+            .as_mut()
+            .expect("native decoder pipeline")
+            .feed_streaming_block_deferred(symbol)
+            .expect("source symbol accepted");
+        match deferred {
+            DeferredSymbolAcceptResult::Decode(job) => {
+                assert_eq!(esi + 1, source_count);
+                return job;
+            }
+            DeferredSymbolAcceptResult::Immediate(result) => {
+                assert!(matches!(result, SymbolAcceptResult::Accepted { .. }));
+            }
+        }
+    }
+    panic!("the complete source block must produce a deferred decode job");
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+struct NativeRqDecodeState {
+    started: std::sync::atomic::AtomicBool,
+    dropping: std::sync::atomic::AtomicBool,
+    retired: std::sync::atomic::AtomicBool,
+    timed_out: std::sync::atomic::AtomicBool,
+    child: std::sync::Mutex<Option<Cx>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct NativeRqDecodeGate {
+    state: Arc<NativeRqDecodeState>,
+    work: Option<std::sync::mpsc::Sender<()>>,
+    capture: Option<std::sync::mpsc::Sender<()>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl NativeRqDecodeGate {
+    fn release_work(&mut self) {
+        if let Some(release) = self.work.take() {
+            let _ = release.send(());
+        }
+    }
+
+    fn release_capture(&mut self) {
+        if let Some(release) = self.capture.take() {
+            let _ = release.send(());
+        }
+    }
+
+    fn child_is_cancelled(&self) -> bool {
+        self.state
+            .child
+            .lock()
+            .expect("worker context lock")
+            .as_ref()
+            .is_some_and(Cx::is_cancel_requested)
+    }
+
+    fn assert_retired(&self) {
+        use std::sync::atomic::Ordering;
+
+        assert!(self.state.retired.load(Ordering::SeqCst));
+        assert!(
+            !self.state.timed_out.load(Ordering::SeqCst),
+            "the test must release the worker before its watchdog"
+        );
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for NativeRqDecodeGate {
+    fn drop(&mut self) {
+        self.release_work();
+        self.release_capture();
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn gated_native_rq_decode(cx: &Cx, panic_after_release: bool) -> (PendingDecode, NativeRqDecodeGate) {
+    use std::sync::atomic::Ordering;
+
+    struct Capture {
+        state: Arc<NativeRqDecodeState>,
+        release: std::sync::mpsc::Receiver<()>,
+    }
+
+    impl Drop for Capture {
+        fn drop(&mut self) {
+            self.state.dropping.store(true, Ordering::SeqCst);
+            if self.release.recv_timeout(Duration::from_secs(10)).is_err() {
+                self.state.timed_out.store(true, Ordering::SeqCst);
+            }
+            self.state.retired.store(true, Ordering::SeqCst);
+        }
+    }
+
+    let state = Arc::new(NativeRqDecodeState::default());
+    let (work_tx, work_rx) = std::sync::mpsc::channel();
+    let (capture_tx, capture_rx) = std::sync::mpsc::channel();
+    let capture = Capture {
+        state: Arc::clone(&state),
+        release: capture_rx,
+    };
+    let worker_state = Arc::clone(&state);
+    let job = native_rq_first_block_job(&mut native_rq_decoder(128, 128, 128), 128);
+    let handle = cx
+        .spawn_blocking_drained(move |child| {
+            let _capture = capture;
+            *worker_state.child.lock().expect("worker context lock") = Some(child.clone());
+            worker_state.started.store(true, Ordering::SeqCst);
+            if work_rx.recv_timeout(Duration::from_secs(10)).is_err() {
+                worker_state.timed_out.store(true, Ordering::SeqCst);
+                return Err(RqError::Coding("decode work gate expired".into()));
+            }
+            assert!(!panic_after_release, "native RQ decoder panic sentinel");
+            run_rq_decode_job(&child, job)
+        })
+        .expect("admit real native decoder worker");
+    (
+        PendingDecode {
+            block_sbn: 0,
+            handle,
+        },
+        NativeRqDecodeGate {
+            state,
+            work: Some(work_tx),
+            capture: Some(capture_tx),
+        },
+    )
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn wait_for_native_rq_decode(mut ready: impl FnMut() -> bool, context: &str) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !ready() {
+        assert!(Instant::now() < deadline, "{context}");
+        crate::runtime::yield_now().await;
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn native_rq_decode_wait_is_pending<F: std::future::Future>(
+    mut future: std::pin::Pin<&mut F>,
+) -> bool {
+    std::future::poll_fn(|task| std::task::Poll::Ready(future.as_mut().poll(task).is_pending())).await
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn native_rq_decoder_with_pending(pending: PendingDecode) -> EntryDecoder {
+    let mut decoder = decode_width_fixture_entry(128, 128, 128);
+    decoder.index = 7;
+    decoder.pending_decodes.push(pending);
+    decoder
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn assert_native_rq_runtime_retired(runtime: crate::runtime::Runtime) {
+    for _ in 0..1024 {
+        if runtime.is_quiescent() {
+            break;
+        }
+        runtime.block_on(crate::runtime::yield_now());
+    }
+    assert!(runtime.is_quiescent(), "native decoder wrappers must retire");
+    #[cfg(feature = "full-runtime")]
+    assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+    assert!(runtime.shutdown_timeout(Duration::from_secs(5)));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn rq_decode_join_consumers_preserve_native_worker_cancellation() {
+    use std::sync::atomic::Ordering;
+
+    let runtime = crate::runtime::RuntimeBuilder::current_thread()
+        .build()
+        .expect("native decoder runtime");
+    runtime.block_on(async {
+        let cx = Cx::current().expect("native receiver context");
+        for path in 0..4 {
+            let (pending, mut gate) = gated_native_rq_decode(&cx, false);
+            wait_for_native_rq_decode(
+                || gate.state.started.load(Ordering::SeqCst),
+                "decoder must start before cancellation",
+            )
+            .await;
+            pending
+                .handle
+                .abort_with_reason(crate::types::CancelReason::user("cancel RQ decode"));
+            assert!(gate.child_is_cancelled());
+            gate.release_work();
+            wait_for_native_rq_decode(
+                || gate.state.dropping.load(Ordering::SeqCst),
+                "cancelled decoder must reach capture destruction",
+            )
+            .await;
+            assert!(!pending.handle.is_finished());
+            gate.release_capture();
+            wait_for_native_rq_decode(
+                || pending.handle.is_finished(),
+                "ready-only consumers require physical worker retirement",
+            )
+            .await;
+            let mut decoder = native_rq_decoder_with_pending(pending);
+            let result = match path {
+                0 => drain_ready_decodes(&cx, std::slice::from_mut(&mut decoder), false, 1).await,
+                1 => join_all_pending_decodes(&cx, std::slice::from_mut(&mut decoder), 1).await,
+                2 => drain_ready_entry_decodes(&cx, &mut decoder, false, 1).await,
+                _ => join_one_pending_decode(&cx, &mut decoder, false, 1).await,
+            };
+            assert!(
+                matches!(result, Err(RqError::Cancelled)),
+                "consumer {path} must retain typed cancellation: {result:?}"
+            );
+            assert!(decoder.pending_decodes.is_empty());
+            assert_eq!(decoder.bytes_written, 0);
+            assert!(!decoder.complete);
+            gate.assert_retired();
+        }
+    });
+    assert_native_rq_runtime_retired(runtime);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn rq_decode_join_waits_for_retirement_before_cancel_or_panic() {
+    use std::sync::atomic::Ordering;
+
+    for panic_worker in [false, true] {
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("native decoder runtime");
+        runtime.block_on(async {
+            let cx = Cx::current().expect("native receiver context");
+            let (pending, mut gate) = gated_native_rq_decode(&cx, panic_worker);
+            wait_for_native_rq_decode(
+                || gate.state.started.load(Ordering::SeqCst),
+                "decoder must start before the caller is cancelled",
+            )
+            .await;
+            gate.release_work();
+            wait_for_native_rq_decode(
+                || gate.state.dropping.load(Ordering::SeqCst),
+                "decode must finish while capture destruction is held",
+            )
+            .await;
+            cx.cancel_with(crate::types::CancelKind::User, Some("cancel RQ receiver"));
+            assert!(cx.checkpoint().is_err());
+            let mut decoder = native_rq_decoder_with_pending(pending);
+            let mut joined = Box::pin(join_one_pending_decode(&cx, &mut decoder, false, 1));
+            assert!(
+                native_rq_decode_wait_is_pending(joined.as_mut()).await,
+                "a cancelled receiver must await physical capture retirement"
+            );
+            gate.release_capture();
+            let result = joined.await;
+            if panic_worker {
+                assert!(
+                    matches!(result, Err(RqError::Coding(ref message))
+                        if message.contains("entry 7 block 0")
+                            && message.contains("native RQ decoder panic sentinel")),
+                    "panic attribution must survive caller cancellation: {result:?}"
+                );
+            } else {
+                assert!(matches!(result, Err(RqError::Cancelled)), "{result:?}");
+            }
+            assert!(decoder.pending_decodes.is_empty());
+            assert_eq!(decoder.bytes_written, 0);
+            assert!(!decoder.complete);
+            gate.assert_retired();
+        });
+        assert_native_rq_runtime_retired(runtime);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn rq_decode_error_cleanup_drains_every_worker_and_retains_receive_error() {
+    use std::sync::atomic::Ordering;
+
+    for cancel_receiver in [false, true] {
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .blocking_threads(3, 3)
+            .build()
+            .expect("native decoder runtime");
+        runtime.block_on(async {
+            let cx = Cx::current().expect("native receiver context");
+            let mut decoders = Vec::new();
+            let mut gates = Vec::new();
+            for worker in 0..3 {
+                let (pending, gate) = gated_native_rq_decode(&cx, worker == 0);
+                decoders.push(native_rq_decoder_with_pending(pending));
+                gates.push(gate);
+            }
+            wait_for_native_rq_decode(
+                || gates.iter().all(|gate| gate.state.started.load(Ordering::SeqCst)),
+                "all decoder workers must start before receiver failure",
+            )
+            .await;
+            gates[0].release_work();
+            gates[0].release_capture();
+            wait_for_native_rq_decode(
+                || decoders[0].pending_decodes[0].handle.is_finished(),
+                "first decoder panic must be terminal before cleanup",
+            )
+            .await;
+            assert!(gates[1..].iter().all(|gate| !gate.child_is_cancelled()));
+            let error = if cancel_receiver {
+                cx.cancel_with(crate::types::CancelKind::User, Some("cancel RQ receiver"));
+                assert!(cx.checkpoint().is_err());
+                RqError::Cancelled
+            } else {
+                let malformed = Frame::new(
+                    ProtocolVersion::CURRENT,
+                    FrameType::ObjectRequest,
+                    b"not-json".to_vec(),
+                )
+                .expect("control frame");
+                parse_json::<HelloAck>(&malformed).expect_err("real parser rejects invalid JSON")
+            };
+            let expected = error.to_string();
+            let mut result = Box::pin(cancel_and_drain_rq_decodes(
+                &cx,
+                &mut decoders,
+                Err::<(), _>(error),
+            ));
+            assert!(native_rq_decode_wait_is_pending(result.as_mut()).await);
+            assert!(
+                gates[1..].iter().all(NativeRqDecodeGate::child_is_cancelled),
+                "cleanup must cancel every sibling before waiting on the first"
+            );
+            for gate in &mut gates[1..] {
+                gate.release_work();
+            }
+            wait_for_native_rq_decode(
+                || gates[1..].iter().all(|gate| gate.state.dropping.load(Ordering::SeqCst)),
+                "cancelled siblings must reach physical capture destruction",
+            )
+            .await;
+            assert!(native_rq_decode_wait_is_pending(result.as_mut()).await);
+            gates[1].release_capture();
+            wait_for_native_rq_decode(
+                || gates[1].state.retired.load(Ordering::SeqCst),
+                "first sibling must retire",
+            )
+            .await;
+            assert!(native_rq_decode_wait_is_pending(result.as_mut()).await);
+            assert!(!gates[2].state.retired.load(Ordering::SeqCst));
+            gates[2].release_capture();
+            let returned = result.await.expect_err("original receive failure");
+            assert_eq!(returned.to_string(), expected);
+            if cancel_receiver {
+                assert!(matches!(returned, RqError::Cancelled));
+            } else {
+                assert!(matches!(returned, RqError::Control(_)));
+            }
+            assert!(decoders.iter().all(|decoder| decoder.pending_decodes.is_empty()));
+            assert!(decoders.iter().all(|decoder| decoder.bytes_written == 0));
+            for gate in &gates {
+                gate.assert_retired();
+            }
+        });
+        assert_native_rq_runtime_retired(runtime);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn rq_decode_dropped_receive_keeps_workers_owned_until_region_close() {
+    use std::sync::atomic::Ordering;
+
+    let runtime = crate::runtime::RuntimeBuilder::current_thread()
+        .blocking_threads(2, 2)
+        .build()
+        .expect("native decoder runtime");
+    runtime.block_on(async {
+        let cx = Cx::current().expect("native receiver context");
+        let region = cx
+            .open_child_region(crate::cx::ChildRegionSpec::inherit())
+            .await
+            .expect("decoder region");
+        let mut decoders = Vec::new();
+        let mut gates = Vec::new();
+        for _ in 0..2 {
+            let (pending, gate) = gated_native_rq_decode(region.cx(), false);
+            decoders.push(native_rq_decoder_with_pending(pending));
+            gates.push(gate);
+        }
+        wait_for_native_rq_decode(
+            || gates.iter().all(|gate| gate.state.started.load(Ordering::SeqCst)),
+            "both workers must start before dropping their receive future",
+        )
+        .await;
+        let mut receive = Box::pin(async move {
+            std::future::pending::<()>().await;
+            drop(decoders);
+        });
+        assert!(native_rq_decode_wait_is_pending(receive.as_mut()).await);
+        drop(receive);
+        wait_for_native_rq_decode(
+            || gates.iter().all(NativeRqDecodeGate::child_is_cancelled),
+            "dropping decoder owners must cancel both closures",
+        )
+        .await;
+        let mut close = Box::pin(region.close());
+        assert!(native_rq_decode_wait_is_pending(close.as_mut()).await);
+        for gate in &mut gates {
+            gate.release_work();
+        }
+        wait_for_native_rq_decode(
+            || gates.iter().all(|gate| gate.state.dropping.load(Ordering::SeqCst)),
+            "both abandoned captures must reach destruction",
+        )
+        .await;
+        gates[0].release_capture();
+        wait_for_native_rq_decode(
+            || gates[0].state.retired.load(Ordering::SeqCst),
+            "one abandoned capture must retire",
+        )
+        .await;
+        assert!(native_rq_decode_wait_is_pending(close.as_mut()).await);
+        assert!(!gates[1].state.retired.load(Ordering::SeqCst));
+        gates[1].release_capture();
+        close.await.expect("region closes after both captures retire");
+        for gate in &gates {
+            gate.assert_retired();
+        }
+    });
+    assert_native_rq_runtime_retired(runtime);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn rq_decode_producers_use_native_pool_and_preserve_admission_policy() {
+    use crate::runtime::BlockingAdmissionPolicy;
+    use std::num::NonZeroUsize;
+    use std::sync::atomic::Ordering;
+
+    let one = NonZeroUsize::new(1).expect("nonzero queue limit");
+    for stale_retry in [false, true] {
+        for profile in 0..5 {
+            let runtime = crate::runtime::RuntimeBuilder::current_thread()
+                .blocking_threads(0, 1)
+                .blocking_admission_policy(if profile == 3 {
+                    BlockingAdmissionPolicy::Bounded { max_queued: one }
+                } else {
+                    BlockingAdmissionPolicy::Unbounded
+                })
+                .build()
+                .expect("native producer runtime");
+            let denied_pool = (profile == 1 || profile == 4).then(|| {
+                crate::runtime::BlockingPool::with_config_and_policies(
+                    0,
+                    1,
+                    crate::runtime::blocking_pool::BlockingPoolOptions::default(),
+                    crate::runtime::BlockingQueuePolicy::Fifo,
+                    if profile == 1 {
+                        BlockingAdmissionPolicy::Forbidden
+                    } else {
+                        BlockingAdmissionPolicy::BoundedBytes {
+                            max_queued: one,
+                            max_live_bytes: NonZeroUsize::new(1024).expect("nonzero byte limit"),
+                        }
+                    },
+                )
+            });
+            let dir = canon_tempdir();
+            runtime.block_on(async {
+                let ambient = Cx::current().expect("native receiver context");
+                // Scope policy to decoder admission. Staging I/O retains the
+                // ambient runtime's usable pool, independent of this fixture.
+                let cx = if profile == 0 {
+                    ambient.clone().with_blocking_pool_handle(None)
+                } else if let Some(pool) = &denied_pool {
+                    ambient.clone().with_blocking_pool_handle(Some(pool.handle()))
+                } else {
+                    ambient
+                };
+                let native_pool = profile == 2 || profile == 3;
+                let mut occupied = if native_pool {
+                    let (pending, gate) = gated_native_rq_decode(&cx, false);
+                    wait_for_native_rq_decode(
+                        || gate.state.started.load(Ordering::SeqCst),
+                        "hold native pool worker before real producer dispatch",
+                    )
+                    .await;
+                    Some((pending, gate))
+                } else {
+                    None
+                };
+                let symbol_size = 1024;
+                let block_size = 512 * 1024;
+                let mut decoder = native_rq_decoder(
+                    RQ_PARALLEL_DECODE_MIN_ENTRY_BYTES,
+                    block_size,
+                    symbol_size,
+                );
+                decoder.staging_path = dir.path().join("native-rq-block");
+                assert!(entry_decode_width_budget(&decoder, 4) > 1);
+                let job = native_rq_first_block_job(&mut decoder, symbol_size);
+                let result = if stale_retry {
+                    queue_stale_decode_retry(&cx, &mut decoder, job, true, 4).await
+                } else {
+                    dispatch_decode_job(&cx, &mut decoder, job, "native regression", true, 4)
+                        .await
+                        .map(|outcome| outcome.decode_stats)
+                };
+                if profile == 4 {
+                    assert!(
+                        matches!(result, Err(RqError::Coding(ref message))
+                            if message.contains("accepting uncharged work")),
+                        "byte-accounted admission must fail closed: {result:?}"
+                    );
+                    assert!(decoder.pending_decodes.is_empty());
+                    assert_eq!(decoder.bytes_written, 0);
+                    assert!(!decoder.staging_path.exists());
+                    assert_eq!(cx.blocking_pool_handle().expect("byte-bound pool").pending_count(), 0);
+                    return;
+                }
+                let mut stats = result.expect("supported decoder admission profile");
+                if native_pool {
+                    assert_eq!(decoder.pending_decodes.len(), 1);
+                    assert_eq!(stats.attempts, 0, "producer must not decode inline");
+                    let pool = cx.blocking_pool_handle().expect("native decode pool");
+                    wait_for_native_rq_decode(
+                        || pool.pending_count() == 1,
+                        "production decoder job must reach the real pool queue",
+                    )
+                    .await;
+                    assert!(!decoder.pending_decodes[0].handle.is_finished());
+                    let (pending, gate) = occupied.as_mut().expect("held native worker");
+                    gate.release_work();
+                    gate.release_capture();
+                    pending.handle.join().await.expect("blocker join").expect("blocker decode");
+                    gate.assert_retired();
+                    stats.merge(
+                        join_all_pending_decodes(&cx, std::slice::from_mut(&mut decoder), 4)
+                            .await
+                            .expect("production decode joins and persists"),
+                    );
+                    assert_eq!(stats.queued_jobs, 1);
+                    assert_eq!(stats.inline_jobs, 0);
+                } else {
+                    assert!(decoder.pending_decodes.is_empty());
+                    assert_eq!(stats.inline_jobs, 1);
+                    assert_eq!(stats.queued_jobs, 0);
+                }
+                assert_eq!(stats.attempts, 1);
+                assert_eq!(decoder.bytes_written, block_size as u64);
+                assert!(decoder.source_blocks[0].complete);
+                assert!(!decoder.complete, "only one of 256 blocks was supplied");
+                assert!(decoder.pending_decodes.is_empty());
+                let mut staged = std::fs::File::open(&decoder.staging_path).expect("staged block");
+                let mut bytes = vec![0; block_size];
+                std::io::Read::read_exact(&mut staged, &mut bytes).expect("read staged first block");
+                assert_eq!(bytes, vec![7_u8; block_size]);
+            });
+            assert_native_rq_runtime_retired(runtime);
+            if let Some(pool) = denied_pool {
+                assert!(pool.shutdown_and_wait(Duration::from_secs(5)));
+            }
+        }
+    }
+}
+
 #[test]
 fn decode_width_size_gate_keeps_50m_sequential_and_500m_parallel() {
     let config = RqConfig::default();
