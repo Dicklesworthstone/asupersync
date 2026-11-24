@@ -6717,6 +6717,172 @@ fn shutdown_timeout_retires_a_task_that_holds_a_strong_runtime_handle() {
     );
 }
 
+/// The current-thread driver must not defer parked Send tasks to final drop:
+/// a task-owned strong handle prevents that final drop from ever starting.
+#[test]
+fn shutdown_timeout_retires_current_thread_tasks_holding_strong_handles() {
+    for sharded in [false, true] {
+        let runtime = RuntimeBuilder::current_thread()
+            .with_sharded_state(sharded)
+            .build()
+            .expect("build current-thread runtime");
+        let runtime_inner = Arc::downgrade(&runtime.inner);
+        let held = runtime.handle();
+        let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+        let mut join = runtime.handle().spawn_checked(async move {
+            let _held = held;
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the current-thread task started");
+
+        assert!(
+            runtime.shutdown_timeout(Duration::from_secs(10)),
+            "the stopped current-thread task retained its strong handle (sharded={sharded})"
+        );
+        assert!(runtime_inner.upgrade().is_none());
+        assert!(join.is_finished());
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        match Pin::new(&mut join).poll(&mut cx) {
+            Poll::Ready(Err(crate::runtime::JoinError::Cancelled(reason))) => {
+                assert!(reason.is_shutdown());
+            }
+            other => panic!("expected shutdown cancellation, got {other:?}"),
+        }
+    }
+}
+
+/// A caller-driven runtime has no background thread to retire queued tasks.
+/// Both an unpolled future and an already parked future can own its handle.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn shutdown_timeout_retires_caller_driven_tasks_holding_strong_handles() {
+    for drive_before_shutdown in [false, true] {
+        let runtime = RuntimeBuilder::current_thread()
+            .caller_driven_topology()
+            .build()
+            .expect("build caller-driven runtime");
+        let runtime_inner = Arc::downgrade(&runtime.inner);
+        let held = runtime.handle();
+        let polled = Arc::new(AtomicBool::new(false));
+        let task_polled = Arc::clone(&polled);
+        let mut join = runtime.handle().spawn_checked(async move {
+            let _held = held;
+            task_polled.store(true, Ordering::Release);
+            std::future::pending::<()>().await;
+        });
+        if drive_before_shutdown {
+            runtime.block_on(std::future::poll_fn(|cx| {
+                if polled.load(Ordering::Acquire) {
+                    Poll::Ready(())
+                } else {
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+            }));
+        }
+        assert_eq!(polled.load(Ordering::Acquire), drive_before_shutdown);
+
+        assert!(
+            runtime.shutdown_timeout(Duration::from_secs(10)),
+            "caller-driven task retained its strong handle (polled={drive_before_shutdown})"
+        );
+        assert!(runtime_inner.upgrade().is_none());
+        assert!(join.is_finished());
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        match Pin::new(&mut join).poll(&mut cx) {
+            Poll::Ready(Err(crate::runtime::JoinError::Cancelled(reason))) => {
+                assert!(reason.is_shutdown());
+            }
+            other => panic!("expected shutdown cancellation, got {other:?}"),
+        }
+    }
+}
+
+/// Closing the driver wakes its background thread even while a caller still
+/// owns the worker. Joining that thread alone is not a safe retirement fence.
+#[test]
+fn shutdown_timeout_waits_for_current_thread_worker_loan_before_retiring_tasks() {
+    struct Retired {
+        dropped: Arc<AtomicBool>,
+        root_in_poll: Arc<AtomicBool>,
+        dropped_during_poll: Arc<AtomicBool>,
+    }
+    impl Drop for Retired {
+        fn drop(&mut self) {
+            if self.root_in_poll.load(Ordering::Acquire) {
+                self.dropped_during_poll.store(true, Ordering::Release);
+            }
+            self.dropped.store(true, Ordering::Release);
+        }
+    }
+
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build current-thread runtime");
+    let runtime_inner = Arc::downgrade(&runtime.inner);
+    let retained_runtime = runtime.clone();
+    let held = runtime.handle();
+    let dropped = Arc::new(AtomicBool::new(false));
+    let root_in_poll = Arc::new(AtomicBool::new(false));
+    let dropped_during_poll = Arc::new(AtomicBool::new(false));
+    let retired = Retired {
+        dropped: Arc::clone(&dropped),
+        root_in_poll: Arc::clone(&root_in_poll),
+        dropped_during_poll: Arc::clone(&dropped_during_poll),
+    };
+    let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+    let join = runtime.handle().spawn_checked(async move {
+        let _held = held;
+        let _retired = retired;
+        let _ = started_tx.send(());
+        std::future::pending::<()>().await;
+    });
+    started_rx
+        .recv_timeout(Duration::from_secs(60))
+        .expect("the child task started");
+
+    let caller_runtime = runtime.clone();
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel::<()>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let caller = std::thread::spawn(move || {
+        caller_runtime.block_on(async move {
+            root_in_poll.store(true, Ordering::Release);
+            let _ = entered_tx.send(());
+            // Deliberately occupy a poll so shutdown cannot return its loan.
+            release_rx
+                .recv_timeout(Duration::from_secs(60))
+                .expect("release the root poll");
+            root_in_poll.store(false, Ordering::Release);
+        });
+    });
+    entered_rx
+        .recv_timeout(Duration::from_secs(60))
+        .expect("the caller borrowed the worker");
+
+    let completed = runtime.shutdown_timeout(Duration::from_millis(100));
+    let retired_before_return = dropped.load(Ordering::Acquire);
+    // Always release the caller before asserting, including on regression.
+    let _ = release_tx.send(());
+    caller.join().expect("the caller returned its worker loan");
+    let eventually_completed = retained_runtime.shutdown_timeout(Duration::from_secs(10));
+
+    assert!(!completed, "an active worker loan prevents full teardown");
+    assert!(!retired_before_return, "the loan still owned task storage");
+    assert!(
+        !dropped_during_poll.load(Ordering::Acquire),
+        "the reaper retired a child while the root was still using its worker"
+    );
+    assert!(eventually_completed, "shutdown completed after worker return");
+    assert!(dropped.load(Ordering::Acquire));
+    assert!(join.is_finished());
+    assert!(runtime_inner.upgrade().is_none());
+}
+
 /// br-asupersync-1pi7ne H1, trigger (a): a `block_on` caller on a cloned
 /// `Runtime` that waits for a task used to wait forever after
 /// shutdown_timeout. The task was frozen, never polled or dropped, and the
