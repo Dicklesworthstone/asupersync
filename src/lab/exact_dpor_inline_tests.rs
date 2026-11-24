@@ -190,14 +190,14 @@ fn real_quota_guidance_finds_and_replays_a_failure_seed_samples_miss() {
     assert_eq!(source.later_decision, 1);
     assert_eq!(source.intervening_later_task_polls, 0);
     assert_eq!(
-        failing.execution.execution.decisions()[0].selected().task,
+        failing.execution.execution.decisions()[0].selected().task(),
         source.later_task.into()
     );
     assert_ne!(
         report.runs[0].execution.execution.decisions()[0]
             .selected()
-            .task,
-        failing.execution.execution.decisions()[0].selected().task
+            .task(),
+        failing.execution.execution.decisions()[0].selected().task()
     );
     assert_eq!(*observations.borrow()[0].lock(), vec![0, 1]);
     assert_eq!(*observations.borrow()[1].lock(), vec![1, 0]);
@@ -268,10 +268,10 @@ fn run_and_aggregate_frontier_limits_retain_honest_replayable_work() {
         .unwrap();
     assert_eq!(resumed.termination, ExactScheduleTermination::Quiescent);
     assert_ne!(
-        resumed.execution.decisions()[0].selected().task,
+        resumed.execution.decisions()[0].selected().task(),
         report.runs[0].execution.execution.decisions()[0]
             .selected()
-            .task
+            .task()
     );
 
     // Count alone would admit this prefix; its two enabled choices exceed the
@@ -422,7 +422,7 @@ fn moving_a_tasks_next_poll_does_not_claim_to_reverse_its_later_effect() {
     assert_eq!(witness.later_decision, 2);
     assert_eq!(witness.intervening_later_task_polls, 1);
     assert_eq!(
-        guided.execution.execution.decisions()[0].selected().task,
+        guided.execution.execution.decisions()[0].selected().task(),
         witness.later_task.into()
     );
     // Its next poll merely yields; A's effect still precedes B's effect.

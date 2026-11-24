@@ -519,8 +519,8 @@ impl ExactDporExplorer {
             };
             if earlier >= later
                 || earlier_task == later_task
-                || run.execution.decisions[earlier].selected().task != earlier_task.into()
-                || run.execution.decisions[later].selected().task != later_task.into()
+                || run.execution.decisions[earlier].selected().task() != earlier_task.into()
+                || run.execution.decisions[later].selected().task() != later_task.into()
             {
                 statistics.unmappable += 1;
                 continue;
@@ -528,7 +528,7 @@ impl ExactDporExplorer {
             let Some(alternative) = run.execution.decisions[earlier]
                 .enabled()
                 .iter()
-                .position(|dispatch| dispatch.task == later_task.into())
+                .position(|dispatch| dispatch.task() == later_task.into())
             else {
                 statistics.unavailable += 1;
                 continue;
@@ -559,7 +559,7 @@ impl ExactDporExplorer {
             frontier.choices += choices;
             let intervening_later_task_polls = run.execution.decisions[earlier + 1..later]
                 .iter()
-                .filter(|decision| decision.selected().task == later_task.into())
+                .filter(|decision| decision.selected().task() == later_task.into())
                 .count();
             pending.push_back(Candidate {
                 prefix,
@@ -645,8 +645,8 @@ fn attribute_events(
             let Some(LogicalTime::Vector(clock)) = &event.logical_time else {
                 return None;
             };
-            if selected.task != (*task).into()
-                || selected.at_nanos != event.time.as_nanos()
+            if selected.task() != (*task).into()
+                || selected.at_nanos() != event.time.as_nanos()
                 || clock.get(&NodeId::new(format!("lab-task:{:016x}", task.as_u64()))) == 0
             {
                 return None;
