@@ -849,6 +849,13 @@ async fn borrowed_legacy_contract(cx: Cx) {
     let serving = server.serve_produced(&cx, &mut socket);
     fn assert_send<T: Send>(_: &T) {}
     assert_send(&serving);
+    // Leave room for nested polls on the ordinary native worker stack.
+    // The actual wire/cleanup journey below still runs without a larger stack.
+    assert!(
+        std::mem::size_of_val(&serving) <= 64 * 1024,
+        "produced serving future grew to {} bytes",
+        std::mem::size_of_val(&serving),
+    );
     assert_eq!(serving.await.unwrap().requests_served, 1);
     let received = response(&mut peer).await;
     assert!(received.contains(&message), "{received:?}");

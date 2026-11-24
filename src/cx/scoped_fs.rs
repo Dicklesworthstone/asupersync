@@ -6,7 +6,7 @@
 //! capability kernel. `Cx::scoped_fs` keeps its existing admission checks.
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use crate::fs::scoped::{ScopedFs, ScopedFsError};
+pub use crate::fs::scoped::{DirectoryReadLimits, ScopedDirEntry, ScopedFs, ScopedFsError};
 
 // The root fs module is native-only. Keep the historical facade available on
 // wasm too, with the same implementation and fail-closed blocking admission;
@@ -15,4 +15,4 @@ pub use crate::fs::scoped::{ScopedFs, ScopedFsError};
 #[path = "../fs/scoped.rs"]
 mod provider;
 #[cfg(target_arch = "wasm32")]
-pub use provider::{ScopedFs, ScopedFsError};
+pub use provider::{DirectoryReadLimits, ScopedDirEntry, ScopedFs, ScopedFsError};

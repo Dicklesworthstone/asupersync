@@ -611,8 +611,15 @@ fn endpoint_admission_deadline_and_cancellation_never_reroute() {
             .unwrap();
             set.set_available(1, false).unwrap();
             let client = BalancedGrpcClient::new(set.clone());
-            let mut active =
-                Box::pin(client.unary(&cx, PATH, Request::new(Bytes::from_static(b"occupy-a"))));
+            let active = client.unary(&cx, PATH, Request::new(Bytes::from_static(b"occupy-a")));
+            // Guard composition as well as execution on the default stack:
+            // context/deadline wrappers must not embed native dial buffers.
+            assert!(
+                std::mem::size_of_val(&active) <= 16 * 1024,
+                "balanced unary future grew to {} bytes",
+                std::mem::size_of_val(&active),
+            );
+            let mut active = Box::pin(active);
             observe_pending(active.as_mut(), &mut a[0], &cx).await;
 
             let mut request = Request::new(Bytes::from_static(b"queued-only-at-a"));

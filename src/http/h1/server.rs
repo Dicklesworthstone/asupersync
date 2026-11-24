@@ -3224,7 +3224,7 @@ where
                     // Even legacy serving defers the successful final bytes
                     // until ingress reaches EOF (or its bounded drain ends).
                     ProducedFlowProgress::Complete(
-                        execute_ready_produced_response(
+                        Box::pin(execute_ready_produced_response(
                             request_cx,
                             &mut output,
                             produced,
@@ -3235,7 +3235,7 @@ where
                             response_write,
                             &head_committed,
                             true,
-                        )
+                        ))
                         .await,
                     )
                 })
@@ -3369,7 +3369,7 @@ where
                 return Ok(ProducedCompletion::Complete);
             }
         };
-        execute_ready_produced_response(
+        Box::pin(execute_ready_produced_response(
             request_cx,
             io,
             produced,
@@ -3380,7 +3380,7 @@ where
             response_write,
             &head_committed,
             defer_completion,
-        )
+        ))
         .await
     }
     .await
@@ -4301,82 +4301,88 @@ where
     }
 }
 
-async fn join_streaming_handler_and_body<H, B, R>(
-    cx: &Cx,
+fn join_streaming_handler_and_body<'a, H, B, R>(
+    cx: &'a Cx,
     handler: H,
     body: B,
-    config: &Http1StreamingConfig,
-    shutdown_signal: Option<&ShutdownSignal>,
-) -> JoinedStreamingRequest<R>
+    config: &'a Http1StreamingConfig,
+    shutdown_signal: Option<&'a ShutdownSignal>,
+) -> impl Future<Output = JoinedStreamingRequest<R>> + 'a
 where
-    H: Future<Output = Option<R>>,
-    B: Future<Output = Result<IncomingRequestBodyWriter, IncomingBodyError>>,
+    H: Future<Output = Option<R>> + 'a,
+    B: Future<Output = Result<IncomingRequestBodyWriter, IncomingBodyError>> + 'a,
+    R: 'a,
 {
+    // Box before returning the join future. Boxing on its first poll still
+    // retains both large inputs in the unpolled async state and propagates
+    // their size through every caller, overflowing ordinary debug stacks.
     let mut handler = Some(Box::pin(handler));
     let mut body = Some(Box::pin(body));
-    let first = poll_fn(|task_cx| {
-        if let Some(handler) = handler.as_mut() {
-            if let Poll::Ready(result) = handler.as_mut().poll(task_cx) {
-                return Poll::Ready(StreamingJoinFirst::Handler(result));
-            }
-        }
-        if let Some(body) = body.as_mut() {
-            if let Poll::Ready(result) = body.as_mut().poll(task_cx) {
-                return Poll::Ready(StreamingJoinFirst::Body(result));
-            }
-        }
-        Poll::Pending
-    })
-    .await;
-
-    match first {
-        StreamingJoinFirst::Body(Ok(writer)) => {
-            body.take();
-            let Some(handler) = handler.take() else {
-                return Ok(None);
-            };
-            let Some(hop) = handler.await else {
-                return Ok(None);
-            };
-            Ok(Some((hop, Some(writer))))
-        }
-        StreamingJoinFirst::Body(Err(error)) => {
-            body.take();
-            if let Some(handler) = handler.take() {
-                let _ = timeout(connection_now(cx), config.request_drain_grace, handler).await;
-            }
-            Err(error)
-        }
-        StreamingJoinFirst::Handler(Some(hop)) => {
-            handler.take();
-            let Some(body) = body.take() else {
-                return Ok(None);
-            };
-            // The handler (and its request-region cleanup) has completed.
-            // Its force-close observer is gone, but the peer may still owe
-            // body bytes. Interrupt only this remaining protocol drain; a
-            // live handler stays owned by the branches above.
-            let Some(drained) = race_force_close(
-                shutdown_signal,
-                timeout(connection_now(cx), config.unread_body_drain_timeout, body),
-            )
-            .await
-            else {
-                return Ok(None);
-            };
-            match drained.unwrap_or(Err(IncomingBodyError::DrainTimeout)) {
-                Ok(writer) => Ok(Some((hop, Some(writer)))),
-                Err(error) if preserve_completed_response(config, &error) => {
-                    record_incoming_body_failure(&error);
-                    // The handler's side effects already happened. Preserve
-                    // its result, but leave EOF unproven so no caller can
-                    // reuse the transport after this bounded drain stopped.
-                    Ok(Some((hop, None)))
+    async move {
+        let first = poll_fn(|task_cx| {
+            if let Some(handler) = handler.as_mut() {
+                if let Poll::Ready(result) = handler.as_mut().poll(task_cx) {
+                    return Poll::Ready(StreamingJoinFirst::Handler(result));
                 }
-                Err(error) => Err(error),
             }
+            if let Some(body) = body.as_mut() {
+                if let Poll::Ready(result) = body.as_mut().poll(task_cx) {
+                    return Poll::Ready(StreamingJoinFirst::Body(result));
+                }
+            }
+            Poll::Pending
+        })
+        .await;
+
+        match first {
+            StreamingJoinFirst::Body(Ok(writer)) => {
+                body.take();
+                let Some(handler) = handler.take() else {
+                    return Ok(None);
+                };
+                let Some(hop) = handler.await else {
+                    return Ok(None);
+                };
+                Ok(Some((hop, Some(writer))))
+            }
+            StreamingJoinFirst::Body(Err(error)) => {
+                body.take();
+                if let Some(handler) = handler.take() {
+                    let _ = timeout(connection_now(cx), config.request_drain_grace, handler).await;
+                }
+                Err(error)
+            }
+            StreamingJoinFirst::Handler(Some(hop)) => {
+                handler.take();
+                let Some(body) = body.take() else {
+                    return Ok(None);
+                };
+                // The handler (and its request-region cleanup) has completed.
+                // Its force-close observer is gone, but the peer may still owe
+                // body bytes. Interrupt only this remaining protocol drain; a
+                // live handler stays owned by the branches above.
+                let Some(drained) = race_force_close(
+                    shutdown_signal,
+                    timeout(connection_now(cx), config.unread_body_drain_timeout, body),
+                )
+                .await
+                else {
+                    return Ok(None);
+                };
+                match drained.unwrap_or(Err(IncomingBodyError::DrainTimeout)) {
+                    Ok(writer) => Ok(Some((hop, Some(writer)))),
+                    Err(error) if preserve_completed_response(config, &error) => {
+                        record_incoming_body_failure(&error);
+                        // The handler's side effects already happened. Preserve
+                        // its result, but leave EOF unproven so no caller can
+                        // reuse the transport after this bounded drain stopped.
+                        Ok(Some((hop, None)))
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            StreamingJoinFirst::Handler(None) => Ok(None),
         }
-        StreamingJoinFirst::Handler(None) => Ok(None),
     }
 }
 

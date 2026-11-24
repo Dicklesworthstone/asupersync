@@ -2482,7 +2482,10 @@ async fn native_h2_unary(
     let now = cx
         .timer_driver()
         .map_or_else(crate::time::wall_now, |timer| timer.now());
-    let io = async move {
+    // Keep connection setup and its two admission paths out of the caller's
+    // async state. Deadline/context wrappers otherwise retain nested copies
+    // of the large native dial future before their first poll.
+    let io = Box::pin(async move {
         if let Some(admission) = admission {
             let permit = admission.acquire(&cx).await?;
             // The outer timeout includes the queue. Refresh the wire budget
@@ -2510,9 +2513,18 @@ async fn native_h2_unary(
             if let Some(deadline) = admitted {
                 deadline.apply_remaining(&mut metadata)?;
             }
-            native_h2_unary_io(target, config, tls_connector, pool, path, &metadata, body).await
+            Box::pin(native_h2_unary_io(
+                target,
+                config,
+                tls_connector,
+                pool,
+                path,
+                &metadata,
+                body,
+            ))
+            .await
         }
-    };
+    });
     if let Some(deadline) = admitted {
         return deadline.run(io).await;
     }
