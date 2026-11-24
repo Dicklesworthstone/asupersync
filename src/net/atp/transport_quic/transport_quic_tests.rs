@@ -1167,17 +1167,7 @@ mod tests {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    async fn cancelled_native_decode_worker(cx: &Cx) -> QuicPendingDecode {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, Ordering};
-
-        struct Cleanup(Arc<AtomicBool>);
-        impl Drop for Cleanup {
-            fn drop(&mut self) {
-                self.0.store(true, Ordering::SeqCst);
-            }
-        }
-
+    fn native_quic_decode_job() -> BlockDecodeJob {
         let config = QuicConfig {
             symbol_size: 128,
             max_block_size: 128,
@@ -1199,47 +1189,181 @@ mod tests {
         let DeferredSymbolAcceptResult::Decode(job) = deferred else {
             panic!("one source symbol must produce a deferred source-complete job");
         };
-        let outcome = run_block_decode_job(job);
-        let parked = Arc::new(AtomicBool::new(false));
-        let cleaned = Arc::new(AtomicBool::new(false));
-        let worker_parked = Arc::clone(&parked);
-        let worker_cleaned = Arc::clone(&cleaned);
+        job
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[derive(Default)]
+    struct NativeQuicDecodeState {
+        started: std::sync::atomic::AtomicBool,
+        dropping: std::sync::atomic::AtomicBool,
+        retired: std::sync::atomic::AtomicBool,
+        timed_out: std::sync::atomic::AtomicBool,
+        child: std::sync::Mutex<Option<Cx>>,
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    struct NativeQuicDecodeGate {
+        state: std::sync::Arc<NativeQuicDecodeState>,
+        work: Option<std::sync::mpsc::Sender<()>>,
+        capture: Option<std::sync::mpsc::Sender<()>>,
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl NativeQuicDecodeGate {
+        fn release_work(&mut self) {
+            if let Some(release) = self.work.take() {
+                let _ = release.send(());
+            }
+        }
+
+        fn release_capture(&mut self) {
+            if let Some(release) = self.capture.take() {
+                let _ = release.send(());
+            }
+        }
+
+        fn child_is_cancelled(&self) -> bool {
+            self.state
+                .child
+                .lock()
+                .expect("worker context lock")
+                .as_ref()
+                .is_some_and(Cx::is_cancel_requested)
+        }
+
+        fn assert_retired(&self) {
+            use std::sync::atomic::Ordering;
+
+            assert!(self.state.retired.load(Ordering::SeqCst));
+            assert!(
+                !self.state.timed_out.load(Ordering::SeqCst),
+                "the test must release the real pool worker before its watchdog"
+            );
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl Drop for NativeQuicDecodeGate {
+        fn drop(&mut self) {
+            // A failed assertion must still let the native pool retire.
+            self.release_work();
+            self.release_capture();
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn gated_native_quic_decode(
+        cx: &Cx,
+        panic_after_release: bool,
+    ) -> (QuicPendingDecode, NativeQuicDecodeGate) {
+        use std::sync::Arc;
+        use std::sync::atomic::Ordering;
+
+        struct Capture {
+            state: Arc<NativeQuicDecodeState>,
+            release: std::sync::mpsc::Receiver<()>,
+        }
+
+        impl Drop for Capture {
+            fn drop(&mut self) {
+                self.state.dropping.store(true, Ordering::SeqCst);
+                if self.release.recv_timeout(Duration::from_secs(10)).is_err() {
+                    self.state.timed_out.store(true, Ordering::SeqCst);
+                }
+                self.state.retired.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let state = Arc::new(NativeQuicDecodeState::default());
+        let (work_tx, work_rx) = std::sync::mpsc::channel();
+        let (capture_tx, capture_rx) = std::sync::mpsc::channel();
+        let capture = Capture {
+            state: Arc::clone(&state),
+            release: capture_rx,
+        };
+        let worker_state = Arc::clone(&state);
+        let job = native_quic_decode_job();
         let handle = cx
-            .spawn_in_cancellation_dominant(&cx.scope(), move |child| async move {
-                let _cleanup = Cleanup(worker_cleaned);
-                std::future::poll_fn(move |_ctx| {
-                    if child.checkpoint().is_err() {
-                        std::task::Poll::Ready(())
-                    } else {
-                        worker_parked.store(true, Ordering::SeqCst);
-                        std::task::Poll::Pending
-                    }
-                })
-                .await;
-                outcome
+            .spawn_blocking_drained(move |child| {
+                let _capture = capture;
+                *worker_state.child.lock().expect("worker context lock") = Some(child.clone());
+                worker_state.started.store(true, Ordering::SeqCst);
+                if work_rx.recv_timeout(Duration::from_secs(10)).is_err() {
+                    worker_state.timed_out.store(true, Ordering::SeqCst);
+                    return Err(QuicTransportError::Control("decode work gate expired".into()));
+                }
+                assert!(!panic_after_release, "native decoder panic sentinel");
+                run_quic_decode_job(&child, job)
             })
-            .expect("admit actual native decode worker");
-        for _ in 0..1024 {
-            if parked.load(Ordering::SeqCst) {
-                break;
-            }
+            .expect("admit actual drained native decode worker");
+        (
+            QuicPendingDecode {
+                block_sbn: 0,
+                started_at: Instant::now(),
+                handle,
+            },
+            NativeQuicDecodeGate {
+                state,
+                work: Some(work_tx),
+                capture: Some(capture_tx),
+            },
+        )
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn wait_for_native_quic_decode(mut ready: impl FnMut() -> bool, context: &str) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !ready() {
+            assert!(Instant::now() < deadline, "{context}");
             crate::runtime::yield_now().await;
         }
-        assert!(parked.load(Ordering::SeqCst), "worker must reach Pending");
-        handle.abort_with_reason(crate::types::CancelReason::user("decode cancelled"));
-        for _ in 0..1024 {
-            if handle.is_finished() {
-                break;
-            }
-            crate::runtime::yield_now().await;
-        }
-        assert!(handle.is_finished(), "cancelled worker must publish its join");
-        assert!(cleaned.load(Ordering::SeqCst), "worker resources must retire");
-        QuicPendingDecode {
-            block_sbn: 3,
-            started_at: Instant::now(),
-            handle,
-        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn native_quic_decode_wait_is_pending<F: std::future::Future>(
+        mut future: std::pin::Pin<&mut F>,
+    ) -> bool {
+        std::future::poll_fn(|task| std::task::Poll::Ready(future.as_mut().poll(task).is_pending()))
+            .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn cancelled_native_decode_worker(cx: &Cx) -> QuicPendingDecode {
+        use std::sync::atomic::Ordering;
+
+        let (pending, mut gate) = gated_native_quic_decode(cx, false);
+        wait_for_native_quic_decode(
+            || gate.state.started.load(Ordering::SeqCst),
+            "native decoder must start before cancellation",
+        )
+        .await;
+        pending
+            .handle
+            .abort_with_reason(crate::types::CancelReason::user("decode cancelled"));
+        wait_for_native_quic_decode(
+            || gate.child_is_cancelled(),
+            "native decoder must observe its own cancellation",
+        )
+        .await;
+        gate.release_work();
+        wait_for_native_quic_decode(
+            || gate.state.dropping.load(Ordering::SeqCst),
+            "native decoder must reach capture destruction",
+        )
+        .await;
+        assert!(
+            !pending.handle.is_finished(),
+            "capture destruction is part of decoder retirement"
+        );
+        gate.release_capture();
+        wait_for_native_quic_decode(
+            || pending.handle.is_finished(),
+            "cancelled native decoder must publish retirement",
+        )
+        .await;
+        gate.assert_retired();
+        pending
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -1301,6 +1425,631 @@ mod tests {
         #[cfg(feature = "full-runtime")]
         assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
         assert!(runtime.shutdown_timeout(Duration::from_secs(5)));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn native_quic_decoder_with_pending(pending: QuicPendingDecode) -> QuicEntryDecoder {
+        QuicEntryDecoder {
+            index: 7,
+            object_id: ObjectId::new(7, 0),
+            size: 0,
+            pipeline: None,
+            complete: false,
+            data: Vec::new(),
+            pending_decodes: vec![pending],
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn assert_native_quic_runtime_retired(runtime: crate::runtime::Runtime) {
+        for _ in 0..1024 {
+            if runtime.is_quiescent() {
+                break;
+            }
+            runtime.block_on(crate::runtime::yield_now());
+        }
+        assert!(runtime.is_quiescent(), "no native decode wrapper may remain live");
+        #[cfg(feature = "full-runtime")]
+        assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+        assert!(runtime.shutdown_timeout(Duration::from_secs(5)));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn quic_decode_error_cleanup_drains_all_physical_workers_before_return() {
+        use std::sync::atomic::Ordering;
+
+        for cancel_receiver in [false, true] {
+            let runtime = crate::runtime::RuntimeBuilder::current_thread()
+                .blocking_threads(3, 3)
+                .build()
+                .expect("native decoder runtime");
+            runtime.block_on(async {
+                let cx = Cx::current().expect("native receiver context");
+                let mut decoders = Vec::new();
+                let mut gates = Vec::new();
+                for index in 0..3 {
+                    // A terminal panic must not short-circuit the later workers.
+                    let (pending, gate) = gated_native_quic_decode(&cx, index == 0);
+                    decoders.push(native_quic_decoder_with_pending(pending));
+                    gates.push(gate);
+                }
+                wait_for_native_quic_decode(
+                    || gates.iter().all(|gate| gate.state.started.load(Ordering::SeqCst)),
+                    "all decode closures must be running before receive failure",
+                )
+                .await;
+                gates[0].release_work();
+                gates[0].release_capture();
+                wait_for_native_quic_decode(
+                    || decoders[0].pending_decodes[0].handle.is_finished(),
+                    "first worker panic must already be a terminal join result",
+                )
+                .await;
+                gates[0].assert_retired();
+                assert!(
+                    gates[1..].iter().all(|gate| !gate.child_is_cancelled()),
+                    "the worker panic must not pre-cancel the siblings under test"
+                );
+
+                let error = if cancel_receiver {
+                    cx.cancel_with(
+                        crate::types::CancelKind::User,
+                        Some("receiver cancellation sentinel"),
+                    );
+                    assert!(cx.checkpoint().is_err());
+                    QuicTransportError::Cancelled
+                } else {
+                    let malformed = Frame::new(
+                        ProtocolVersion::CURRENT,
+                        FrameType::ObjectRequest,
+                        b"not-json".to_vec(),
+                    )
+                    .expect("control frame");
+                    parse_json::<QuicNeedMore>(&malformed)
+                        .expect_err("real control parser must reject the malformed frame")
+                };
+                let expected = error.to_string();
+                let mut receive_result = Box::pin(cancel_and_drain_quic_decodes(
+                    &cx,
+                    &mut decoders,
+                    Err::<(), _>(error),
+                ));
+                assert!(
+                    native_quic_decode_wait_is_pending(receive_result.as_mut()).await,
+                    "a terminal worker panic cannot skip running siblings"
+                );
+                wait_for_native_quic_decode(
+                    || gates[1..].iter().all(NativeQuicDecodeGate::child_is_cancelled),
+                    "request every sibling cancellation before awaiting the first retirement",
+                )
+                .await;
+                for gate in &mut gates[1..] {
+                    gate.release_work();
+                }
+                wait_for_native_quic_decode(
+                    || gates[1..].iter().all(|gate| gate.state.dropping.load(Ordering::SeqCst)),
+                    "cancelled decode closures must reach physical capture destruction",
+                )
+                .await;
+                assert!(
+                    native_quic_decode_wait_is_pending(receive_result.as_mut()).await,
+                    "even a cancelled receiver must wait for captures to retire"
+                );
+                gates[1].release_capture();
+                wait_for_native_quic_decode(
+                    || gates[1].state.retired.load(Ordering::SeqCst),
+                    "first running sibling must retire",
+                )
+                .await;
+                assert!(
+                    native_quic_decode_wait_is_pending(receive_result.as_mut()).await,
+                    "one retired sibling cannot release the receiver while another is held"
+                );
+                assert!(!gates[2].state.retired.load(Ordering::SeqCst));
+                gates[2].release_capture();
+
+                let returned = receive_result.await.expect_err("preserve receive failure");
+                assert_eq!(returned.to_string(), expected);
+                if cancel_receiver {
+                    assert!(matches!(returned, QuicTransportError::Cancelled));
+                } else {
+                    assert!(matches!(returned, QuicTransportError::Control(_)));
+                }
+                assert!(decoders.iter().all(|decoder| decoder.pending_decodes.is_empty()));
+                for gate in &gates {
+                    gate.assert_retired();
+                }
+            });
+            assert_native_quic_runtime_retired(runtime);
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn quic_decode_join_rejects_cancelled_caller_after_physical_retirement() {
+        use std::sync::atomic::Ordering;
+
+        for path in 0..4 {
+            let runtime = crate::runtime::RuntimeBuilder::current_thread()
+                .blocking_threads(1, 1)
+                .build()
+                .expect("native decoder runtime");
+            runtime.block_on(async {
+                let cx = Cx::current().expect("native receiver context");
+                let (pending, mut gate) = gated_native_quic_decode(&cx, false);
+                let mut decoder = native_quic_decoder_with_pending(pending);
+                wait_for_native_quic_decode(
+                    || gate.state.started.load(Ordering::SeqCst),
+                    "decoder must start before receiver cancellation",
+                )
+                .await;
+                let ready_only = path == 0 || path == 2;
+                if ready_only {
+                    gate.release_work();
+                    gate.release_capture();
+                    wait_for_native_quic_decode(
+                        || decoder.pending_decodes[0].handle.is_finished(),
+                        "ready-only consumer needs an actually retired worker",
+                    )
+                    .await;
+                }
+                cx.cancel_with(
+                    crate::types::CancelKind::User,
+                    Some("receiver cancelled during decoder join"),
+                );
+                let config = trusted_quic_config();
+                let mut stats = QuicDecodeStats::default();
+                let mut consume = Box::pin(async {
+                    let decoders = std::slice::from_mut(&mut decoder);
+                    match path {
+                        0 => drain_ready_quic_decodes(&cx, decoders, &mut stats)
+                            .await
+                            .map(|_| ()),
+                        1 => join_all_quic_decodes(&cx, decoders, &mut stats)
+                            .await
+                            .map(|_| ()),
+                        2 => drain_ready_quic_decodes_with_blocks(
+                            &cx, decoders, &config, &mut stats, true, 1,
+                        )
+                        .await
+                        .map(|_| ()),
+                        _ => join_all_quic_decodes_with_blocks(
+                            &cx, decoders, &config, &mut stats, 1,
+                        )
+                        .await
+                        .map(|_| ()),
+                    }
+                });
+                if !ready_only {
+                    assert!(native_quic_decode_wait_is_pending(consume.as_mut()).await);
+                    gate.release_work();
+                    wait_for_native_quic_decode(
+                        || gate.state.dropping.load(Ordering::SeqCst),
+                        "completed decoder must retain its captures through the join",
+                    )
+                    .await;
+                    assert!(
+                        native_quic_decode_wait_is_pending(consume.as_mut()).await,
+                        "caller cancellation cannot interrupt physical decoder retirement"
+                    );
+                    gate.release_capture();
+                }
+                let result = consume.await;
+                assert!(
+                    matches!(result, Err(QuicTransportError::Cancelled)),
+                    "join path {path} must not turn a cancelled receive into success: {result:?}"
+                );
+                gate.assert_retired();
+                assert!(decoder.pending_decodes.is_empty());
+                assert_eq!(stats.decode_count, 0);
+                assert!(!decoder.complete);
+            });
+            assert_native_quic_runtime_retired(runtime);
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn quic_decode_queued_cancellation_retires_uninvoked_captures_before_join() {
+        use std::sync::atomic::Ordering;
+
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .blocking_threads(1, 1)
+            .build()
+            .expect("single-worker native decoder runtime");
+        runtime.block_on(async {
+            let cx = Cx::current().expect("native receiver context");
+            let pool = cx.blocking_pool_handle().expect("native blocking pool");
+            let (mut occupied, mut occupied_gate) = gated_native_quic_decode(&cx, false);
+            wait_for_native_quic_decode(
+                || occupied_gate.state.started.load(Ordering::SeqCst),
+                "first closure must occupy the only blocking worker",
+            )
+            .await;
+            let (queued, mut queued_gate) = gated_native_quic_decode(&cx, false);
+            wait_for_native_quic_decode(
+                || pool.pending_count() == 1,
+                "second decode must actually be queued before cancellation",
+            )
+            .await;
+            assert!(!queued_gate.state.started.load(Ordering::SeqCst));
+            queued
+                .handle
+                .abort_with_reason(crate::types::CancelReason::user("queued decode cancelled"));
+            let mut decoder = native_quic_decoder_with_pending(queued);
+            let mut stats = QuicDecodeStats::default();
+            let mut joined = Box::pin(join_all_quic_decodes(
+                &cx,
+                std::slice::from_mut(&mut decoder),
+                &mut stats,
+            ));
+            assert!(
+                native_quic_decode_wait_is_pending(joined.as_mut()).await,
+                "queued cancellation cannot skip physical capture retirement"
+            );
+            occupied_gate.release_work();
+            occupied_gate.release_capture();
+            wait_for_native_quic_decode(
+                || queued_gate.state.dropping.load(Ordering::SeqCst),
+                "the pool must retire the cancelled queued envelope",
+            )
+            .await;
+            assert!(
+                !queued_gate.state.started.load(Ordering::SeqCst),
+                "the cancelled queued closure must never be invoked"
+            );
+            assert!(native_quic_decode_wait_is_pending(joined.as_mut()).await);
+            queued_gate.release_capture();
+            let result = joined.await;
+            assert!(matches!(result, Err(QuicTransportError::Cancelled)));
+            occupied
+                .handle
+                .join()
+                .await
+                .expect("unrelated running worker joins")
+                .expect("unrelated running decode succeeds");
+            occupied_gate.assert_retired();
+            queued_gate.assert_retired();
+            assert!(decoder.pending_decodes.is_empty());
+            assert_eq!(stats.decode_count, 0);
+            assert_eq!(pool.pending_count(), 0);
+        });
+        assert_native_quic_runtime_retired(runtime);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn quic_decode_worker_panic_wins_caller_cancellation_after_retirement() {
+        use std::sync::atomic::Ordering;
+
+        for streaming in [false, true] {
+            let runtime = crate::runtime::RuntimeBuilder::current_thread()
+                .blocking_threads(1, 1)
+                .build()
+                .expect("native decoder runtime");
+            runtime.block_on(async {
+                let cx = Cx::current().expect("native receiver context");
+                let (pending, mut gate) = gated_native_quic_decode(&cx, true);
+                let mut decoder = native_quic_decoder_with_pending(pending);
+                wait_for_native_quic_decode(
+                    || gate.state.started.load(Ordering::SeqCst),
+                    "failing decoder must start before caller cancellation",
+                )
+                .await;
+                cx.cancel_with(
+                    crate::types::CancelKind::User,
+                    Some("receiver cancellation cannot erase worker panic"),
+                );
+                let config = trusted_quic_config();
+                let mut stats = QuicDecodeStats::default();
+                let mut joined = Box::pin(async {
+                    let decoders = std::slice::from_mut(&mut decoder);
+                    if streaming {
+                        join_all_quic_decodes_with_blocks(&cx, decoders, &config, &mut stats, 1)
+                            .await
+                            .map(|_| ())
+                    } else {
+                        join_all_quic_decodes(&cx, decoders, &mut stats)
+                            .await
+                            .map(|_| ())
+                    }
+                });
+                assert!(native_quic_decode_wait_is_pending(joined.as_mut()).await);
+                gate.release_work();
+                wait_for_native_quic_decode(
+                    || gate.state.dropping.load(Ordering::SeqCst),
+                    "panicking worker must unwind through its captured resources",
+                )
+                .await;
+                assert!(
+                    native_quic_decode_wait_is_pending(joined.as_mut()).await,
+                    "panic publication must wait for physical capture destruction"
+                );
+                gate.release_capture();
+                let result = joined.await;
+                assert!(
+                    matches!(result, Err(QuicTransportError::Control(ref message))
+                        if message.contains("decode task failed for entry 7 block 0")
+                            && message.contains("native decoder panic sentinel")),
+                    "worker panic must retain its decode diagnostic: {result:?}"
+                );
+                gate.assert_retired();
+                assert!(decoder.pending_decodes.is_empty());
+                assert_eq!(stats.decode_count, 0);
+            });
+            assert_native_quic_runtime_retired(runtime);
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn quic_decode_dropped_transfer_keeps_physical_work_in_its_region() {
+        use std::sync::atomic::Ordering;
+
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .blocking_threads(2, 2)
+            .build()
+            .expect("native decoder runtime");
+        runtime.block_on(async {
+            let cx = Cx::current().expect("native receiver context");
+            let region = cx
+                .open_child_region(crate::cx::ChildRegionSpec::inherit())
+                .await
+                .expect("owned decoder region");
+            let mut decoders = Vec::new();
+            let mut gates = Vec::new();
+            for _ in 0..2 {
+                let (pending, gate) = gated_native_quic_decode(region.cx(), false);
+                decoders.push(native_quic_decoder_with_pending(pending));
+                gates.push(gate);
+            }
+            wait_for_native_quic_decode(
+                || gates.iter().all(|gate| gate.state.started.load(Ordering::SeqCst)),
+                "both region-owned decoder closures must start before future drop",
+            )
+            .await;
+            let mut receive = Box::pin(async move {
+                std::future::pending::<()>().await;
+                drop(decoders);
+            });
+            assert!(native_quic_decode_wait_is_pending(receive.as_mut()).await);
+            drop(receive);
+            wait_for_native_quic_decode(
+                || gates.iter().all(NativeQuicDecodeGate::child_is_cancelled),
+                "dropping the transfer must request cancellation of each decoder",
+            )
+            .await;
+            let mut close = Box::pin(region.close());
+            assert!(
+                native_quic_decode_wait_is_pending(close.as_mut()).await,
+                "dropped handles must retain physical blocking work in their region"
+            );
+            for gate in &mut gates {
+                gate.release_work();
+            }
+            wait_for_native_quic_decode(
+                || gates.iter().all(|gate| gate.state.dropping.load(Ordering::SeqCst)),
+                "abandoned decoder closures must reach capture destruction",
+            )
+            .await;
+            gates[0].release_capture();
+            wait_for_native_quic_decode(
+                || gates[0].state.retired.load(Ordering::SeqCst),
+                "first abandoned decoder must retire",
+            )
+            .await;
+            assert!(
+                native_quic_decode_wait_is_pending(close.as_mut()).await,
+                "region closure must wait for every remaining physical capture"
+            );
+            assert!(!gates[1].state.retired.load(Ordering::SeqCst));
+            gates[1].release_capture();
+            close.await.expect("region closes after physical decoder retirement");
+            for gate in &gates {
+                gate.assert_retired();
+            }
+        });
+        assert_native_quic_runtime_retired(runtime);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn quic_decode_producers_use_native_pool_and_preserve_admission_policy() {
+        use crate::runtime::BlockingAdmissionPolicy;
+        use std::num::NonZeroUsize;
+        use std::sync::atomic::Ordering;
+
+        let one = NonZeroUsize::new(1).expect("nonzero queue bound");
+        for streaming in [false, true] {
+            for profile in 0..5 {
+                let policy = match profile {
+                    1 => BlockingAdmissionPolicy::Forbidden,
+                    3 => BlockingAdmissionPolicy::Bounded { max_queued: one },
+                    4 => BlockingAdmissionPolicy::BoundedBytes {
+                        max_queued: one,
+                        max_live_bytes: NonZeroUsize::new(1024).expect("nonzero byte bound"),
+                    },
+                    _ => BlockingAdmissionPolicy::Unbounded,
+                };
+                let native_pool = profile == 2 || profile == 3;
+                let runtime = crate::runtime::RuntimeBuilder::current_thread()
+                    .blocking_threads(0, usize::from(profile != 0))
+                    .blocking_admission_policy(policy)
+                    .build()
+                    .expect("native decoder admission profile");
+                runtime.block_on(async {
+                    let cx = Cx::current().expect("native receiver context");
+                    let mut occupied = if native_pool {
+                        let (pending, gate) = gated_native_quic_decode(&cx, false);
+                        wait_for_native_quic_decode(
+                            || gate.state.started.load(Ordering::SeqCst),
+                            "hold the real pool worker before producer dispatch",
+                        )
+                        .await;
+                        Some((pending, gate))
+                    } else {
+                        None
+                    };
+                    let config = QuicConfig {
+                        symbol_size: 1024,
+                        max_block_size: 32 * 1024,
+                        repair_overhead: 1.0,
+                        ..trusted_quic_config()
+                    };
+                    let mut decoder = quic_decode_width_fixture_decoder(
+                        7,
+                        QUIC_PARALLEL_DECODE_MIN_ENTRY_BYTES,
+                        &config,
+                    );
+                    let width = quic_entry_decode_width_budget(
+                        &decoder,
+                        &config,
+                        QUIC_MAX_PENDING_DECODE_JOBS_PER_TRANSFER,
+                    );
+                    assert!(width > 1, "the production parallel-dispatch gate must be open");
+                    let source_count = config.max_block_size / usize::from(config.symbol_size);
+                    let mut stats = QuicDecodeStats::default();
+                    let mut immediate_block = None;
+                    let mut dispatch_result = Ok(());
+                    for esi in 0..source_count {
+                        let symbol = AuthenticatedSymbol::new_unauthenticated(Symbol::new(
+                            SymbolId::new(decoder.object_id, 0, esi as u32),
+                            vec![7_u8; usize::from(config.symbol_size)],
+                            SymbolKind::Source,
+                        ));
+                        if streaming {
+                            let deferred = decoder
+                                .pipeline
+                                .as_mut()
+                                .expect("streaming decoder pipeline")
+                                .feed_streaming_block_deferred(symbol)
+                                .expect("source symbol accepted");
+                            match deferred {
+                                DeferredSymbolAcceptResult::Decode(job) => {
+                                    assert_eq!(esi + 1, source_count);
+                                    dispatch_result = dispatch_quic_streaming_decode_job(
+                                        &cx,
+                                        &mut decoder,
+                                        job,
+                                        &config,
+                                        &mut stats,
+                                        true,
+                                        QUIC_MAX_PENDING_DECODE_JOBS_PER_TRANSFER,
+                                    )
+                                    .map(|block| immediate_block = block);
+                                }
+                                DeferredSymbolAcceptResult::Immediate(result) => {
+                                    assert!(esi + 1 < source_count);
+                                    assert!(matches!(result, SymbolAcceptResult::Accepted { .. }));
+                                }
+                            }
+                        } else {
+                            let fed = feed_authenticated_symbol_deferred(
+                                &cx,
+                                &mut decoder,
+                                symbol,
+                                &config,
+                                &mut stats,
+                                true,
+                                QUIC_MAX_PENDING_DECODE_JOBS_PER_TRANSFER,
+                            );
+                            if esi + 1 < source_count {
+                                assert!(fed.expect("source symbol accepted"));
+                            } else {
+                                dispatch_result = fed.map(|_| ());
+                            }
+                        }
+                    }
+
+                    if profile == 4 {
+                        assert!(
+                            matches!(dispatch_result, Err(QuicTransportError::Control(ref message))
+                                if message.contains("accepting uncharged work")),
+                            "byte-accounted refusal must remain a decode error: {dispatch_result:?}"
+                        );
+                        assert!(decoder.pending_decodes.is_empty());
+                        assert_eq!(stats.decode_count, 0);
+                        assert_eq!(
+                            cx.blocking_pool_handle().expect("byte-bound pool").pending_count(),
+                            0
+                        );
+                        return;
+                    }
+                    dispatch_result.expect("supported decoder admission profile");
+                    let mut blocks = Vec::new();
+                    if native_pool {
+                        assert_eq!(decoder.pending_decodes.len(), 1);
+                        assert_eq!(stats.decode_count, 0, "dispatch must not decode inline");
+                        assert!(immediate_block.is_none());
+                        let pool = cx.blocking_pool_handle().expect("native pool");
+                        wait_for_native_quic_decode(
+                            || pool.pending_count() == 1,
+                            "the production producer must enqueue a real pool job",
+                        )
+                        .await;
+                        let (blocker, gate) = occupied.as_mut().expect("occupied native pool");
+                        assert!(!decoder.pending_decodes[0].handle.is_finished());
+                        gate.release_work();
+                        gate.release_capture();
+                        blocker
+                            .handle
+                            .join()
+                            .await
+                            .expect("blocker joins")
+                            .expect("blocker decode");
+                        gate.assert_retired();
+                        if streaming {
+                            blocks = join_all_quic_decodes_with_blocks(
+                                &cx,
+                                std::slice::from_mut(&mut decoder),
+                                &config,
+                                &mut stats,
+                                QUIC_MAX_PENDING_DECODE_JOBS_PER_TRANSFER,
+                            )
+                            .await
+                            .expect("streaming producer job joins");
+                        } else {
+                            assert_eq!(
+                                join_all_quic_decodes(
+                                    &cx,
+                                    std::slice::from_mut(&mut decoder),
+                                    &mut stats,
+                                )
+                                .await
+                                .expect("buffered producer job joins"),
+                                1
+                            );
+                        }
+                    } else {
+                        assert!(decoder.pending_decodes.is_empty());
+                        if let Some(block) = immediate_block {
+                            blocks.push(block);
+                        }
+                    }
+                    assert_eq!(stats.decode_count, 1);
+                    assert!(decoder.pending_decodes.is_empty());
+                    assert!(!decoder.complete, "only the first of 256 blocks was supplied");
+                    assert_eq!(
+                        decoder
+                            .pipeline
+                            .as_ref()
+                            .expect("decoder")
+                            .block_status(0)
+                            .expect("first block")
+                            .state,
+                        BlockStateKind::Decoded
+                    );
+                    if streaming {
+                        assert_eq!(blocks.len(), 1);
+                        assert_eq!(blocks[0].entry, 7);
+                        assert_eq!(blocks[0].sbn, 0);
+                        assert_eq!(blocks[0].data, vec![7_u8; config.max_block_size]);
+                    }
+                });
+                assert_native_quic_runtime_retired(runtime);
+            }
+        }
     }
 
     #[test]

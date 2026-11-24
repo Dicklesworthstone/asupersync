@@ -3915,7 +3915,29 @@ struct QuicEntryDecoder {
 struct QuicPendingDecode {
     block_sbn: u8,
     started_at: Instant,
-    handle: crate::runtime::TaskHandle<BlockDecodeOutcome>,
+    handle: crate::runtime::spawn_blocking::DrainedBlockingHandle<
+        Result<BlockDecodeOutcome, QuicTransportError>,
+    >,
+}
+
+impl QuicPendingDecode {
+    async fn join(
+        &mut self,
+        cx: &Cx,
+        entry: u32,
+    ) -> Result<BlockDecodeOutcome, QuicTransportError> {
+        // Retire the physical closure before observing cancellation. A worker
+        // panic remains its original error, even if the receiver was cancelled.
+        let outcome = self
+            .handle
+            .join()
+            .await
+            .map_err(|error| quic_decode_join_error(entry, self.block_sbn, error))??;
+        // The worker may have completed before cancellation arrived. Check the
+        // receive operation before applying that successful result to its state.
+        cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+        Ok(outcome)
+    }
 }
 
 fn quic_pending_decode_jobs(decoders: &[QuicEntryDecoder]) -> usize {
@@ -3923,6 +3945,32 @@ fn quic_pending_decode_jobs(decoders: &[QuicEntryDecoder]) -> usize {
         .iter()
         .map(|decoder| decoder.pending_decodes.len())
         .sum()
+}
+
+async fn cancel_and_drain_quic_decodes<T>(
+    cx: &Cx,
+    decoders: &mut [QuicEntryDecoder],
+    result: Result<T, QuicTransportError>,
+) -> Result<T, QuicTransportError> {
+    let reason = cx
+        .cancel_reason()
+        .unwrap_or_else(crate::types::CancelReason::parent_cancelled);
+    // Close every queued job's claim gate before waiting for a running solve.
+    // Dropped receive futures also request cancellation through each drained
+    // handle; the owning region retains those jobs until physical retirement.
+    for decoder in decoders.iter() {
+        for pending in &decoder.pending_decodes {
+            pending.handle.abort_with_reason(reason.clone());
+        }
+    }
+    for decoder in decoders {
+        while let Some(mut pending) = decoder.pending_decodes.pop() {
+            // Cleanup never short-circuits or replaces the receive outcome.
+            // A running solve must return; this is not a wall-clock timeout.
+            let _ = pending.handle.join().await;
+        }
+    }
+    result
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -6058,6 +6106,40 @@ fn finish_quic_decode_outcome(
     }
 }
 
+fn quic_decode_pool_available(cx: &Cx) -> Result<bool, QuicTransportError> {
+    let Some(pool) = cx.blocking_pool_handle() else {
+        return Ok(false);
+    };
+    if matches!(
+        pool.admission_policy(),
+        crate::runtime::BlockingAdmissionPolicy::BoundedBytes { .. }
+    ) {
+        // Both blocking APIs submit these owned jobs without a byte charge.
+        // Keep this a decode failure, rather than misreporting a policy refusal
+        // as caller cancellation or bypassing the pool's byte bound inline.
+        return Err(QuicTransportError::Control(
+            "parallel QUIC decode requires a blocking pool accepting uncharged work"
+                .to_string(),
+        ));
+    }
+    // Preserve the existing synchronous CPU-decode path when pool dispatch is
+    // forbidden. No pool work is submitted in this configuration.
+    Ok(!pool.forbids_blocking())
+}
+
+fn run_quic_decode_job(
+    cx: &Cx,
+    job: BlockDecodeJob,
+) -> Result<BlockDecodeOutcome, QuicTransportError> {
+    cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+    let outcome = run_block_decode_job(job);
+    // A drained blocking task preserves its closure's result. Make decode
+    // cancellation explicit instead of returning a successful block after a
+    // cancellation request that arrived during the solve.
+    cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+    Ok(outcome)
+}
+
 fn feed_authenticated_symbol_deferred(
     cx: &Cx,
     decoder: &mut QuicEntryDecoder,
@@ -6101,12 +6183,13 @@ fn feed_authenticated_symbol_deferred(
             if !allow_spawn_decode
                 || entry_decode_width <= 1
                 || decoder.pending_decodes.len() >= entry_decode_width
+                || !quic_decode_pool_available(cx)?
             {
-                let outcome = run_block_decode_job(job);
+                let outcome = run_quic_decode_job(cx, job)?;
                 return finish_quic_decode_outcome(decoder, outcome, decode_stats, started_at);
             }
             let fallback_job = job.clone();
-            match cx.spawn_blocking(move |_child| run_block_decode_job(job)) {
+            match cx.spawn_blocking_drained(move |child| run_quic_decode_job(&child, job)) {
                 Ok(handle) => {
                     decoder.pending_decodes.push(QuicPendingDecode {
                         block_sbn,
@@ -6116,7 +6199,7 @@ fn feed_authenticated_symbol_deferred(
                     Ok(true)
                 }
                 Err(_) => {
-                    let outcome = run_block_decode_job(fallback_job);
+                    let outcome = run_quic_decode_job(cx, fallback_job)?;
                     finish_quic_decode_outcome(decoder, outcome, decode_stats, started_at)
                 }
             }
@@ -6154,12 +6237,7 @@ async fn drain_ready_quic_decodes(
                 continue;
             }
             let mut pending = decoder.pending_decodes.swap_remove(i);
-            let block_sbn = pending.block_sbn;
-            let outcome = pending
-                .handle
-                .join(cx)
-                .await
-                .map_err(|error| quic_decode_join_error(decoder.index, block_sbn, error))?;
+            let outcome = pending.join(cx, decoder.index).await?;
             if finish_quic_decode_outcome(decoder, outcome, decode_stats, pending.started_at)? {
                 completed = completed.saturating_add(1);
             }
@@ -6176,12 +6254,7 @@ async fn join_all_quic_decodes(
     let mut completed = 0u64;
     for decoder in decoders {
         while let Some(mut pending) = decoder.pending_decodes.pop() {
-            let block_sbn = pending.block_sbn;
-            let outcome = pending
-                .handle
-                .join(cx)
-                .await
-                .map_err(|error| quic_decode_join_error(decoder.index, block_sbn, error))?;
+            let outcome = pending.join(cx, decoder.index).await?;
             if finish_quic_decode_outcome(decoder, outcome, decode_stats, pending.started_at)? {
                 completed = completed.saturating_add(1);
             }
@@ -6275,11 +6348,12 @@ fn dispatch_quic_streaming_decode_job(
     if !allow_spawn_decode
         || entry_decode_width <= 1
         || decoder.pending_decodes.len() >= entry_decode_width
+        || !quic_decode_pool_available(cx)?
     {
         return finish_quic_streaming_decode_outcome(
             cx,
             decoder,
-            run_block_decode_job(job),
+            run_quic_decode_job(cx, job)?,
             config,
             decode_stats,
             allow_spawn_decode,
@@ -6288,7 +6362,7 @@ fn dispatch_quic_streaming_decode_job(
     }
 
     let fallback_job = job.clone();
-    match cx.spawn_blocking(move |_child| run_block_decode_job(job)) {
+    match cx.spawn_blocking_drained(move |child| run_quic_decode_job(&child, job)) {
         Ok(handle) => {
             decoder.pending_decodes.push(QuicPendingDecode {
                 block_sbn,
@@ -6300,7 +6374,7 @@ fn dispatch_quic_streaming_decode_job(
         Err(_) => finish_quic_streaming_decode_outcome(
             cx,
             decoder,
-            run_block_decode_job(fallback_job),
+            run_quic_decode_job(cx, fallback_job)?,
             config,
             decode_stats,
             allow_spawn_decode,
@@ -6395,12 +6469,7 @@ async fn drain_ready_quic_decodes_with_blocks(
                 continue;
             }
             let mut pending = decoder.pending_decodes.swap_remove(i);
-            let block_sbn = pending.block_sbn;
-            let outcome = pending
-                .handle
-                .join(cx)
-                .await
-                .map_err(|error| quic_decode_join_error(decoder.index, block_sbn, error))?;
+            let outcome = pending.join(cx, decoder.index).await?;
             if let Some(block) = finish_quic_streaming_decode_outcome(
                 cx,
                 decoder,
@@ -6428,12 +6497,7 @@ async fn join_all_quic_decodes_with_blocks(
     let mut completed = Vec::new();
     for decoder in decoders {
         while let Some(mut pending) = decoder.pending_decodes.pop() {
-            let block_sbn = pending.block_sbn;
-            let outcome = pending
-                .handle
-                .join(cx)
-                .await
-                .map_err(|error| quic_decode_join_error(decoder.index, block_sbn, error))?;
+            let outcome = pending.join(cx, decoder.index).await?;
             if let Some(block) = finish_quic_streaming_decode_outcome(
                 cx,
                 decoder,
@@ -12188,8 +12252,8 @@ async fn receive_established_native_connection(
             )));
         }
     } else {
-        loop {
-            if receive_native_symbol_round(
+        let receive_result = loop {
+            match receive_native_symbol_round(
                 cx,
                 &mut connection,
                 &mut control,
@@ -12201,12 +12265,16 @@ async fn receive_established_native_connection(
                 &mut feedback_rounds,
                 &mut decode_stats,
             )
-            .await?
-            .is_none()
+            .await
             {
-                break;
+                Ok(None) => break Ok(()),
+                Ok(Some(_)) => {}
+                Err(error) => break Err(error),
             }
-        }
+        };
+        // A failed round can leave other blocks decoding. Keep the original
+        // failure, but do not return it while those workers still own symbols.
+        cancel_and_drain_quic_decodes(cx, &mut decoders, receive_result).await?;
     }
 
     let (receipt, committed_paths) = commit_decoded_entries_with_options(

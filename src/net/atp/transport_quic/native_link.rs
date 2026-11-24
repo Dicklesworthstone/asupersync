@@ -12975,6 +12975,11 @@ async fn run_receiver_session(
     }
     .await;
 
+    // An error can arrive from packet intake, a single decode, or publication
+    // while sibling decodes are still running. Cancel all of them, then await
+    // their physical retirement without replacing the original receive result.
+    let receive_result =
+        super::cancel_and_drain_quic_decodes(cx, &mut decoders, receive_result).await;
     for staged_entry in &mut staged {
         let _ = staged_entry.close_cached_staging_file().await;
     }
