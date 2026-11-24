@@ -3597,6 +3597,433 @@ mod tests {
         );
     }
 
+    fn run_native_orphan_recovery_test<F, Fut>(workers: usize, scenario: F)
+    where
+        F: FnOnce(Cx) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        const DEADLINE: Duration = Duration::from_secs(10);
+
+        struct CompletionSignal(std::sync::mpsc::Sender<()>);
+        impl Drop for CompletionSignal {
+            fn drop(&mut self) {
+                let _ = self.0.send(());
+            }
+        }
+
+        let runtime = crate::runtime::RuntimeBuilder::multi_thread()
+            .worker_threads(workers)
+            .with_reactor(crate::runtime::reactor::create_reactor().expect("native reactor"))
+            .build()
+            .expect("native recovery runtime");
+        let request_cx = runtime.request_cx_with_budget(Budget::INFINITE);
+        let timeout_cx = request_cx.clone();
+        let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+        let completion = CompletionSignal(completed_tx);
+        let task = runtime.handle().spawn(async move {
+            let _completion = completion;
+            assert!(Cx::current().is_some(), "recovery must run on a native worker");
+            scenario(request_cx).await;
+        });
+        let completed = completed_rx.recv_timeout(DEADLINE);
+        if completed.is_err() {
+            timeout_cx.cancel_with_reason(CancelReason::user("orphan recovery test deadline"));
+        }
+        let drain = runtime.shutdown_drained(DEADLINE);
+        let stopped = runtime.shutdown_timeout(DEADLINE);
+        let mut task = std::pin::pin!(task);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            task.as_mut()
+                .poll(&mut Context::from_waker(std::task::Waker::noop()))
+        }));
+        assert!(
+            completed.is_ok(),
+            "{workers} workers: recovery timed out: {completed:?}; drain: {drain:?}"
+        );
+        assert_eq!(drain.outcome, crate::runtime::RootDrainOutcome::Quiescent);
+        assert_eq!(drain.live_tasks, 0);
+        assert_eq!(drain.pending_spawns, 0);
+        assert_eq!(drain.pending_obligations, 0);
+        assert_eq!(drain.queued_finalizers, 0);
+        assert!(stopped, "native workers must retire");
+        match result {
+            Ok(Poll::Ready(())) => {}
+            Ok(Poll::Pending) => panic!("recovery task must be terminal after teardown"),
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+
+    fn make_orphan_recovery_connection_with_peer() -> (PgConnection, std::net::TcpStream) {
+        let (conn, peer) = make_test_connection_with_peer();
+        peer.set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("bounded recovery read");
+        peer.set_write_timeout(Some(Duration::from_secs(2)))
+            .expect("bounded recovery write");
+        (conn, peer)
+    }
+
+    fn assert_orphan_recovery_debt(conn: &PgConnection, dirty: bool, case: &str) {
+        assert!(conn.inner.closed, "{case}: recovery must remain closed");
+        assert!(conn.inner.needs_rollback, "{case}: rollback debt must remain");
+        assert!(conn.needs_discard(), "{case}: pool reuse must remain excluded");
+        assert_eq!(
+            conn.inner.needs_discard, dirty,
+            "{case}: preserve the independent session-discard reason"
+        );
+    }
+
+    fn assert_orphan_peer_closed(peer: &mut std::net::TcpStream, case: &str) {
+        use std::io::Read;
+
+        peer.set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("bounded peer read");
+        match peer.read(&mut [0u8; 1]) {
+            Ok(0) => {}
+            Err(error) if error.kind() == io::ErrorKind::ConnectionReset => {}
+            other => panic!("{case}: expected EOF without queued caller SQL, got {other:?}"),
+        }
+    }
+
+    async fn witness_orphan_rollback_pending<F: std::future::Future>(
+        mut recovery: Pin<&mut F>,
+        peer: &mut std::net::TcpStream,
+    ) {
+        use std::io::Read;
+
+        peer.set_nonblocking(true).expect("nonblocking recovery witness");
+        let expected = backend_message(b'Q', b"ROLLBACK\0");
+        let mut received = Vec::new();
+        std::future::poll_fn(|task_cx| {
+            assert!(
+                recovery.as_mut().poll(task_cx).is_pending(),
+                "recovery must wait for the withheld ReadyForQuery"
+            );
+            let mut bytes = [0u8; 64];
+            loop {
+                match peer.read(&mut bytes) {
+                    Ok(0) => panic!("recovery socket closed before its Pending witness"),
+                    Ok(count) => {
+                        received.extend_from_slice(&bytes[..count]);
+                        assert!(
+                            received.len() <= expected.len(),
+                            "queued caller SQL before rollback completion"
+                        );
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(error) => panic!("read recovery request: {error}"),
+                }
+            }
+            if received.len() >= expected.len() {
+                assert_eq!(received, expected, "only ROLLBACK may reach the peer");
+                Poll::Ready(())
+            } else {
+                task_cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        })
+        .await;
+        peer.set_nonblocking(false).expect("restore blocking peer");
+    }
+
+    #[test]
+    fn interrupted_orphan_rollback_preserves_debt_and_refuses_queued_sql() {
+        for workers in [1, 2] {
+            for dirty in [false, true] {
+                for cancel in [false, true] {
+                    run_native_orphan_recovery_test(workers, move |request_cx| async move {
+                        let active_cx = Cx::current().expect("native recovery worker");
+                        let (mut conn, mut peer) = make_orphan_recovery_connection_with_peer();
+                        conn.inner.transaction_status = b'T';
+                        conn.inner.needs_discard = dirty;
+                        drop(PgTransaction {
+                            conn: &mut conn,
+                            finished: false,
+                            isolation_level: None,
+                            read_only: false,
+                            obligation: None,
+                        });
+                        // CommandComplete alone does not resolve rollback debt.
+                        std::io::Write::write_all(
+                            &mut peer,
+                            &command_complete_message("ROLLBACK"),
+                        )
+                        .expect("write rollback completion without ReadyForQuery");
+                        let mut recovery = Box::pin(
+                            conn.execute_unchecked(&request_cx, "UPDATE must_not_run SET v = 1"),
+                        );
+                        witness_orphan_rollback_pending(recovery.as_mut(), &mut peer).await;
+                        if cancel {
+                            let reason = CancelReason::user("cancel orphaned rollback recovery");
+                            request_cx.cancel_with_reason(reason.clone());
+                            assert!(matches!(
+                                recovery.await,
+                                Outcome::Cancelled(observed) if observed == reason
+                            ));
+                        } else {
+                            drop(recovery);
+                        }
+                        assert_orphan_recovery_debt(&conn, dirty, "interrupted rollback");
+                        assert!(matches!(
+                            conn.execute_unchecked(&active_cx, "UPDATE must_not_run SET v = 2")
+                                .await,
+                            Outcome::Err(PgError::ConnectionClosed)
+                        ));
+                        assert!(!active_cx.is_cancel_requested());
+                        if cancel {
+                            assert_orphan_peer_closed(&mut peer, "cancelled rollback");
+                        }
+                        // Hard drop owes no asynchronous rollback. Its logical
+                        // closure blocks reuse; disposal closes the transport.
+                        drop(conn);
+                        if !cancel {
+                            assert_orphan_peer_closed(&mut peer, "dropped rollback");
+                        }
+                    });
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn orphan_rollback_requires_complete_idle_acknowledgement_before_caller_sql() {
+        for workers in [1, 2] {
+            run_native_orphan_recovery_test(workers, |cx| async move {
+                let rollback = command_complete_message("ROLLBACK");
+                let idle = ready_for_query(b'I');
+                let mut cases = Vec::new();
+                for status in [b'I', b'T', b'E'] {
+                    cases.push((
+                        format!("server error before ready {status:?}"),
+                        [
+                            error_response_message("XX000", "rollback refused"),
+                            ready_for_query(status),
+                        ]
+                        .concat(),
+                        true,
+                    ));
+                    cases.push((
+                        format!("ready {status:?} without command completion"),
+                        ready_for_query(status),
+                        false,
+                    ));
+                }
+                cases.push((
+                    "server error after command completion".to_string(),
+                    [
+                        rollback.clone(),
+                        error_response_message("XX000", "rollback refused"),
+                        idle.clone(),
+                    ]
+                    .concat(),
+                    true,
+                ));
+                for (case, completion) in [
+                    ("wrong command tag", command_complete_message("COMMIT")),
+                    (
+                        "missing command-tag terminator",
+                        backend_message(b'C', b"ROLLBACK"),
+                    ),
+                    (
+                        "trailing command-tag data",
+                        backend_message(b'C', b"ROLLBACK\0junk"),
+                    ),
+                    (
+                        "duplicate command completion",
+                        [rollback.clone(), rollback.clone()].concat(),
+                    ),
+                ] {
+                    cases.push((
+                        case.to_string(),
+                        [completion, idle.clone()].concat(),
+                        false,
+                    ));
+                }
+                for (case, ready) in [
+                    ("still in transaction", ready_for_query(b'T')),
+                    ("still in failed transaction", ready_for_query(b'E')),
+                    ("empty ready body", backend_message(b'Z', b"")),
+                    ("trailing ready data", backend_message(b'Z', b"II")),
+                    ("unknown ready status", backend_message(b'Z', b"X")),
+                ] {
+                    cases.push((
+                        case.to_string(),
+                        [rollback.clone(), ready].concat(),
+                        false,
+                    ));
+                }
+                for (case, unexpected) in [
+                    (
+                        "trailing parameter-status data",
+                        backend_message(b'S', b"application_name\0x\0junk"),
+                    ),
+                    (
+                        "unexpected row description",
+                        backend_message(b'T', &[0, 0]),
+                    ),
+                ] {
+                    cases.push((
+                        case.to_string(),
+                        [unexpected, rollback.clone(), idle.clone()].concat(),
+                        false,
+                    ));
+                }
+
+                for (case, response, server_error) in cases {
+                    for dirty in [false, true] {
+                        let (mut conn, mut peer) = make_orphan_recovery_connection_with_peer();
+                        conn.inner.transaction_status = b'T';
+                        conn.inner.needs_discard = dirty;
+                        drop(PgTransaction {
+                            conn: &mut conn,
+                            finished: false,
+                            isolation_level: None,
+                            read_only: false,
+                            obligation: None,
+                        });
+                        assert!(conn.inner.needs_rollback, "{case}: dropped transaction debt");
+                        assert!(conn.needs_discard(), "{case}: orphan must exclude pool reuse");
+                        let mut reply = response.clone();
+                        // The extra response lets the old permissive reader
+                        // finish queued SQL, making that bug an assertion failure.
+                        reply.extend(command_complete_message("UPDATE 1"));
+                        reply.extend(ready_for_query(b'I'));
+                        std::io::Write::write_all(&mut peer, &reply)
+                            .expect("write recovery response fixture");
+                        let outcome = conn
+                            .execute_unchecked(&cx, "UPDATE must_not_run SET v = 1")
+                            .await;
+                        if server_error {
+                            assert!(
+                                matches!(
+                                    &outcome,
+                                    Outcome::Err(PgError::Server { code, .. }) if code == "XX000"
+                                ),
+                                "{case}: retain the server error, got {outcome:?}"
+                            );
+                        } else {
+                            assert!(
+                                matches!(&outcome, Outcome::Err(PgError::Protocol(_))),
+                                "{case}: reject malformed rollback acknowledgement, got {outcome:?}"
+                            );
+                        }
+                        assert_orphan_recovery_debt(&conn, dirty, &case);
+                        assert!(matches!(
+                            conn.execute_unchecked(&cx, "UPDATE must_not_run SET v = 2")
+                                .await,
+                            Outcome::Err(PgError::ConnectionClosed)
+                        ));
+                        assert_eq!(
+                            read_frontend_frame(&mut peer),
+                            (b'Q', b"ROLLBACK\0".to_vec()),
+                            "{case}: only the recovery command may be sent"
+                        );
+                        assert_orphan_peer_closed(&mut peer, &case);
+                    }
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn successful_orphan_rollback_preserves_session_dirtiness_and_async_metadata() {
+        use crate::database::pool::AsyncConnectionManager;
+
+        for workers in [1, 2] {
+            run_native_orphan_recovery_test(workers, |cx| async move {
+                for dirty in [false, true] {
+                    let (mut conn, mut peer) = make_orphan_recovery_connection_with_peer();
+                    if dirty {
+                        std::io::Write::write_all(
+                            &mut peer,
+                            &[command_complete_message("SET"), ready_for_query(b'I')].concat(),
+                        )
+                        .expect("write session-setting response");
+                        assert!(matches!(
+                            conn.execute_unchecked(
+                                &cx,
+                                "SET SESSION application_name = 'before_begin'",
+                            )
+                            .await,
+                            Outcome::Ok(0)
+                        ));
+                        assert_eq!(
+                            read_frontend_frame(&mut peer),
+                            (
+                                b'Q',
+                                b"SET SESSION application_name = 'before_begin'\0".to_vec()
+                            )
+                        );
+                        assert!(conn.inner.needs_discard);
+                    }
+
+                    std::io::Write::write_all(
+                        &mut peer,
+                        &[command_complete_message("BEGIN"), ready_for_query(b'T')].concat(),
+                    )
+                    .expect("write begin response");
+                    let Outcome::Ok(tx) = conn.begin(&cx).await else {
+                        panic!("public BEGIN must succeed before abandonment");
+                    };
+                    drop(tx);
+                    assert_eq!(
+                        read_frontend_frame(&mut peer),
+                        (b'Q', b"BEGIN\0".to_vec())
+                    );
+                    assert!(conn.inner.needs_rollback);
+                    assert!(conn.needs_discard());
+                    assert_eq!(conn.inner.needs_discard, dirty);
+
+                    let application_name = if dirty { "before_begin" } else { "clean_session" };
+                    let reply = [
+                        backend_message(
+                            b'N',
+                            b"SNOTICE\0C00000\0Mrollback recovery notice\0\0",
+                        ),
+                        parameter_status_message("application_name", application_name),
+                        command_complete_message("ROLLBACK"),
+                        notification_response_message(7, "recovery", "idle"),
+                        ready_for_query(b'I'),
+                        command_complete_message("UPDATE 1"),
+                        ready_for_query(b'I'),
+                    ]
+                    .concat();
+                    std::io::Write::write_all(&mut peer, &reply)
+                        .expect("write complete rollback and caller response");
+                    assert!(matches!(
+                        conn.execute_unchecked(&cx, "UPDATE allowed_after_rollback SET v = 1")
+                            .await,
+                        Outcome::Ok(1)
+                    ));
+                    assert_eq!(
+                        read_frontend_frame(&mut peer),
+                        (b'Q', b"ROLLBACK\0".to_vec())
+                    );
+                    assert_eq!(
+                        read_frontend_frame(&mut peer),
+                        (b'Q', b"UPDATE allowed_after_rollback SET v = 1\0".to_vec())
+                    );
+                    assert!(!conn.inner.closed);
+                    assert!(!conn.inner.needs_rollback);
+                    assert!(!conn.in_transaction());
+                    assert_eq!(conn.inner.needs_discard, dirty);
+                    assert_eq!(conn.needs_discard(), dirty);
+                    assert_eq!(conn.parameter("application_name"), Some(application_name));
+                    assert_eq!(conn.inner.notifications.queue.len(), 1);
+
+                    let manager = PgConnectionManager::new(
+                        PgConnectOptions::parse("postgres://localhost/testdb").unwrap(),
+                    );
+                    assert_eq!(manager.release_check(&mut conn), !dirty);
+                    assert_eq!(manager.is_valid(&cx, &mut conn).await, !dirty);
+                    conn.close().await.expect("close recovered connection");
+                    assert_eq!(read_frontend_frame(&mut peer), (b'X', Vec::new()));
+                    assert_orphan_peer_closed(&mut peer, "successful rollback");
+                }
+            });
+        }
+    }
+
     #[test]
     fn ensure_no_orphaned_transaction_maps_cancellation_to_outcome() {
         let mut conn = make_test_connection();
@@ -3709,6 +4136,10 @@ mod tests {
         assert!(
             conn.needs_discard(),
             "failed compensating rollback must mark the connection discard-only"
+        );
+        assert!(
+            !conn.inner.needs_discard,
+            "rollback debt must not manufacture a persistent session change"
         );
 
         io_thread.join().expect("postgres peer thread should exit");
@@ -8773,18 +9204,22 @@ mod tests {
                     matches!(outcome, Outcome::Ok(1)),
                     "SET LOCAL must allow commit: {outcome:?}"
                 );
-                assert!(
-                    conn.needs_discard(),
-                    "successful commit must retain pool hygiene"
-                );
-                let manager = PgConnectionManager::new(
-                    PgConnectOptions::parse("postgres://localhost/testdb").unwrap(),
-                );
-                assert!(
-                    !manager.release_check(&mut conn),
-                    "a marked session cannot return to the pool"
-                );
             }
+            assert!(
+                conn.inner.needs_discard,
+                "SET must retain its separate session marker"
+            );
+            assert!(
+                conn.needs_discard(),
+                "commit or rollback must retain independent pool hygiene"
+            );
+            let manager = PgConnectionManager::new(
+                PgConnectOptions::parse("postgres://localhost/testdb").unwrap(),
+            );
+            assert!(
+                !manager.release_check(&mut conn),
+                "a marked session cannot return to the pool"
+            );
             assert_eq!(conn.inner.transaction_status, b'I');
             assert!(
                 !conn.inner.needs_rollback,
@@ -11028,9 +11463,8 @@ mod tests {
     }
 
     /// br-asupersync-a1x452: PgConnectionManager::release_check must
-    /// return false when the connection has needs_discard=true (set
-    /// by PgTransaction::drop without commit, leaving the backend in
-    /// idle_in_transaction). Pre-fix, the default release_check
+    /// return false when the connection has a persistent discard marker.
+    /// Pre-fix, the default release_check
     /// (returns true) recycled the poisoned connection silently.
     #[test]
     fn a1x452_release_check_rejects_needs_discard() {
@@ -11043,9 +11477,28 @@ mod tests {
         // Healthy out of the gate.
         assert!(mgr.release_check(&mut conn));
 
-        // Exercise PgTransaction::drop (br-asupersync-yl4gu1 path).
+        // Session dirtiness excludes an otherwise idle connection.
         conn.inner.needs_discard = true;
         assert!(!mgr.release_check(&mut conn), "needs_discard must reject");
+    }
+
+    #[test]
+    fn pool_rejects_rollback_debt_without_a_persistent_session_marker() {
+        use crate::database::pool::AsyncConnectionManager;
+
+        let manager = PgConnectionManager::new(
+            PgConnectOptions::parse("postgres://localhost/testdb").unwrap(),
+        );
+        let mut conn = make_test_connection();
+        let cx = Cx::for_testing();
+        // An uncertain outcome can leave debt even when the last observed
+        // status was idle. Test the debt guard independently of in_transaction.
+        conn.inner.needs_rollback = true;
+        assert!(!conn.inner.needs_discard);
+        assert!(!conn.in_transaction());
+        assert!(conn.needs_discard());
+        assert!(!manager.release_check(&mut conn));
+        assert!(!run(manager.is_valid(&cx, &mut conn)));
     }
 
     /// A resetting pool clears the returning borrower's statement-timeout
@@ -14112,6 +14565,10 @@ mod tests {
             conn.needs_discard(),
             "dropped transaction must poison pool reuse"
         );
+        assert!(
+            !conn.inner.needs_discard,
+            "abandonment must remain distinct from persistent session dirtiness"
+        );
     }
 
     #[test]
@@ -14444,7 +14901,8 @@ mod tests {
         // As a PgTransaction dropped after a failed statement leaves it.
         conn.inner.transaction_status = b'E';
         conn.inner.needs_rollback = true;
-        conn.inner.needs_discard = true;
+        assert!(!conn.inner.needs_discard);
+        assert!(conn.needs_discard());
 
         let responder = std::thread::spawn(move || {
             let (kind, body) = read_frontend_frame(&mut peer);
