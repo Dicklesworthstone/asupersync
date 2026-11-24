@@ -9585,6 +9585,469 @@ mod tests {
             replies
         }
 
+
+        // br-asupersync-2oh2u.6.5: START must prove ownership before the
+        // public guard exists or a caller's borrowed callback is entered.
+        #[derive(Clone, Copy, Debug)]
+        enum ManagedBeginMode {
+            Plain,
+            ReadWrite,
+            ReadOnly,
+        }
+
+        impl ManagedBeginMode {
+            fn read_only(self) -> Option<bool> {
+                match self {
+                    Self::Plain => None,
+                    Self::ReadWrite => Some(false),
+                    Self::ReadOnly => Some(true),
+                }
+            }
+
+            fn status(self) -> u16 {
+                if matches!(self, Self::ReadOnly) { ACTIVE | 0x2000 } else { ACTIVE }
+            }
+
+            fn commands(self) -> Vec<&'static str> {
+                match self {
+                    Self::Plain => vec!["START TRANSACTION"],
+                    Self::ReadWrite | Self::ReadOnly => vec![
+                        "SELECT @@SESSION.transaction_isolation AS isolation",
+                        "SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE",
+                        if matches!(self, Self::ReadOnly) {
+                            "START TRANSACTION READ ONLY"
+                        } else {
+                            "START TRANSACTION READ WRITE"
+                        },
+                    ],
+                }
+            }
+        }
+
+        fn write_begin_setup(
+            peer: &mut std::net::TcpStream,
+            mode: ManagedBeginMode,
+            idle_status: u16,
+        ) {
+            if mode.read_only().is_some() {
+                write_isolation(peer, "REPEATABLE-READ", idle_status);
+                write_response_packet(peer, 1, ok_packet_payload(0, idle_status));
+            }
+        }
+
+        async fn begin_in_mode<'conn>(
+            conn: &'conn mut MySqlConnection,
+            cx: &Cx,
+            mode: ManagedBeginMode,
+        ) -> Outcome<MySqlTransaction<'conn>, MySqlError> {
+            match mode {
+                ManagedBeginMode::Plain => conn.begin(cx).await,
+                ManagedBeginMode::ReadWrite | ManagedBeginMode::ReadOnly => {
+                    conn.begin_with_isolation(
+                        cx,
+                        IsolationLevel::Serializable,
+                        matches!(mode, ManagedBeginMode::ReadOnly),
+                    )
+                    .await
+                }
+            }
+        }
+
+        fn invalid_begin_replies(mode: ManagedBeginMode) -> Vec<(&'static str, Reply)> {
+            let active = mode.status();
+            let mut replies = Vec::new();
+            for (case, payload) in [
+                ("idle", ok_packet_payload(0, 0)),
+                ("autocommit without transaction", ok_packet_payload(0, IDLE)),
+                ("readonly without active transaction", ok_packet_payload(0, 0x2000)),
+                ("readonly autocommit without transaction", ok_packet_payload(0, 0x2002)),
+                ("additional result", ok_packet_payload(0, active | 0x0008)),
+                ("affected rows", ok_packet_payload(1, active)),
+                (
+                    "insert id",
+                    vec![0, 0, 1, active as u8, (active >> 8) as u8, 0, 0],
+                ),
+                ("empty reply", vec![]),
+                ("short OK", vec![0, 0, 0]),
+                ("invalid length encoding", vec![0, 0xff]),
+                ("EOF instead of OK", eof_packet_payload(active)),
+                ("LOCAL INFILE instead of OK", vec![0xfb]),
+            ] {
+                replies.push((case, vec![(1, payload)]));
+            }
+            replies.push((
+                "result set instead of OK",
+                vec![
+                    (1, vec![1]),
+                    (2, column_definition_payload("value")),
+                    (3, eof_packet_payload(active)),
+                    (4, vec![1, b'1']),
+                    (5, eof_packet_payload(active)),
+                ],
+            ));
+            replies.push(("wrong sequence", vec![(2, ok_packet_payload(0, active))]));
+            if let Some(read_only) = mode.read_only() {
+                let contradicting = if read_only { ACTIVE } else { ACTIVE | 0x2000 };
+                replies.push((
+                    "wrong requested access mode",
+                    vec![(1, ok_packet_payload(0, contradicting))],
+                ));
+            }
+            replies
+        }
+
+        struct BeginBorrowedState<'env> {
+            value: &'env str,
+            // Cell makes this caller-owned, non-Clone state Send but not Sync.
+            calls: std::cell::Cell<usize>,
+        }
+
+        async fn begin_borrowed_body<'env>(
+            _tx: &mut MySqlTransaction<'_>,
+            _cx: &Cx,
+            state: &mut BeginBorrowedState<'env>,
+        ) -> Outcome<&'env str, MySqlError> {
+            state.calls.set(state.calls.get() + 1);
+            Outcome::Ok(state.value)
+        }
+
+        #[test]
+        fn managed_begin_requires_one_active_ok_with_the_requested_access_mode() {
+            for workers in [1, 2] {
+                native_journey(workers, |cx| async move {
+                    for mode in [
+                        ManagedBeginMode::Plain,
+                        ManagedBeginMode::ReadWrite,
+                        ManagedBeginMode::ReadOnly,
+                    ] {
+                        for (case, reply) in invalid_begin_replies(mode) {
+                            let (mut conn, mut peer) = connection();
+                            write_begin_setup(&mut peer, mode, IDLE);
+                            let mut operation = Box::pin(async {
+                                begin_in_mode(&mut conn, &cx, mode).await.map(drop)
+                            });
+                            commands_while_pending(
+                                operation.as_mut(),
+                                &mut peer,
+                                &mode.commands(),
+                            )
+                            .await;
+                            for (sequence, payload) in reply {
+                                write_response_packet(&mut peer, sequence, payload);
+                            }
+                            // Complete the forbidden verification too, so a
+                            // permissive START reader fails without hanging.
+                            if mode.read_only().is_some() {
+                                write_isolation(&mut peer, "SERIALIZABLE", mode.status());
+                            }
+                            let outcome = operation.await;
+                            assert!(
+                                matches!(&outcome, Outcome::Err(MySqlError::Protocol(_))),
+                                "{mode:?}/{case}: START must not create a guard: {outcome:?}"
+                            );
+                            // Failed explicit setup attempts existing session
+                            // restoration, which consumes its marker and then
+                            // retires the already-closed connection.
+                            retired(&mut conn, &cx, None).await;
+                            peer_closed(&mut peer);
+                        }
+                    }
+                });
+            }
+        }
+
+        #[test]
+        fn malformed_begin_never_enters_borrowed_one_shot_or_retry_callbacks() {
+            use crate::database::transaction::{
+                RetryPolicy, ScopedTransactionFuture, TransactionReplaySafety,
+                with_mysql_transaction_retry_with_state, with_mysql_transaction_with_state,
+            };
+
+            for workers in [1, 2] {
+                for retry in [false, true] {
+                    native_journey(workers, move |cx| async move {
+                        for (case, reply) in invalid_begin_replies(ManagedBeginMode::Plain) {
+                            let (mut conn, mut peer) = connection();
+                            let value = String::from("caller-owned value before begin");
+                            let mut state = BeginBorrowedState {
+                                value: value.as_str(),
+                                calls: std::cell::Cell::new(0),
+                            };
+                            let policy = RetryPolicy {
+                                max_retries: 1,
+                                base_delay: Duration::ZERO,
+                                max_delay: Duration::ZERO,
+                            };
+                            let mut operation = Box::pin(async {
+                                if retry {
+                                    with_mysql_transaction_retry_with_state(
+                                        &mut conn,
+                                        &cx,
+                                        &policy,
+                                        TransactionReplaySafety::ReplaySafe,
+                                        &mut state,
+                                        |tx, cx, state| {
+                                            ScopedTransactionFuture::new(begin_borrowed_body(
+                                                tx, cx, state,
+                                            ))
+                                        },
+                                    )
+                                    .await
+                                } else {
+                                    with_mysql_transaction_with_state(
+                                        &mut conn,
+                                        &cx,
+                                        &mut state,
+                                        |tx, cx, state| {
+                                            ScopedTransactionFuture::new(begin_borrowed_body(
+                                                tx, cx, state,
+                                            ))
+                                        },
+                                    )
+                                    .await
+                                }
+                            });
+                            command_while_pending(
+                                operation.as_mut(),
+                                &mut peer,
+                                "START TRANSACTION",
+                            )
+                            .await;
+                            for (sequence, payload) in reply {
+                                write_response_packet(&mut peer, sequence, payload);
+                            }
+                            // An old reader might run the body then COMMIT.
+                            // Answer that continuation to make the body oracle
+                            // fail directly rather than waiting for a timeout.
+                            write_response_packet(&mut peer, 1, ok_packet_payload(0, IDLE));
+                            let outcome = operation.await;
+                            assert!(
+                                matches!(&outcome, Outcome::Err(MySqlError::Protocol(_))),
+                                "{case}: no value from an unproven transaction: {outcome:?}"
+                            );
+                            assert_eq!(state.calls.get(), 0, "{case}: callback must not run");
+                            retired(&mut conn, &cx, None).await;
+                            peer_closed(&mut peer);
+                        }
+                    });
+                }
+            }
+        }
+
+        #[test]
+        fn interrupted_start_keeps_rollback_debt_before_a_guard_exists() {
+            for workers in [1, 2] {
+                for mode in [
+                    ManagedBeginMode::Plain,
+                    ManagedBeginMode::ReadWrite,
+                    ManagedBeginMode::ReadOnly,
+                ] {
+                    for cancel in [false, true] {
+                        native_journey(workers, move |request_cx| async move {
+                            let active_cx = Cx::current().expect("native START worker");
+                            let (mut conn, mut peer) = connection();
+                            write_begin_setup(&mut peer, mode, IDLE);
+                            let mut operation = Box::pin(async {
+                                begin_in_mode(&mut conn, &request_cx, mode).await.map(drop)
+                            });
+                            commands_while_pending(
+                                operation.as_mut(),
+                                &mut peer,
+                                &mode.commands(),
+                            )
+                            .await;
+                            cancel_or_drop(operation, &request_cx, cancel).await;
+                            let restore = if !cancel && mode.read_only().is_some() {
+                                Some(IsolationLevel::RepeatableRead)
+                            } else {
+                                None
+                            };
+                            retired(&mut conn, &active_cx, restore).await;
+                            assert!(!active_cx.is_cancel_requested());
+                            if cancel {
+                                peer_closed(&mut peer);
+                            }
+                            drop(conn);
+                            if !cancel {
+                                peer_closed(&mut peer);
+                            }
+                        });
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn acknowledged_begin_preserves_autocommit_and_reports_actual_read_only_mode() {
+            for workers in [1, 2] {
+                native_journey(workers, |cx| async move {
+                    for mode in [
+                        ManagedBeginMode::Plain,
+                        ManagedBeginMode::ReadWrite,
+                        ManagedBeginMode::ReadOnly,
+                    ] {
+                        for flags in [0x0001_u16, 0x0003, 0x2001, 0x2003] {
+                            let read_only = flags & 0x2000 != 0;
+                            if mode.read_only().is_some_and(|expected| expected != read_only) {
+                                continue;
+                            }
+                            let idle = flags & 0x0002;
+                            let (mut conn, mut peer) = connection();
+                            conn.inner.status_flags = idle;
+                            conn.inner.connect_autocommit = idle != 0;
+                            write_begin_setup(&mut peer, mode, idle);
+                            let mut operation = Box::pin(begin_in_mode(&mut conn, &cx, mode));
+                            commands_while_pending(
+                                operation.as_mut(),
+                                &mut peer,
+                                &mode.commands(),
+                            )
+                            .await;
+                            write_response_packet(&mut peer, 1, ok_packet_payload(0, flags));
+                            if mode.read_only().is_some() {
+                                write_isolation(&mut peer, "SERIALIZABLE", flags);
+                            }
+                            let tx = operation.await.unwrap();
+                            assert_eq!(tx.is_read_only(), read_only);
+                            assert_eq!(tx.conn.inner.status_flags, flags);
+                            assert!(!tx.conn.inner.needs_rollback);
+                            assert!(!tx.conn.inner.closed);
+                            if mode.read_only().is_some() {
+                                assert_eq!(tx.isolation_level(), Some(IsolationLevel::Serializable));
+                                assert_eq!(
+                                    command_sql(&read_client_command(&mut peer)),
+                                    "SELECT @@SESSION.transaction_isolation AS isolation"
+                                );
+                            } else {
+                                assert_eq!(tx.isolation_level(), None);
+                            }
+
+                            write_response_packet(&mut peer, 1, ok_packet_payload(0, idle));
+                            if mode.read_only().is_some() {
+                                write_response_packet(&mut peer, 1, ok_packet_payload(0, idle));
+                            }
+                            assert!(matches!(tx.commit(&cx).await, Outcome::Ok(())));
+                            assert_eq!(command_sql(&read_client_command(&mut peer)), COMMIT_SQL);
+                            if mode.read_only().is_some() {
+                                assert_eq!(command_sql(&read_client_command(&mut peer)), RESTORE_SQL);
+                            }
+                            assert!(!conn.inner.closed);
+                            assert!(!conn.inner.needs_rollback);
+                            assert!(!conn.in_transaction());
+                            assert_eq!(conn.inner.status_flags, idle);
+                            assert!(conn.inner.session_isolation_restore.is_none());
+                            let manager = MySqlConnectionManager::new(
+                                MySqlConnectOptions::parse("mysql://localhost/test").unwrap(),
+                            );
+                            assert!(manager.release_check(&mut conn));
+                            assert!(manager.is_valid(&cx, &mut conn).await);
+                            drop(conn);
+                            peer_closed(&mut peer);
+                        }
+                    }
+                });
+            }
+        }
+
+        #[test]
+        fn refused_begin_retries_before_borrowed_body_without_compensating_rollback() {
+            use crate::database::transaction::{
+                RetryPolicy, ScopedTransactionFuture, TransactionReplaySafety,
+                with_mysql_transaction_retry_with_state,
+            };
+
+            for workers in [1, 2] {
+                native_journey(workers, |cx| async move {
+                    for replay in [
+                        TransactionReplaySafety::ReplayUnsafe,
+                        TransactionReplaySafety::ReplaySafe,
+                    ] {
+                        let (mut conn, mut peer) = connection();
+                        let value = String::from("borrowed value from the only executed body");
+                        let mut state = BeginBorrowedState {
+                            value: value.as_str(),
+                            calls: std::cell::Cell::new(0),
+                        };
+                        let policy = RetryPolicy {
+                            max_retries: 1,
+                            base_delay: Duration::ZERO,
+                            max_delay: Duration::ZERO,
+                        };
+                        let mut operation = Box::pin(with_mysql_transaction_retry_with_state(
+                            &mut conn,
+                            &cx,
+                            &policy,
+                            replay,
+                            &mut state,
+                            |tx, cx, state| {
+                                ScopedTransactionFuture::new(begin_borrowed_body(tx, cx, state))
+                            },
+                        ));
+                        command_while_pending(
+                            operation.as_mut(),
+                            &mut peer,
+                            "START TRANSACTION",
+                        )
+                        .await;
+                        write_response_packet(
+                            &mut peer,
+                            1,
+                            error_packet_payload(1213, "40001", "begin refused before execution"),
+                        );
+                        write_response_packet(&mut peer, 1, ok_packet_payload(0, ACTIVE));
+                        write_response_packet(&mut peer, 1, ok_packet_payload(0, IDLE));
+                        let outcome = operation.await;
+                        assert!(
+                            matches!(&outcome, Outcome::Ok(result) if *result == value.as_str()),
+                            "only the acknowledged attempt may return the borrowed value: {outcome:?}"
+                        );
+                        assert_eq!(state.calls.get(), 1);
+                        // A valid idle refusal has no transaction to roll
+                        // back. The very next command must be the retry.
+                        assert_eq!(
+                            command_sql(&read_client_command(&mut peer)),
+                            "START TRANSACTION"
+                        );
+                        assert_eq!(command_sql(&read_client_command(&mut peer)), COMMIT_SQL);
+                        assert!(!conn.inner.closed);
+                        assert!(!conn.inner.needs_rollback);
+                        assert!(!conn.in_transaction());
+                        drop(conn);
+                        peer_closed(&mut peer);
+                    }
+                });
+            }
+        }
+
+        #[test]
+        fn cancellation_before_start_creates_neither_a_transaction_nor_wire_debt() {
+            for workers in [1, 2] {
+                native_journey(workers, |cx| async move {
+                    let reason = CancelReason::user("cancel before starting a transaction");
+                    cx.cancel_with_reason(reason.clone());
+                    for mode in [
+                        ManagedBeginMode::Plain,
+                        ManagedBeginMode::ReadWrite,
+                        ManagedBeginMode::ReadOnly,
+                    ] {
+                        let (mut conn, mut peer) = connection();
+                        let outcome = begin_in_mode(&mut conn, &cx, mode).await.map(drop);
+                        assert!(matches!(
+                            outcome,
+                            Outcome::Cancelled(observed) if observed == reason
+                        ));
+                        assert!(!conn.inner.closed);
+                        assert!(!conn.inner.needs_rollback);
+                        assert!(conn.inner.session_isolation_restore.is_none());
+                        assert_eq!(conn.inner.status_flags, IDLE);
+                        drop(conn);
+                        // EOF, without a single START or setup command.
+                        peer_closed(&mut peer);
+                    }
+                });
+            }
+        }
+
         #[test]
         fn orphan_rollback_and_restore_require_idle_acknowledgements() {
             for workers in [1, 2] {

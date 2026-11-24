@@ -2435,6 +2435,15 @@ struct OkPacket {
     status_flags: u16,
 }
 
+/// State that one library-owned transaction command must acknowledge.
+#[derive(Debug, Clone, Copy)]
+enum MySqlTransactionControl {
+    Idle,
+    /// A plain START inherits the session's access mode. An explicit mode
+    /// must be reflected in the server's read-only transaction status bit.
+    Active { read_only: Option<bool> },
+}
+
 /// The TLS connector travels with its stream so reconnecting for KILL QUERY
 /// preserves the caller's trust roots, certificate pins, and client identity.
 enum MySqlStream {
@@ -3765,7 +3774,7 @@ impl MySqlConnection {
         // so "uncertain" must not read as the server default.
         self.inner.applied_max_execution_time_ms = None;
         self.inner.max_execution_time_uncertain = true;
-        match self.execute_unchecked_inner_impl(cx, &sql, false).await {
+        match self.execute_unchecked_inner_impl(cx, &sql, None).await {
             Outcome::Ok(_) => {
                 self.inner.applied_max_execution_time_ms = effective_ms;
                 self.inner.max_execution_time_uncertain = false;
@@ -5322,10 +5331,32 @@ impl MySqlConnection {
     /// Fixed session-control commands must finish without a transaction,
     /// an additional result, or a data-modification acknowledgement.
     fn validate_idle_session_ok(ok: &OkPacket, what: &str) -> Result<(), MySqlError> {
-        const TRANSACTION_OR_MORE_RESULTS: u16 = 0x2009;
+        Self::validate_transaction_control_ok(ok, what, MySqlTransactionControl::Idle)
+    }
+
+    fn validate_transaction_control_ok(
+        ok: &OkPacket,
+        what: &str,
+        control: MySqlTransactionControl,
+    ) -> Result<(), MySqlError> {
+        const IN_TRANS: u16 = 0x0001;
+        const MORE_RESULTS: u16 = 0x0008;
+        const IN_TRANS_READONLY: u16 = 0x2000;
+        let valid_state = match control {
+            MySqlTransactionControl::Idle => {
+                ok.status_flags & (IN_TRANS | IN_TRANS_READONLY) == 0
+            }
+            MySqlTransactionControl::Active { read_only } => {
+                ok.status_flags & IN_TRANS != 0
+                    && read_only.is_none_or(|expected| {
+                        (ok.status_flags & IN_TRANS_READONLY != 0) == expected
+                    })
+            }
+        };
         if ok.affected_rows != 0
             || ok.last_insert_id != 0
-            || ok.status_flags & TRANSACTION_OR_MORE_RESULTS != 0
+            || ok.status_flags & MORE_RESULTS != 0
+            || !valid_state
         {
             return Err(MySqlError::Protocol(format!(
                 "invalid OK response to {what}"
@@ -5585,7 +5616,7 @@ impl MySqlConnection {
         cx: &Cx,
         sql: &str,
     ) -> Outcome<MySqlExecResult, MySqlError> {
-        self.execute_sql_exchange_impl(cx, sql, false).await
+        self.execute_sql_exchange_impl(cx, sql, None).await
     }
 
     /// Managed transaction completion must receive one idle OK response.
@@ -5596,16 +5627,40 @@ impl MySqlConnection {
         cx: &Cx,
         sql: &str,
     ) -> Outcome<(), MySqlError> {
-        self.execute_sql_exchange_impl(cx, sql, true)
+        self.execute_sql_exchange_impl(cx, sql, Some(MySqlTransactionControl::Idle))
             .await
             .map(|_| ())
+    }
+
+    /// START must establish an active transaction before a guard or callback
+    /// can own it (br-asupersync-2oh2u.6.5). A server ERR remains a refusal,
+    /// while malformed or interrupted acknowledgements cannot admit a body.
+    async fn execute_active_transaction_control(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+        read_only: Option<bool>,
+    ) -> Outcome<(), MySqlError> {
+        if self.inner.closed {
+            return Outcome::Err(MySqlError::ConnectionClosed);
+        }
+        if let Err(error) = self.validate_sql_security(sql) {
+            return Outcome::Err(error);
+        }
+        self.execute_sql_exchange_impl(
+            cx,
+            sql,
+            Some(MySqlTransactionControl::Active { read_only }),
+        )
+        .await
+        .map(|_| ())
     }
 
     async fn execute_sql_exchange_impl(
         &mut self,
         cx: &Cx,
         sql: &str,
-        require_idle_ok: bool,
+        control: Option<MySqlTransactionControl>,
     ) -> Outcome<MySqlExecResult, MySqlError> {
         if self.inner.closed {
             return Outcome::Err(MySqlError::ConnectionClosed);
@@ -5631,7 +5686,7 @@ impl MySqlConnection {
         };
         let result = match apply_outcome {
             Outcome::Ok(()) => {
-                self.execute_unchecked_inner_impl(cx, sql, require_idle_ok)
+                self.execute_unchecked_inner_impl(cx, sql, control)
                     .await
             }
             Outcome::Err(err) => Outcome::Err(err),
@@ -5648,8 +5703,8 @@ impl MySqlConnection {
         {
             self.wire_cancel_in_drain(cx).await;
         }
-        if require_idle_ok && self.inner.closed {
-            // Retire an interrupted or malformed completion even if the
+        if control.is_some() && self.inner.closed {
+            // Retire an interrupted or malformed control exchange even if the
             // caller keeps the connection. A checkpoint before any exchange
             // and an ordinary server ERR leave `closed` false and preserve
             // the existing rollback/retry behavior.
@@ -5665,8 +5720,10 @@ impl MySqlConnection {
         &mut self,
         cx: &Cx,
         sql: &str,
-        require_idle_ok: bool,
+        control: Option<MySqlTransactionControl>,
     ) -> Outcome<MySqlExecResult, MySqlError> {
+        let starting_transaction =
+            matches!(control, Some(MySqlTransactionControl::Active { .. }));
         if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
                 cx.cancel_reason()
@@ -5693,6 +5750,11 @@ impl MySqlConnection {
         // dropped mid-write or mid-read (e.g. by task cancellation), the
         // connection stays closed and prevents protocol desynchronization.
         self.inner.closed = true;
+        if starting_transaction {
+            // No guard exists until START is acknowledged. Retain its debt
+            // if this future is dropped after writing any part of the request.
+            self.inner.needs_rollback = true;
+        }
 
         if let Err(e) = self.write_all(Some(cx), &packet.bytes).await {
             return outcome_from_error(e);
@@ -5710,9 +5772,9 @@ impl MySqlConnection {
             return Outcome::Err(MySqlError::Protocol("empty execute response".to_string()));
         }
 
-        if require_idle_ok && !matches!(data[0], 0x00 | 0xFF) {
+        if control.is_some() && !matches!(data[0], 0x00 | 0xFF) {
             return Outcome::Err(MySqlError::Protocol(format!(
-                "unexpected response to {sql}: expected an idle OK packet"
+                "unexpected response to {sql}: expected a transaction-control OK packet"
             )));
         }
 
@@ -5732,8 +5794,9 @@ impl MySqlConnection {
                 // OK packet
                 match Self::parse_ok_packet(&data) {
                     Ok(ok) => {
-                        if require_idle_ok
-                            && let Err(error) = Self::validate_idle_session_ok(&ok, sql)
+                        if let Some(control) = control
+                            && let Err(error) =
+                                Self::validate_transaction_control_ok(&ok, sql, control)
                         {
                             return Outcome::Err(error);
                         }
@@ -5744,6 +5807,9 @@ impl MySqlConnection {
                                     .to_string(),
                             ));
                         }
+                        if starting_transaction {
+                            self.inner.needs_rollback = false;
+                        }
                         self.inner.closed = false;
                         Outcome::Ok(MySqlExecResult {
                             affected_rows: ok.affected_rows,
@@ -5753,7 +5819,7 @@ impl MySqlConnection {
                     Err(e) => {
                         // Preserve legacy behavior. The opt-in profile must
                         // prove the final status before clearing its poison.
-                        self.inner.closed = multi_result_session || require_idle_ok;
+                        self.inner.closed = multi_result_session || control.is_some();
                         Outcome::Err(e)
                     }
                 }
@@ -5762,6 +5828,12 @@ impl MySqlConnection {
                 // ERR packet
                 let err = Self::parse_error(&data);
                 if matches!(&err, MySqlError::Server { .. }) {
+                    if starting_transaction {
+                        // ERR carries no status update. A refusal from idle
+                        // needs no compensating ROLLBACK before a begin retry;
+                        // retain any pre-existing active transaction instead.
+                        self.inner.needs_rollback = self.inner.status_flags & 0x2001 != 0;
+                    }
                     self.inner.closed = false;
                 }
                 Outcome::Err(err)
@@ -5791,7 +5863,7 @@ impl MySqlConnection {
     pub async fn begin(&mut self, cx: &Cx) -> Outcome<MySqlTransaction<'_>, MySqlError> {
         trace_database_transaction(cx, "mysql", "begin", "start");
         match self
-            .execute_unchecked_internal(cx, "START TRANSACTION")
+            .execute_active_transaction_control(cx, "START TRANSACTION", None)
             .await
         {
             // Reserve the obligation only after START TRANSACTION succeeds:
@@ -5799,11 +5871,12 @@ impl MySqlConnection {
             // begin would panic on the error/cancel paths.
             Outcome::Ok(_) => {
                 trace_database_transaction(cx, "mysql", "begin", "ok");
+                let read_only = self.inner.status_flags & 0x2000 != 0;
                 Outcome::Ok(MySqlTransaction {
                     conn: self,
                     finished: false,
                     isolation_level: None,
-                    read_only: false,
+                    read_only,
                     obligation: reserve_transaction_obligation(cx),
                 })
             }
@@ -5912,7 +5985,10 @@ impl MySqlConnection {
         self.inner.session_isolation_restore = previous_level.filter(|prev| *prev != level);
         let access_mode = if read_only { "READ ONLY" } else { "READ WRITE" };
         let start_sql = format!("START TRANSACTION {access_mode}");
-        match self.execute_unchecked_internal(cx, &start_sql).await {
+        match self
+            .execute_active_transaction_control(cx, &start_sql, Some(read_only))
+            .await
+        {
             Outcome::Ok(_) => {}
             Outcome::Err(e) => {
                 self.restore_session_isolation(cx).await;

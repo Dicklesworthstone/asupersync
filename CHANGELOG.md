@@ -157,6 +157,13 @@ artifacts.
   command completion and transaction state. Invalid acknowledgements cannot
   run the callback or report a successful commit. Valid server errors are
   still drained so retryable errors retain their existing recovery behavior.
+- **MySQL transaction callbacks require an acknowledged start.**
+  Managed begin requires a single zero-effect OK response proving an active
+  transaction before constructing its guard or entering the callback.
+  Explicit read-only/read-write requests must match the server status;
+  plain begin inherits the acknowledged session access mode. Malformed or
+  interrupted starts retain cleanup debt and refuse reuse, while valid server
+  refusals retain pre-body retry behavior.
 - **MySQL managed transactions end independently of `completion_type`.**
   Commit, rollback, and abandoned-transaction recovery explicitly suppress
   chaining and session release. Cleanup requires a single idle OK response.
