@@ -131,6 +131,30 @@ fn acknowledged_journal_retains_the_actual_receipt_and_rejects_inconsistent_fact
     ));
     let restored: Journal = serde_json::from_slice(&serde_json::to_vec(&record).unwrap()).unwrap();
     restored.validate().unwrap();
+    // A past rename can leave an acknowledged journal readable even though
+    // its parent directory never synced. Replaying the genuine remote receipt
+    // must retain the independent local failure and last confirmed intent.
+    let directory = PathBuf::from("/test/checkpoint");
+    let saved = restored.receipt.as_ref().unwrap();
+    let unconfirmed = recovered_attempt(
+        restored.info(directory.clone()),
+        saved,
+        Err(io::Error::other("directory fsync failed")),
+    );
+    assert!(unconfirmed.cached_receipt);
+    assert_eq!(unconfirmed.checkpoint.attempt, restored.attempt);
+    assert_eq!(unconfirmed.checkpoint.state, NativeCheckpointState::Sending);
+    assert_eq!(
+        unconfirmed.persistence_error.unwrap().to_string(),
+        "directory fsync failed"
+    );
+    assert_eq!(unconfirmed.outcome.unwrap().receipt, report.receipt);
+    let confirmed = recovered_attempt(restored.info(directory), saved, Ok(()));
+    assert!(confirmed.cached_receipt);
+    assert_eq!(confirmed.checkpoint.state, NativeCheckpointState::Acknowledged);
+    assert!(confirmed.persistence_error.is_none());
+    assert_eq!(confirmed.outcome.unwrap().receipt, report.receipt);
+
     let retained = restored.receipt.unwrap().report();
     assert_eq!(retained.receipt, report.receipt);
     assert_eq!(retained.transfer_id, report.transfer_id);
