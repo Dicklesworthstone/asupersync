@@ -842,6 +842,8 @@ impl<M: ConnectionManager> DbPool<M> {
     /// to the pool when dropped.
     pub fn get(&self) -> Result<PooledConnection<'_, M>, DbPoolError<M::Error>> {
         loop {
+            // The ambient timer driver may call a user-provided clock.
+            let now = crate::time::wall_now();
             let conn_to_validate = {
                 let mut inner = self.inner.lock();
 
@@ -851,9 +853,6 @@ impl<M: ConnectionManager> DbPool<M> {
 
                 let mut popped = None;
                 if let Some(idle) = inner.idle.pop_front() {
-                    // br-asupersync-w3g9kb: sync get path has no Cx;
-                    // sample wall_now() once for both eviction checks.
-                    let now = crate::time::wall_now();
                     if idle.is_expired(&self.config, now)
                         || idle.is_idle_too_long(&self.config, now)
                     {
@@ -959,6 +958,8 @@ impl<M: ConnectionManager> DbPool<M> {
         // Check client quota before attempting acquisition
         let client_id_owned = client_id.to_string();
         loop {
+            // The ambient timer driver may call a user-provided clock.
+            let now = crate::time::wall_now();
             let conn_to_validate = {
                 let mut inner = self.inner.lock();
 
@@ -981,7 +982,6 @@ impl<M: ConnectionManager> DbPool<M> {
                 // br-asupersync-gb3rck: Authentication state validation for client-specific connection acquisition
                 let mut popped = None;
                 if let Some(idle) = inner.idle.pop_front() {
-                    let now = crate::time::wall_now();
                     if idle.is_expired(&self.config, now)
                         || idle.is_idle_too_long(&self.config, now)
                     {
@@ -1413,6 +1413,7 @@ impl<M: ConnectionManager> DbPool<M> {
             guard.client_id.clone()
         };
 
+        let last_used = crate::time::wall_now();
         let conn_to_disconnect = {
             let mut inner = self.inner.lock();
             Self::release_client_quota_locked(&mut inner, guard.client_id.as_deref());
@@ -1424,10 +1425,7 @@ impl<M: ConnectionManager> DbPool<M> {
                 inner.idle.push_back(IdleConnection {
                     conn,
                     created_at,
-                    // br-asupersync-w3g9kb: Drop / sync return path
-                    // has no Cx; wall_now() is the runtime-time
-                    // abstraction.
-                    last_used: crate::time::wall_now(),
+                    last_used,
                     authenticated_for, // br-asupersync-gb3rck: Track authentication state
                 });
                 None
@@ -1505,15 +1503,13 @@ impl<M: ConnectionManager> DbPool<M> {
     ///
     /// Returns the number of connections evicted.
     pub fn evict_stale(&self) -> usize {
-        self.cleanup_stale_retry_state();
+        let now = crate::time::wall_now();
+        self.cleanup_stale_retry_state(now);
         let mut inner = self.inner.lock();
 
         // Drain all idle, keep only the valid ones.
         let mut keep = VecDeque::new();
         let mut to_disconnect = Vec::new();
-        // br-asupersync-w3g9kb: sample wall_now() once for the entire
-        // eviction sweep so all entries see the same "now".
-        let now = crate::time::wall_now();
 
         while let Some(entry) = inner.idle.pop_front() {
             if entry.is_expired(&self.config, now) || entry.is_idle_too_long(&self.config, now) {
@@ -1556,9 +1552,8 @@ impl<M: ConnectionManager> DbPool<M> {
     ///
     /// br-asupersync-mlojr9: Removes retry state entries that are older than 10 minutes
     /// to prevent memory leaks from clients that never retry again.
-    fn cleanup_stale_retry_state(&self) {
+    fn cleanup_stale_retry_state(&self, now: Time) {
         let mut inner = self.inner.lock();
-        let now = crate::time::wall_now();
         let stale_threshold = Duration::from_secs(600); // 10 minutes
 
         inner
@@ -1664,9 +1659,10 @@ impl<M: ConnectionManager> DbPool<M> {
                 // return_connection takes ownership of the physical slot even
                 // if a release callback unwinds. Keep the warm-up reservation
                 // until it finishes publishing (or discarding) the connection.
+                let created_at = crate::time::wall_now();
                 reservation.disarmed = true;
                 self.stats.total_creates.fetch_add(1, Ordering::Relaxed);
-                self.return_connection(conn, crate::time::wall_now(), None);
+                self.return_connection(conn, created_at, None);
                 created += 1;
             }
         }
@@ -3433,6 +3429,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
             guard.client_id.clone()
         };
 
+        let last_used = crate::time::wall_now();
         let (conn_to_disconnect, wakes) = {
             let mut inner = self.inner.lock();
             Self::release_client_quota_locked(&mut inner, guard.client_id.as_deref());
@@ -3444,10 +3441,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                 inner.idle.push_back(IdleConnection {
                     conn,
                     created_at,
-                    // br-asupersync-w3g9kb: Drop / async return
-                    // path has no Cx; wall_now() is the runtime-time
-                    // abstraction.
-                    last_used: crate::time::wall_now(),
+                    last_used,
                     // br-asupersync-80525g: Validation bypass fix - track authentication state
                     authenticated_for,
                 });

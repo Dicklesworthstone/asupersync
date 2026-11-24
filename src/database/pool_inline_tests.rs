@@ -1320,6 +1320,67 @@ fn async_client_dropped_acquire_releases_only_its_own_quota() {
 }
 
 #[test]
+fn pool_clock_callbacks_can_inspect_inventory() {
+    use crate::time::{TimeSource, TimerDriver, TimerDriverHandle};
+    use crate::types::{RegionId, TaskId};
+
+    #[derive(Debug)]
+    struct PoolClock {
+        sync: std::sync::Weak<DbPool<TestManager>>,
+        asynchronous: std::sync::Weak<AsyncDbPool<AsyncTestManager>>,
+        observed_locked: AtomicBool,
+        samples: AtomicUsize,
+    }
+
+    impl TimeSource for PoolClock {
+        fn now(&self) -> Time {
+            self.samples.fetch_add(1, Ordering::Relaxed);
+            // A caller that obtains stats() would block on these same locks.
+            if self
+                .sync
+                .upgrade()
+                .is_some_and(|pool| pool.inner.try_lock().is_none())
+                || self
+                    .asynchronous
+                    .upgrade()
+                    .is_some_and(|pool| pool.inner.try_lock().is_none())
+            {
+                self.observed_locked.store(true, Ordering::Relaxed);
+            }
+            Time::from_millis(1)
+        }
+    }
+
+    let sync = Arc::new(DbPool::with_manager(TestManager::new()));
+    let asynchronous = Arc::new(AsyncDbPool::with_manager(AsyncTestManager::new()));
+    let clock = Arc::new(PoolClock {
+        sync: Arc::downgrade(&sync),
+        asynchronous: Arc::downgrade(&asynchronous),
+        observed_locked: AtomicBool::new(false),
+        samples: AtomicUsize::new(0),
+    });
+    let driver = TimerDriverHandle::new(Arc::new(TimerDriver::with_clock(Arc::clone(&clock))));
+    let cx = Cx::new_with_drivers(
+        RegionId::new_for_test(0, 1),
+        TaskId::new_for_test(0, 0),
+        Budget::INFINITE,
+        None,
+        None,
+        None,
+        Some(driver),
+        None,
+    );
+    let _current = Cx::set_current(Some(cx.clone()));
+    sync.get().unwrap().return_to_pool();
+    sync.get_for_client("client").unwrap().return_to_pool();
+    sync.get().unwrap().return_to_pool();
+    assert_eq!(sync.evict_stale(), 0);
+    block_on(asynchronous.get(&cx)).unwrap().return_to_pool();
+    assert!(clock.samples.load(Ordering::Relaxed) > 0);
+    assert!(!clock.observed_locked.load(Ordering::Relaxed));
+}
+
+#[test]
 fn sync_close_during_manager_callback_refuses_checkout_and_retires_reservations() {
     #[derive(Default)]
     struct ClosingManager {
