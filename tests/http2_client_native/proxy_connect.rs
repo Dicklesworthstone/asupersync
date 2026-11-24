@@ -2,8 +2,10 @@
 
 use super::*;
 use asupersync::http::h2::client::{Http2TunnelConfig, Http2TunnelError};
-use asupersync::io::{AsyncReadExt, AsyncWriteExt};
-use std::num::NonZeroU64;
+use asupersync::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
+use std::num::{NonZeroU64, NonZeroUsize};
+use std::pin::Pin;
+use std::task::{Context, Poll, Wake, Waker};
 
 const TARGET: &str = "destination.invalid:443";
 
@@ -46,6 +48,208 @@ fn accept(peer: &mut Peer, id: u32) {
         )
         .unwrap();
     peer.flush();
+}
+
+struct AdmissionProbeTransport {
+    polls: Arc<AtomicUsize>,
+    dropped: Arc<AtomicBool>,
+}
+
+impl AdmissionProbeTransport {
+    fn refuse(&self) -> std::io::Error {
+        self.polls.fetch_add(1, Ordering::SeqCst);
+        std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "admitted probe reached its transport",
+        )
+    }
+}
+
+impl Drop for AdmissionProbeTransport {
+    fn drop(&mut self) {
+        self.dropped.store(true, Ordering::SeqCst);
+    }
+}
+
+impl AsyncRead for AdmissionProbeTransport {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        _: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Err(self.refuse()))
+    }
+}
+
+impl AsyncWrite for AdmissionProbeTransport {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        _: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Poll::Ready(Err(self.refuse()))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Err(self.refuse()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Err(self.refuse()))
+    }
+}
+
+struct AdmissionWake {
+    wakes: AtomicUsize,
+    task: Waker,
+}
+
+impl Wake for AdmissionWake {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.wakes.fetch_add(1, Ordering::SeqCst);
+        self.task.wake_by_ref();
+    }
+}
+
+async fn witness_queued_connect<F: Future>(
+    mut opening: Pin<&mut F>,
+    polls: &AtomicUsize,
+) -> Arc<AdmissionWake> {
+    poll_fn(|task| {
+        let witness = Arc::new(AdmissionWake {
+            wakes: AtomicUsize::new(0),
+            task: task.waker().clone(),
+        });
+        let waker = Waker::from(Arc::clone(&witness));
+        let mut queued_task = Context::from_waker(&waker);
+        assert!(
+            opening.as_mut().poll(&mut queued_task).is_pending(),
+            "a live tunnel retains the shared client admission slot"
+        );
+        assert_eq!(
+            polls.load(Ordering::SeqCst),
+            0,
+            "queued transport is untouched"
+        );
+        Poll::Ready(witness)
+    })
+    .await
+}
+
+#[test]
+fn ordinary_connect_admission_survives_setup_and_releases_after_transport_retirement() {
+    for workers in [1, 2] {
+        for drop_tunnel in [false, true] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let peer = std::thread::spawn(move || {
+                let mut peer = Peer::accept(listener, 65_535);
+                let (id, _) = request(&mut peer, TARGET);
+                accept(&mut peer, id);
+                peer.eof();
+            });
+            let runtime = runtime(workers);
+            let client = Http2Client::new()
+                .timeout(Duration::from_secs(3))
+                .max_concurrent_requests(NonZeroUsize::new(1).unwrap());
+            let url = format!("http://{address}/");
+            let handle = runtime.handle();
+            let opening_client = client.clone();
+            let opening_url = url.clone();
+            // Returning the tunnel retires its child setup task. Internal
+            // admission must not leak an obligation attributed to that task.
+            let mut tunnel = Some(runtime.block_on(async {
+                handle
+                    .try_spawn(async move {
+                        let owner = Cx::current().unwrap();
+                        opening_client
+                            .request(Method::Connect, opening_url)
+                            .connect_proxy_tunnel(&owner, TARGET, limits(64, 64))
+                            .await
+                            .unwrap()
+                    })
+                    .unwrap()
+                    .await
+                    .unwrap()
+            }));
+            let cancelled_owner = runtime.request_cx_with_budget(Budget::INFINITE);
+            runtime.block_on(async {
+                let cx = Cx::current().unwrap();
+                let cancelled_polls = Arc::new(AtomicUsize::new(0));
+                let cancelled_dropped = Arc::new(AtomicBool::new(false));
+                let mut cancelled = Box::pin(
+                    client
+                        .clone()
+                        .request(Method::Connect, &url)
+                        .connect_proxy_tunnel_on(
+                            &cancelled_owner,
+                            AdmissionProbeTransport {
+                                polls: Arc::clone(&cancelled_polls),
+                                dropped: Arc::clone(&cancelled_dropped),
+                            },
+                            TARGET,
+                            limits(64, 64),
+                        ),
+                );
+                let wake = witness_queued_connect(cancelled.as_mut(), &cancelled_polls).await;
+                let before_cancel = wake.wakes.load(Ordering::SeqCst);
+                let reason = CancelReason::user("queued CONNECT cancelled");
+                cancelled_owner.cancel_with_reason(reason.clone());
+                assert!(wake.wakes.load(Ordering::SeqCst) > before_cancel);
+                assert!(matches!(
+                    cancelled.await,
+                    Err(Http2TunnelError::Client(Http2ClientError::Cancelled(observed)))
+                        if observed == reason
+                ));
+                assert_eq!(cancelled_polls.load(Ordering::SeqCst), 0);
+                assert!(cancelled_dropped.load(Ordering::SeqCst));
+
+                // Removing a cancelled waiter must neither consume nor
+                // release the live tunnel's slot. Another clone stays queued.
+                let polls = Arc::new(AtomicUsize::new(0));
+                let dropped = Arc::new(AtomicBool::new(false));
+                let mut opening = Box::pin(
+                    client
+                        .clone()
+                        .request(Method::Connect, &url)
+                        .connect_proxy_tunnel_on(
+                            &cx,
+                            AdmissionProbeTransport {
+                                polls: Arc::clone(&polls),
+                                dropped: Arc::clone(&dropped),
+                            },
+                            TARGET,
+                            limits(64, 64),
+                        ),
+                );
+                let wake = witness_queued_connect(opening.as_mut(), &polls).await;
+                let before_release = wake.wakes.load(Ordering::SeqCst);
+                if drop_tunnel {
+                    drop(tunnel.take());
+                } else {
+                    tunnel.as_mut().unwrap().abort();
+                }
+                assert!(
+                    wake.wakes.load(Ordering::SeqCst) > before_release,
+                    "transport retirement wakes the queued admission"
+                );
+                assert!(matches!(
+                    opening.await,
+                    Err(Http2TunnelError::Client(Http2ClientError::Io(error)))
+                        if error.kind() == std::io::ErrorKind::ConnectionReset
+                ));
+                assert_eq!(polls.load(Ordering::SeqCst), 1);
+                assert!(dropped.load(Ordering::SeqCst));
+            });
+            drop(tunnel);
+            peer.join().unwrap();
+            quiescent(&runtime);
+        }
+    }
 }
 
 #[test]

@@ -28,6 +28,7 @@ use std::fmt;
 use std::future::{Future, poll_fn};
 use std::io;
 use std::net::{IpAddr, SocketAddr};
+use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Poll, Waker};
@@ -41,6 +42,7 @@ use crate::http::{Method, ParsedUrl, Scheme};
 use crate::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use crate::net::TcpStream;
 use crate::stream::Stream;
+use crate::sync::{OwnedSemaphorePermit, Semaphore};
 use crate::time::{Sleep, TimerDriverHandle};
 use crate::types::{CancelReason, Time};
 use parking_lot::Mutex;
@@ -197,6 +199,8 @@ pub struct Http2Client {
     tls_connector: Option<crate::tls::TlsConnector>,
     /// Idle connections kept for reuse ([`Self::reuse_connections`]).
     pool: Option<Arc<ConnectionPool>>,
+    /// Shared admission for active exchanges, independent of idle retention.
+    admission: Option<Arc<Semaphore>>,
 }
 
 impl fmt::Debug for Http2Client {
@@ -206,6 +210,10 @@ impl fmt::Debug for Http2Client {
             .field("max_request_body", &self.max_request_body)
             .field("max_response_body", &self.max_response_body)
             .field("max_overhead_frames", &self.max_overhead_frames)
+            .field(
+                "max_concurrent_requests",
+                &self.admission.as_ref().map(|gate| gate.max_permits()),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -220,6 +228,7 @@ impl Default for Http2Client {
             #[cfg(feature = "tls")]
             tls_connector: None,
             pool: None,
+            admission: None,
         }
     }
 }
@@ -236,6 +245,28 @@ impl Http2Client {
     #[must_use]
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// Bound active exchanges across this client and its clones.
+    ///
+    /// Requests wait in FIFO order before native DNS, connection establishment,
+    /// or taking an idle connection. The same total request timeout and caller
+    /// cancellation apply while waiting; dropping a queued request removes its
+    /// waiter. A streaming response retains its slot until its transport is
+    /// retired or returned to the idle pool. CONNECT tunnels retain theirs
+    /// until both halves close, an error retires them, or they are dropped.
+    ///
+    /// Supplied-transport APIs share the limit and do not poll their transport
+    /// before admission, though the caller may already have opened that socket.
+    /// Idle connections do not consume slots; use
+    /// [`Self::reuse_connections_bounded`] to bound their retention separately.
+    /// There is no active-exchange limit by default. Calling this method on a
+    /// clone creates a new independent limit for that clone and its descendants;
+    /// existing clients and in-flight requests retain their original limit.
+    #[must_use]
+    pub fn max_concurrent_requests(mut self, limit: NonZeroUsize) -> Self {
+        self.admission = Some(Arc::new(Semaphore::new(limit.get())));
         self
     }
 
@@ -493,7 +524,9 @@ impl Http2RequestBuilder {
             .timeout
             .unwrap_or(self.client.timeout)
             .min(self.client.timeout);
-        drive(cx, timeout, async {
+        let mut control = RequestControl::new(cx, timeout);
+        control.admit(&self.client).await?;
+        let operation = async {
             self.client.validate_native_target(cx, &request.url)?;
             let host = request.url.host.trim_matches(['[', ']']).to_owned();
             let limit = self.client.max_response_body;
@@ -540,8 +573,8 @@ impl Http2RequestBuilder {
                 pool.put(origin, conn, context_now(cx));
             }
             Ok(response)
-        })
-        .await
+        };
+        control.drive(operation).await
     }
 
     /// Execute on a transport supplied by the caller, starting with the HTTP/2
@@ -558,18 +591,17 @@ impl Http2RequestBuilder {
             .timeout
             .unwrap_or(self.client.timeout)
             .min(self.client.timeout);
-        drive(
-            cx,
-            timeout,
-            exchange(
+        let mut control = RequestControl::new(cx, timeout);
+        control.admit(&self.client).await?;
+        control
+            .drive(exchange(
                 transport,
                 request,
                 self.body,
                 self.client.max_response_body,
                 self.client.max_overhead_frames,
-            ),
-        )
-        .await
+            ))
+            .await
     }
 
     fn prepare(&self) -> Result<PreparedRequest, Http2ClientError> {
@@ -818,14 +850,6 @@ impl Drop for Cancellation {
     }
 }
 
-async fn drive<T>(
-    cx: &Cx,
-    timeout: Duration,
-    future: impl Future<Output = Result<T, Http2ClientError>>,
-) -> Result<T, Http2ClientError> {
-    RequestControl::new(cx, timeout).drive(future).await
-}
-
 /// One absolute deadline and its cancellation registrations, retained when a
 /// streaming response takes over driving the connection from its send future.
 struct RequestControl {
@@ -834,6 +858,7 @@ struct RequestControl {
     driver: Option<TimerDriverHandle>,
     deadline: Time,
     sleep: Sleep,
+    admission: Option<OwnedSemaphorePermit>,
 }
 
 impl RequestControl {
@@ -862,7 +887,29 @@ impl RequestControl {
             driver,
             deadline,
             sleep,
+            admission: None,
         }
+    }
+
+    async fn admit(&mut self, client: &Http2Client) -> Result<(), Http2ClientError> {
+        let Some(gate) = &client.admission else {
+            return Ok(());
+        };
+        // Admission is client-owned capacity, not an obligation of the task
+        // that starts the request: streaming bodies and tunnels may outlive
+        // that task. RequestControl supplies cancellation and deadline wakes,
+        // and dropping this acquire future removes its FIFO waiter.
+        let acquire =
+            crate::sync::semaphore::OwnedAcquireFuture::new_uncancelable(Arc::clone(gate), 1);
+        let permit = self
+            .drive(async {
+                acquire
+                    .await
+                    .map_err(|error| Http2ClientError::Io(io::Error::other(error)))
+            })
+            .await?;
+        self.admission = Some(permit);
+        Ok(())
     }
 
     fn now(&self) -> Time {
@@ -1991,6 +2038,7 @@ mod streaming {
                     .unwrap_or(self.client.timeout)
                     .min(self.client.timeout);
                 let mut control = RequestControl::new(&cx, timeout);
+                control.admit(&self.client).await?;
                 let origin = (
                     request.url.scheme == Scheme::Https,
                     request.url.host.trim_matches(['[', ']']).to_owned(),
@@ -2073,6 +2121,7 @@ mod streaming {
                     .unwrap_or(self.client.timeout)
                     .min(self.client.timeout);
                 let mut control = RequestControl::new(&cx, timeout);
+                control.admit(&self.client).await?;
                 let conn = control
                     .drive(cx.with_ambient(Http2Conn::start(
                         supplied.transport.take().expect("owned transport"),
@@ -2217,8 +2266,8 @@ mod streaming {
                     // unwinding, after all ownership has left the body.
                     drop(upload);
                     drop(poller);
-                    drop(control);
                     pool.put(origin, conn, now.unwrap_or(Time::ZERO));
+                    drop(control);
                 }
                 (conn, _) => {
                     drop(conn);

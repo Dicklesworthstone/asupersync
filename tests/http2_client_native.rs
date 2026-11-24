@@ -24,6 +24,9 @@ use asupersync::types::{Budget, CancelReason};
 
 const LARGE_BODY: usize = 4 * 65_535 + 123;
 
+#[path = "http2_client_native/admission.rs"]
+mod admission;
+
 #[cfg(feature = "http2-streaming")]
 #[path = "http2_client_native/proxy_connect.rs"]
 mod proxy_connect;

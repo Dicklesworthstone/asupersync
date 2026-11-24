@@ -105,6 +105,8 @@ impl From<Http2ClientError> for Http2TunnelError {
 /// The original caller and polling task cancellation, inherited Cx deadlines,
 /// and explicit lifetime DATA limits continue to apply. Dropping the tunnel
 /// immediately drops its transport; no background drain survives it.
+/// A configured client request limit includes the tunnel until its transport
+/// retires, including after the setup timeout has ended.
 ///
 /// A successful write accepts its bytes into a bounded owned buffer. Dropping
 /// the corresponding future cannot attribute those bytes to a later write.
@@ -348,6 +350,7 @@ impl Http2RequestBuilder {
             .unwrap_or(self.client.timeout)
             .min(self.client.timeout);
         let mut control = RequestControl::new(&owner, timeout);
+        control.admit(&self.client).await?;
         let mut conn = {
             let setup = owner.with_ambient(async {
                 self.client.validate_native_target(&owner, &request.url)?;
@@ -391,6 +394,7 @@ impl Http2RequestBuilder {
             .unwrap_or(self.client.timeout)
             .min(self.client.timeout);
         let mut control = RequestControl::new(&owner, timeout);
+        control.admit(&self.client).await?;
         let mut conn = control
             .drive(owner.with_ambient(Http2Conn::start(
                 transport,
@@ -706,6 +710,9 @@ struct SessionControl {
     driver: Option<TimerDriverHandle>,
     deadline: Option<Time>,
     sleep: Option<Sleep>,
+    // The tunnel drops its transport before this control on every retirement
+    // path. Successful CONNECT setup must not release the client's slot.
+    _admission: Option<crate::sync::OwnedSemaphorePermit>,
 }
 
 impl SessionControl {
@@ -715,6 +722,7 @@ impl SessionControl {
             ambient,
             driver,
             sleep,
+            admission,
             ..
         } = control;
         drop(sleep);
@@ -725,6 +733,7 @@ impl SessionControl {
             poller: None,
             deadline: None,
             sleep: None,
+            _admission: admission,
         };
         session.tighten_budgets();
         session

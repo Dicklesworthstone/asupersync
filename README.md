@@ -1355,8 +1355,14 @@ compression lives in `src/http/compress.rs`.
 
 The native `asupersync::http::h2::Http2Client` provides bounded HTTP/2 requests
 driven by their calling task. Cleartext endpoints use HTTP/2 prior knowledge;
-HTTPS endpoints require an explicit TLS connector offering `h2` ALPN. With
-`http2-streaming`, its CONNECT builder exposes two owned duplex APIs:
+HTTPS endpoints require an explicit TLS connector offering `h2` ALPN.
+`max_concurrent_requests(NonZeroUsize::new(64).unwrap())` optionally limits
+active exchanges across client clones. Queued calls share the request deadline
+and cancellation; they open no native connection until admitted. Streaming
+responses and CONNECT tunnels retain admission until their transport retires
+or returns to the pool. `reuse_connections_bounded(per_origin, total)` separately
+limits retained idle connections. With `http2-streaming`, the CONNECT builder
+exposes two owned duplex APIs:
 
 - `connect_proxy_tunnel(cx, target_authority, limits)` opens an ordinary
   RFC 9113 CONNECT tunnel through a proxy. The request URL selects the proxy
