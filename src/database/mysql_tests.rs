@@ -9586,6 +9586,384 @@ mod tests {
         }
 
 
+
+        // br-asupersync-2oh2u.6.5: explicit rollback owns its cancellation
+        // cleanup, including its isolation restore, without an outer helper.
+        #[test]
+        fn explicit_rollback_finishes_cleanup_after_cancellation() {
+            for workers in [1, 2] {
+                for isolated in [false, true] {
+                    for cancel_before_poll in [false, true] {
+                        native_journey(workers, move |request_cx| async move {
+                            let active_cx = Cx::current().expect("native rollback worker");
+                            let (mut conn, mut peer) = connection();
+                            let tx = begin(&mut conn, &mut peer, &request_cx, isolated).await;
+                            let reason = CancelReason::user("cancelled explicit rollback");
+                            if cancel_before_poll {
+                                request_cx.cancel_with_reason(reason.clone());
+                            }
+                            let mut rollback = Box::pin(tx.rollback(&request_cx));
+                            command_while_pending(rollback.as_mut(), &mut peer, ROLLBACK_SQL)
+                                .await;
+                            if !cancel_before_poll {
+                                request_cx.cancel_with_reason(reason.clone());
+                            }
+                            // The rollback has really reached a pending socket read.
+                            // Cancellation must not substitute for its idle reply.
+                            std::future::poll_fn(|task_cx| {
+                                assert!(rollback.as_mut().poll(task_cx).is_pending());
+                                Poll::Ready(())
+                            })
+                            .await;
+                            write_response_packet(&mut peer, 1, ok_packet_payload(0, IDLE));
+                            if isolated {
+                                command_while_pending(
+                                    rollback.as_mut(),
+                                    &mut peer,
+                                    RESTORE_SQL,
+                                )
+                                .await;
+                                write_response_packet(&mut peer, 1, ok_packet_payload(0, IDLE));
+                            }
+                            assert!(matches!(rollback.await, Outcome::Ok(())));
+                            assert_eq!(request_cx.cancel_reason(), Some(reason));
+                            assert!(!active_cx.is_cancel_requested());
+                            assert!(!conn.inner.closed);
+                            assert!(!conn.inner.needs_rollback);
+                            assert!(!conn.in_transaction());
+                            assert!(conn.inner.session_isolation_restore.is_none());
+                            assert!(!conn.inner.query_in_flight.load(
+                                std::sync::atomic::Ordering::Acquire
+                            ));
+                            write_response_packet(&mut peer, 1, ok_packet_payload(1, IDLE));
+                            assert!(matches!(
+                                conn.execute_trusted_sql(&active_cx, CALLER_SQL).await,
+                                Outcome::Ok(1)
+                            ));
+                            assert_eq!(command_sql(&read_client_command(&mut peer)), CALLER_SQL);
+                            drop(conn);
+                            peer_closed(&mut peer);
+                        });
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn cancelled_explicit_rollback_preserves_debt_until_a_valid_idle_reply() {
+            for workers in [1, 2] {
+                for isolated in [false, true] {
+                    for failure in 0..3 {
+                        native_journey(workers, move |request_cx| async move {
+                            let active_cx = Cx::current().expect("native rollback worker");
+                            let (mut conn, mut peer) = connection();
+                            let tx = begin(&mut conn, &mut peer, &request_cx, isolated).await;
+                            let reason = CancelReason::user("rollback cleanup refused");
+                            request_cx.cancel_with_reason(reason.clone());
+                            let mut rollback = Box::pin(tx.rollback(&request_cx));
+                            command_while_pending(rollback.as_mut(), &mut peer, ROLLBACK_SQL)
+                                .await;
+                            let reply = match failure {
+                                0 => ok_packet_payload(0, ACTIVE),
+                                1 => vec![0, 0, 0, 2],
+                                _ => error_packet_payload(1105, "HY000", "rollback refused"),
+                            };
+                            write_response_packet(&mut peer, 1, reply);
+                            assert!(matches!(
+                                rollback.await,
+                                Outcome::Cancelled(observed) if observed == reason
+                            ));
+                            let restore = isolated.then_some(IsolationLevel::RepeatableRead);
+                            assert!(conn.inner.needs_rollback);
+                            assert_eq!(conn.inner.session_isolation_restore, restore);
+                            let manager = MySqlConnectionManager::new(
+                                MySqlConnectOptions::parse("mysql://localhost/test").unwrap(),
+                            );
+                            assert!(!manager.release_check(&mut conn));
+                            assert!(!manager.is_valid(&active_cx, &mut conn).await);
+                            if failure < 2 {
+                                retired(&mut conn, &active_cx, restore).await;
+                                peer_closed(&mut peer);
+                            } else {
+                                // A synchronized server ERR still owes rollback:
+                                // the next command cannot run until cleanup succeeds.
+                                assert!(!conn.inner.closed);
+                                assert!(conn.in_transaction());
+                                let mut request =
+                                    Box::pin(conn.execute_trusted_sql(&active_cx, CALLER_SQL));
+                                command_while_pending(
+                                    request.as_mut(),
+                                    &mut peer,
+                                    ROLLBACK_SQL,
+                                )
+                                .await;
+                                write_response_packet(&mut peer, 1, ok_packet_payload(0, IDLE));
+                                if isolated {
+                                    command_while_pending(
+                                        request.as_mut(),
+                                        &mut peer,
+                                        RESTORE_SQL,
+                                    )
+                                    .await;
+                                    write_response_packet(
+                                        &mut peer,
+                                        1,
+                                        ok_packet_payload(0, IDLE),
+                                    );
+                                }
+                                command_while_pending(request.as_mut(), &mut peer, CALLER_SQL)
+                                    .await;
+                                write_response_packet(&mut peer, 1, ok_packet_payload(1, IDLE));
+                                assert!(matches!(request.await, Outcome::Ok(1)));
+                                assert!(!conn.inner.closed);
+                                assert!(!conn.inner.needs_rollback);
+                                assert!(!conn.in_transaction());
+                                assert!(conn.inner.session_isolation_restore.is_none());
+                                drop(conn);
+                                peer_closed(&mut peer);
+                            }
+                        });
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn explicit_rollback_without_an_acknowledgement_retires_after_cancel_or_drop() {
+            for workers in [1, 2] {
+                for restore_boundary in [false, true] {
+                    for cancel in [false, true] {
+                        native_journey(workers, move |request_cx| async move {
+                            let active_cx = Cx::current().expect("native rollback worker");
+                            let (mut conn, mut peer) = connection();
+                            let mut options =
+                                MySqlConnectOptions::parse("mysql://localhost/test").unwrap();
+                            options.connect_timeout = Some(Duration::from_millis(50));
+                            conn.options = Some(options);
+                            let tx =
+                                begin(&mut conn, &mut peer, &request_cx, restore_boundary).await;
+                            let mut rollback = Box::pin(tx.rollback(&request_cx));
+                            command_while_pending(rollback.as_mut(), &mut peer, ROLLBACK_SQL)
+                                .await;
+                            if restore_boundary {
+                                write_response_packet(&mut peer, 1, ok_packet_payload(0, IDLE));
+                                command_while_pending(
+                                    rollback.as_mut(),
+                                    &mut peer,
+                                    RESTORE_SQL,
+                                )
+                                .await;
+                            }
+                            if cancel {
+                                let reason = CancelReason::user("silent rollback peer");
+                                request_cx.cancel_with_reason(reason.clone());
+                                // No response, self-wake, forced poll loop or peer
+                                // timeout releases this wait: the cleanup timer must.
+                                let outcome = rollback.await;
+                                if restore_boundary {
+                                    assert!(matches!(outcome, Outcome::Ok(())));
+                                } else {
+                                    assert!(matches!(
+                                        outcome,
+                                        Outcome::Cancelled(observed) if observed == reason
+                                    ));
+                                }
+                                assert!(!conn.inner.query_in_flight.load(
+                                    std::sync::atomic::Ordering::Acquire
+                                ));
+                            } else {
+                                drop(rollback);
+                            }
+                            assert!(conn.inner.closed);
+                            assert_eq!(conn.in_transaction(), !restore_boundary);
+                            assert_eq!(
+                                conn.inner.needs_rollback,
+                                cancel || !restore_boundary,
+                                "unacknowledged rollback retains debt; interrupted restore is closed"
+                            );
+                            assert!(conn.inner.session_isolation_restore.is_none());
+                            let manager = MySqlConnectionManager::new(
+                                MySqlConnectOptions::parse("mysql://localhost/test").unwrap(),
+                            );
+                            assert!(!manager.release_check(&mut conn));
+                            assert!(!manager.is_valid(&active_cx, &mut conn).await);
+                            assert!(matches!(
+                                conn.execute_trusted_sql(&active_cx, CALLER_SQL).await,
+                                Outcome::Err(MySqlError::ConnectionClosed)
+                            ));
+                            assert!(!active_cx.is_cancel_requested());
+                            if cancel {
+                                peer_closed(&mut peer);
+                            }
+                            drop(conn);
+                            if !cancel {
+                                peer_closed(&mut peer);
+                            }
+                        });
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn borrowed_helper_keeps_body_outcome_when_cancelled_rollback_peer_is_silent() {
+            use crate::database::transaction::{
+                ScopedTransactionFuture, with_mysql_transaction_with_state,
+            };
+
+            for workers in [1, 2] {
+                for cancel_in_body in [false, true] {
+                    native_journey(workers, move |request_cx| async move {
+                        let active_cx = Cx::current().expect("native borrowed rollback worker");
+                        let (mut conn, mut peer) = connection();
+                        let mut options =
+                            MySqlConnectOptions::parse("mysql://localhost/test").unwrap();
+                        options.connect_timeout = Some(Duration::from_millis(50));
+                        conn.options = Some(options);
+                        let owned = String::from("caller-owned rollback state");
+                        let mut state = BeginBorrowedState {
+                            value: owned.as_str(),
+                            calls: std::cell::Cell::new(0),
+                        };
+                        let reason = CancelReason::user("cancel borrowed rollback cleanup");
+                        let body_reason = reason.clone();
+                        write_response_packet(&mut peer, 1, ok_packet_payload(0, ACTIVE));
+                        let mut operation = Box::pin(with_mysql_transaction_with_state(
+                            &mut conn,
+                            &request_cx,
+                            &mut state,
+                            move |_, body_cx, state| {
+                                ScopedTransactionFuture::new(async move {
+                                    state.calls.set(state.calls.get() + 1);
+                                    crate::runtime::yield_now().await;
+                                    assert_eq!(state.value, "caller-owned rollback state");
+                                    if cancel_in_body {
+                                        body_cx.cancel_with_reason(body_reason.clone());
+                                        Outcome::<(), MySqlError>::Cancelled(body_reason)
+                                    } else {
+                                        Outcome::Err(MySqlError::ConnectionClosed)
+                                    }
+                                })
+                            },
+                        ));
+                        commands_while_pending(
+                            operation.as_mut(),
+                            &mut peer,
+                            &["START TRANSACTION", ROLLBACK_SQL],
+                        )
+                        .await;
+                        if !cancel_in_body {
+                            request_cx.cancel_with_reason(reason.clone());
+                        }
+                        // Await naturally: the helper must not leave an outer
+                        // mask that strands its direct rollback's grace timer.
+                        let outcome = operation.await;
+                        if cancel_in_body {
+                            assert!(matches!(
+                                outcome,
+                                Outcome::Cancelled(observed) if observed == reason
+                            ));
+                        } else {
+                            assert!(matches!(outcome, Outcome::Err(MySqlError::ConnectionClosed)));
+                        }
+                        assert_eq!(state.calls.get(), 1);
+                        assert_eq!(state.value, owned);
+                        retired(&mut conn, &active_cx, None).await;
+                        assert!(!conn.inner.query_in_flight.load(
+                            std::sync::atomic::Ordering::Acquire
+                        ));
+                        peer_closed(&mut peer);
+                        assert!(!active_cx.is_cancel_requested());
+                    });
+                }
+            }
+        }
+
+        #[test]
+        fn healthy_explicit_rollback_does_not_use_the_cancellation_grace_as_a_timeout() {
+            for workers in [1, 2] {
+                for isolated in [false, true] {
+                    native_journey(workers, move |request_cx| async move {
+                        let active_cx = Cx::current().expect("native rollback worker");
+                        let (mut conn, mut peer) = connection();
+                        let mut options =
+                            MySqlConnectOptions::parse("mysql://localhost/test").unwrap();
+                        options.connect_timeout = Some(Duration::from_millis(20));
+                        conn.options = Some(options);
+                        let tx = begin(&mut conn, &mut peer, &request_cx, isolated).await;
+                        let mut rollback = Box::pin(tx.rollback(&request_cx));
+                        command_while_pending(rollback.as_mut(), &mut peer, ROLLBACK_SQL)
+                            .await;
+                        crate::time::sleep_cx(&active_cx, Duration::from_millis(100))
+                            .await
+                            .expect("native delay beyond the configured cleanup grace");
+                        std::future::poll_fn(|task_cx| {
+                            assert!(
+                                rollback.as_mut().poll(task_cx).is_pending(),
+                                "healthy rollback must still await its real acknowledgement"
+                            );
+                            Poll::Ready(())
+                        })
+                        .await;
+                        write_response_packet(&mut peer, 1, ok_packet_payload(0, IDLE));
+                        if isolated {
+                            command_while_pending(rollback.as_mut(), &mut peer, RESTORE_SQL)
+                                .await;
+                            write_response_packet(&mut peer, 1, ok_packet_payload(0, IDLE));
+                        }
+                        assert!(matches!(rollback.await, Outcome::Ok(())));
+                        assert!(!request_cx.is_cancel_requested());
+                        assert!(!conn.inner.closed);
+                        assert!(!conn.inner.needs_rollback);
+                        assert!(!conn.in_transaction());
+                        assert!(conn.inner.session_isolation_restore.is_none());
+                        drop(conn);
+                        peer_closed(&mut peer);
+                    });
+                }
+            }
+        }
+
+
+        #[test]
+        fn acknowledged_rollback_survives_its_own_task_cancellation() {
+            for workers in [1, 2] {
+                native_journey(workers, |_| async move {
+                    let parent_cx = Cx::current().expect("native rollback parent");
+                    let mut child = parent_cx
+                        .spawn(|child_cx| async move {
+                            let (mut conn, mut peer) = connection();
+                            let tx = begin(&mut conn, &mut peer, &child_cx, true).await;
+                            child_cx.cancel_with_reason(CancelReason::user("cancel rollback owner"));
+                            let mut rollback = Box::pin(tx.rollback(&child_cx));
+                            command_while_pending(rollback.as_mut(), &mut peer, ROLLBACK_SQL)
+                                .await;
+                            write_response_packet(&mut peer, 1, ok_packet_payload(0, IDLE));
+                            command_while_pending(rollback.as_mut(), &mut peer, RESTORE_SQL)
+                                .await;
+                            write_response_packet(&mut peer, 1, ok_packet_payload(0, IDLE));
+                            let outcome = rollback.await;
+                            assert!(matches!(&outcome, Outcome::Ok(())));
+                            assert!(!conn.inner.closed);
+                            assert!(!conn.inner.needs_rollback);
+                            assert!(!conn.in_transaction());
+                            assert!(conn.inner.session_isolation_restore.is_none());
+                            drop(conn);
+                            peer_closed(&mut peer);
+                            // No unmasked checkpoint after rollback: the public
+                            // method must preserve its result through TaskHandle.
+                            outcome
+                        })
+                        .expect("spawn rollback owner");
+                    assert!(matches!(
+                        child.join(&parent_cx).await,
+                        Ok(Outcome::Ok(()))
+                    ));
+                    assert!(!parent_cx.is_cancel_requested());
+                });
+            }
+        }
+
         // br-asupersync-2oh2u.6.5: START must prove ownership before the
         // public guard exists or a caller's borrowed callback is entered.
         #[derive(Clone, Copy, Debug)]

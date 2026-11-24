@@ -1366,18 +1366,15 @@ mod mysql {
         sync::atomic::{AtomicBool, Ordering},
     };
 
-    const HELPER_ROLLBACK_MASKED_POLLS: u32 = 1024;
-
     fn rollback_required_error() -> MySqlError {
         MySqlError::Protocol("transaction must roll back before commit".to_string())
     }
 
-    /// Roll back with cancellation masked for a bounded number of polls; see
-    /// the PostgreSQL helper.
+    /// Direct rollback owns its cancellation mask and cleanup deadline.
+    /// An outer mask could suppress the cancellation wake before the direct
+    /// rollback has armed its deadline, leaving a silent server parked forever.
     async fn rollback_before_propagating(tx: MySqlTransaction<'_>, cx: &Cx) {
-        let _ =
-            crate::combinator::commit_section(cx, HELPER_ROLLBACK_MASKED_POLLS, tx.rollback(cx))
-                .await;
+        let _ = tx.rollback(cx).await;
     }
 
     /// Keep both callback forms on the same commit and rollback path.

@@ -8519,28 +8519,117 @@ impl MySqlTransaction<'_> {
 
     /// Rollback the transaction, requiring an idle acknowledgement without
     /// chaining a new transaction or releasing the session.
+    ///
+    /// Cancellation is masked while attempting the rollback and any session
+    /// isolation restoration. Once cancellation is observed, cleanup has at
+    /// most 500ms (or the configured connect timeout, when smaller), as well
+    /// as a 32-poll masking budget. An unresponsive session is closed rather
+    /// than leaving its transaction open on a retained connection. A verified
+    /// rollback remains successful if subsequent session restoration fails;
+    /// that connection is discarded. Without cancellation, this method does
+    /// not impose an additional timeout.
     pub async fn rollback(mut self, cx: &Cx) -> Outcome<(), MySqlError> {
+        use std::future::Future;
+
         if self.finished {
             trace_database_transaction(cx, "mysql", "rollback", "already_finished");
             return Outcome::Err(MySqlError::TransactionFinished);
         }
         trace_database_transaction(cx, "mysql", "rollback", "start");
-        match self
+        const MASKED_ROLLBACK_POLLS: u32 = 32;
+        const CANCEL_CLEANUP_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
+        let cleanup_grace = self
             .conn
-            .execute_idle_session_control(cx, "ROLLBACK AND NO CHAIN NO RELEASE")
+            .options
+            .as_ref()
+            .and_then(|options| options.connect_timeout)
+            .map_or(CANCEL_CLEANUP_GRACE, |bound| bound.min(CANCEL_CLEANUP_GRACE));
+        let result = {
+            let mut cancel_wake = CancelWakerGuard::new(Some(cx.clone()));
+            let mut cancellation_deadline = None;
+            let mut cleanup = std::pin::pin!(crate::combinator::commit_section(
+                cx,
+                MASKED_ROLLBACK_POLLS,
+                async {
+                    let result = self
+                        .conn
+                        .execute_idle_session_control(cx, "ROLLBACK AND NO CHAIN NO RELEASE")
+                        .await;
+                    if result.is_ok() {
+                        self.finished = true;
+                        // The idle acknowledgement settled the transaction;
+                        // resolve its obligation before another await.
+                        if let Some(token) = self.obligation.take() {
+                            let _ = token.abort();
+                        }
+                        self.conn.restore_session_isolation(cx).await;
+                    }
+                    result
+                }
+            ));
+            std::future::poll_fn(|task_cx| {
+                cancel_wake.refresh(task_cx);
+                if let Poll::Ready(result) = cleanup.as_mut().poll(task_cx) {
+                    return Poll::Ready(Some(result));
+                }
+                // A masked checkpoint can publish deadline cancellation in
+                // this poll. Arm afterwards too, and use the explicit Cx's
+                // clock even when a different context polls the operation.
+                if cancellation_deadline.is_none() && cx.is_cancel_requested() {
+                    let _caller_clock =
+                        (!cx.has_timer()).then(|| Cx::set_current(Some(cx.clone())));
+                    cancellation_deadline =
+                        Some(cx.sleep_until_on_clock(cx.now() + cleanup_grace));
+                }
+                if cancellation_deadline
+                    .as_mut()
+                    .is_some_and(|deadline| Pin::new(deadline).poll_deadline(task_cx).is_ready())
+                {
+                    return Poll::Ready(None);
+                }
+                Poll::Pending
+            })
             .await
-        {
-            Outcome::Ok(_) => {
-                self.finished = true;
-                self.conn.restore_session_isolation(cx).await;
-                // Explicit rollback: abort the obligation.
-                if let Some(token) = self.obligation.take() {
-                    let _ = token.abort();
+        };
+        let result = result.unwrap_or_else(|| {
+            // The inner future has been dropped before retiring its socket.
+            // Poll-budget masking alone cannot wake an unanswered exchange.
+            self.conn.mark_unusable_after_cleanup_failure();
+            self.conn
+                .inner
+                .query_in_flight
+                .store(false, std::sync::atomic::Ordering::Release);
+            if self.finished {
+                Outcome::Ok(())
+            } else {
+                let _ = cx.checkpoint();
+                Outcome::Cancelled(
+                    cx.cancel_reason()
+                        .unwrap_or_else(|| CancelReason::user("cancelled")),
+                )
+            }
+        });
+        match result {
+            Outcome::Ok(()) => {
+                // Cleanup completed under the mask. Acknowledge afterwards so
+                // an ordinary Cx::spawn preserves this authoritative result.
+                if cx.is_cancel_requested() {
+                    let _ = cx.checkpoint();
                 }
                 trace_database_transaction(cx, "mysql", "rollback", "ok");
                 Outcome::Ok(())
             }
             Outcome::Err(e) => {
+                // Preserve cancellation attribution when the masked cleanup
+                // fails, including the historical failed-peer case.
+                if cx.is_cancel_requested() {
+                    let _ = cx.checkpoint();
+                    trace_database_transaction(cx, "mysql", "rollback", "cancelled");
+                    return Outcome::Cancelled(
+                        cx.cancel_reason()
+                            .unwrap_or_else(|| CancelReason::user("cancelled")),
+                    );
+                }
                 trace_database_transaction(cx, "mysql", "rollback", "err");
                 outcome_from_error(e)
             }

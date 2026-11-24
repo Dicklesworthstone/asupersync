@@ -165,6 +165,15 @@ artifacts.
   command completion and transaction state. Invalid acknowledgements cannot
   run the callback or report a successful commit. Valid server errors are
   still drained so retryable errors retain their existing recovery behavior.
+- **MySQL explicit rollback completes cancellation cleanup or retires the session.**
+  Rollback and session-isolation restoration run with cancellation masked;
+  an explicit-clock timer bounds an unresponsive exchange after cancellation
+  to 500ms or the smaller configured connect timeout. Healthy, uncancelled
+  rollback retains its existing waiting behavior. An acknowledged rollback
+  remains successful if later restoration fails, while the connection is
+  discarded. Transaction helpers use this same cleanup path without a
+  second cancellation mask, preserve the body's outcome, and acknowledged
+  rollback survives its own task's cancellation through `TaskHandle`.
 - **MySQL transaction callbacks require an acknowledged start.**
   Managed begin requires a single zero-effect OK response proving an active
   transaction before constructing its guard or entering the callback.
