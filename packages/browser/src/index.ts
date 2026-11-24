@@ -186,6 +186,14 @@ export interface BrowserScopeOptions {
   consumerVersion?: AbiVersion | null;
 }
 
+/** A JavaScript operation whose lifetime belongs to a browser region. */
+export interface BrowserOperationHandle<T> {
+  /** First terminal result, after callback settlement and ABI publication. */
+  readonly completed: Promise<BrowserOutcome<T>>;
+  /** Abort the operation and join its retirement. Retry a refused ledger publication here. */
+  cancel(): Promise<BrowserOutcome<void>>;
+}
+
 export type BrowserScopeBodyCompletion<T = unknown> =
   | { readonly kind: "returned"; readonly outcome: BrowserOutcome<T> }
   | { readonly kind: "threw"; readonly error: unknown };
@@ -6855,6 +6863,7 @@ function cleanupScopeOwnedWebTransports(handle: CoreRegionHandle): void {
   SDK_WEBSOCKETS.closeScopes(ownerKeys, "scope_close");
   SDK_STREAM_PIPES.closeScopes(ownerKeys, "scope_close");
   SDK_BYTE_PIPES.closeScopes(ownerKeys, "scope_close");
+  void stopBrowserOperations(ownerKeys, "scope_close", true);
   releaseOwnedBrowserMessageStreams(ownerKeys, "scope_close");
   closeOwnedWebTransports(ownerKeys, "scope_close");
   recordClosedAsyncScopeBrackets(ownerKeys);
@@ -6868,6 +6877,7 @@ function cleanupRuntimeOwnedWebTransports(handle: CoreRuntimeHandle): void {
   SDK_WEBSOCKETS.closeScopes(ownerKeys, "runtime_close");
   SDK_STREAM_PIPES.closeScopes(ownerKeys, "runtime_close");
   SDK_BYTE_PIPES.closeScopes(ownerKeys, "runtime_close");
+  void stopBrowserOperations(ownerKeys, "runtime_close", true);
   releaseOwnedBrowserMessageStreams(ownerKeys, "runtime_close");
   closeOwnedWebTransports(ownerKeys, "runtime_close");
   recordClosedAsyncScopeBrackets(ownerKeys);
@@ -6883,11 +6893,145 @@ function recordClosedAsyncScopeBrackets(ownerKeys: Set<string>): void {
   }
 }
 
+interface BrowserOperationOwner {
+  scopeKey: string;
+  stop(kind: string, released?: boolean): Promise<BrowserOutcome<void>>;
+}
+
+const BROWSER_OPERATIONS = new Set<BrowserOperationOwner>();
+
+function startBrowserOperation<T>(
+  scope: CoreRegionHandle,
+  version: AbiVersion | null,
+  work: (signal: AbortSignal) => T | PromiseLike<T>,
+  label: string | undefined,
+): BrowserOutcome<BrowserOperationHandle<T>> {
+  const scopeKey = browserWebTransportStateKey(scope);
+  const unavailable = () => !browserMessageScopeIsTracked(scopeKey) || browserOwnerIsClosing(scopeKey);
+  if (typeof work !== "function" || (label !== undefined && typeof label !== "string")) {
+    return OutcomeFactory.err("compatibility_rejected", "permanent", "Expected an operation function and an optional string label.");
+  }
+  if (unavailable()) return OutcomeFactory.err("capability_denied", "transient", "Operation owner is closing or unavailable.");
+  if (typeof AbortController !== "function") {
+    return OutcomeFactory.err("capability_denied", "permanent", "Region-owned operations require AbortController.");
+  }
+  const controller = new AbortController();
+  const signal = controller.signal;
+  const abort = controller.abort.bind(controller);
+  if (unavailable()) return OutcomeFactory.err("capability_denied", "transient", "Operation owner is closing or unavailable.");
+  const spawned = taskSpawn({ scope, label: label ?? "browser-operation", cancel_kind: "operation_cancel" }, version);
+  if (spawned.outcome !== "ok") return spawned;
+  const task = snapshotTaskHandle(spawned.value);
+  let cancelKind: string | null = null;
+  let cancelAccepted = false;
+  let released = false;
+  let finished = false;
+  let bodyDone = false;
+  let abortRequested = false;
+  let attempt: Promise<BrowserOutcome<void>> | null = null;
+  let publish!: (outcome: BrowserOutcome<T>) => void;
+  const completed = new Promise<BrowserOutcome<T>>(resolve => { publish = resolve; });
+
+  // Defer invoking application code until the task and its cancellation hook
+  // are discoverable by both the caller and a reentrant scope/runtime close.
+  const body = Promise.resolve().then(async (): Promise<BrowserOutcome<T>> => {
+    try {
+      if (cancelKind === null) {
+        const value = await work(signal);
+        if (cancelKind === null) return OutcomeFactory.ok(value);
+      }
+    } catch {
+      if (cancelKind === null) return { outcome: "panicked", message: "Browser operation threw or rejected." };
+    } finally {
+      bodyDone = true;
+    }
+    return webTransportCancellationOutcome(cancelKind ?? "operation_cancel", "Browser operation cancelled.");
+  });
+
+  function retire(): Promise<BrowserOutcome<void>> {
+    if (finished) return Promise.resolve(OutcomeFactory.ok(undefined));
+    if (attempt) return attempt;
+    // Publish the shared attempt before calling any host or ABI function.
+    attempt = Promise.resolve().then(async () => {
+      try {
+        let refused: Exclude<BrowserOutcome<void>, { outcome: "ok" }> | null = null;
+        if (!released && cancelKind !== null && !cancelAccepted) {
+          const admitted = taskCancel({ task, kind: cancelKind, message: "Browser operation cancelled." }, version);
+          if (admitted.outcome === "ok") cancelAccepted = true;
+          else refused = admitted;
+        }
+        const outcome = await body;
+        if (!released && refused !== null) { publish(refused); return refused; }
+        if (!released) {
+          // The JS result stays in this realm. Only a unit success or a typed
+          // terminal failure crosses the ABI; arbitrary JS values need no codec.
+          const terminal = outcome.outcome === "ok" ? OutcomeFactory.ok(undefined) : outcome;
+          const receipt = taskJoin(task, terminal, version);
+          if (!sameWebTransportTerminal(terminal, receipt)) {
+            const failure = receipt.outcome === "ok"
+              ? OutcomeFactory.err("internal_failure", "unknown", "Unexpected browser operation publication receipt.")
+              : receipt;
+            publish(failure);
+            return failure;
+          }
+        }
+        finished = true;
+        BROWSER_OPERATIONS.delete(owner);
+        publish(outcome);
+        return OutcomeFactory.ok(undefined);
+      } catch {
+        await body;
+        const failure = OutcomeFactory.err("internal_failure", "unknown", "Browser operation retirement failed.");
+        publish(failure);
+        return failure;
+      } finally {
+        attempt = null;
+      }
+    });
+    return attempt;
+  }
+
+  const owner: BrowserOperationOwner = {
+    scopeKey,
+    stop(kind, ownerReleased = false) {
+      released ||= ownerReleased;
+      if (!bodyDone) {
+        cancelKind ??= kind;
+        if (!abortRequested) {
+          abortRequested = true;
+          try { abort(); }
+          catch {
+            abortRequested = false;
+            return Promise.resolve(OutcomeFactory.err("internal_failure", "unknown", "Browser operation abort failed."));
+          }
+        }
+      }
+      return retire();
+    },
+  };
+  BROWSER_OPERATIONS.add(owner);
+  if (unavailable()) {
+    void owner.stop("scope_close", !browserMessageScopeIsTracked(scopeKey));
+  }
+  void body.then(retire);
+  return OutcomeFactory.ok(Object.freeze({ completed, cancel: () => owner.stop("operation_cancel") }));
+}
+
+async function stopBrowserOperations(
+  owners: Set<string>, kind: string, released = false,
+): Promise<BrowserOutcome<void>> {
+  const receipts = await Promise.all([...BROWSER_OPERATIONS]
+    .filter(operation => owners.has(operation.scopeKey))
+    .map(operation => operation.stop(kind, released)));
+  return receipts.find(receipt => receipt.outcome !== "ok") ?? OutcomeFactory.ok(undefined);
+}
+
 async function drainBrowserOwnerResources(ownerKeys: Set<string>, kind: string): Promise<BrowserOutcome<void>> {
   // Start all cancellations before waiting on a host. Fetch cleanup may
   // itself depend on a message endpoint reaching its terminal state. Pipes
   // enter native shutdown before their independently owned sources are stopped.
   const receipts = await Promise.all([
+    stopBrowserOperations(ownerKeys, kind),
     SDK_STREAM_PIPES.drainScopes(ownerKeys, kind),
     SDK_BYTE_PIPES.drainScopes(ownerKeys, kind),
     drainOwnedWebTransports(ownerKeys, kind),
@@ -7417,6 +7561,28 @@ export class RegionHandle {
     }
     recordRegionParent(core, entered.value);
     return OutcomeFactory.ok(new RegionHandle(entered.value, consumerVersion, this.runtime));
+  }
+
+  /**
+   * Run a JavaScript operation as a child task in this region. The callback
+   * receives a private AbortSignal and starts on a microtask after admission.
+   * Manual cancellation and asynchronous owner close signal it and wait for
+   * its returned promise (including finally blocks) before retiring the task.
+   * Return all work that needs to be joined. A callback that ignores abort
+   * can keep closeAsync pending, as can awaiting its own owner's closeAsync.
+   * Synchronous close requests cancellation without waiting for JS cleanup.
+   */
+  runTask<T>(
+    work: (signal: AbortSignal) => T | PromiseLike<T>,
+    options: BrowserScopeOptions = {},
+  ): BrowserOutcome<BrowserOperationHandle<T>> {
+    const lane = this.runtime?.laneAvailabilityOutcome("run a region-owned browser operation");
+    if (lane) return lane;
+    try {
+      const scope = snapshotRegionHandle(this.core);
+      const version = snapshotOwnerCloseVersion(options.consumerVersion ?? this.consumerVersion);
+      return startBrowserOperation(scope, version, work, options.label);
+    } catch (error) { return ownerCloseFailure("run_task", error); }
   }
 
   spawnTask(
