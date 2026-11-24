@@ -87,6 +87,202 @@ fn child_region_pool_runtime(workers: usize) -> crate::runtime::Runtime {
 }
 
 #[test]
+fn child_region_inherits_scoped_services_through_nested_regions_and_tasks() {
+    use crate::cx::cap::{CapSet, CapSetRuntimeMask};
+    use crate::cx::registry::RegistryHandle;
+    use crate::io::cap::IoStats;
+    use crate::io::{IoCap, LabIoCap};
+    use crate::runtime::RootDrainOutcome;
+    use crate::types::SystemPressure;
+
+    fn assert_services(
+        cx: &Cx,
+        registry: &RegistryHandle,
+        io: &Arc<dyn IoCap>,
+        pressure: &Arc<SystemPressure>,
+    ) {
+        assert!(Arc::ptr_eq(
+            &cx.registry_handle()
+                .expect("caller's scoped registry")
+                .as_arc(),
+            &registry.as_arc(),
+        ));
+        assert!(Arc::ptr_eq(
+            &cx.io_cap_handle().expect("caller's I/O capability"),
+            io,
+        ));
+        assert_eq!(
+            cx.io().expect("I/O authority remains available").stats(),
+            IoStats {
+                submitted: 1,
+                completed: 1,
+            }
+        );
+        assert!(Arc::ptr_eq(
+            &cx.pressure_handle().expect("caller's pressure override"),
+            pressure,
+        ));
+        assert_eq!(cx.pressure().unwrap().headroom(), 0.75);
+    }
+
+    for (workers, sharded) in [(1, false), (2, true)] {
+        let builder = if workers == 1 {
+            RuntimeBuilder::current_thread()
+        } else {
+            RuntimeBuilder::new().worker_threads(workers)
+        };
+        let runtime = builder.with_sharded_state(sharded).build().unwrap();
+        runtime.block_on(async {
+            let base = Cx::current().expect("native root context");
+            let registry = RegistryHandle::new(Arc::new(crate::cx::NameRegistry::new()));
+            let io = Arc::new(LabIoCap::new_for_tests());
+            let io_cap: Arc<dyn IoCap> = io.clone();
+            let pressure = Arc::new(SystemPressure::with_headroom(0.25));
+            let parent: Cx = Cx::new_with_drivers(
+                base.region_id(),
+                base.task_id(),
+                base.budget(),
+                None,
+                base.io_driver_handle(),
+                Some(Arc::clone(&io_cap)),
+                base.timer_driver(),
+                None,
+            )
+            .with_spawn_gateway(base.spawn_gateway_handle())
+            .with_pending_spawn_counter(base.pending_spawn_counter_handle())
+            .with_registry_handle(Some(registry.clone()))
+            .with_pressure(Arc::clone(&pressure));
+
+            let child = parent
+                .open_child_region(ChildRegionSpec::inherit())
+                .await
+                .unwrap();
+            let grandchild = child
+                .cx()
+                .open_child_region(ChildRegionSpec::inherit())
+                .await
+                .unwrap();
+            // Updates after both mints must remain visible through the exact
+            // caller-owned services, rather than fresh runtime defaults.
+            io.record_submit();
+            io.record_complete();
+            pressure.set_headroom(0.75);
+            assert_services(child.cx(), &registry, &io_cap, &pressure);
+            assert_services(grandchild.cx(), &registry, &io_cap, &pressure);
+            assert_ne!(child.region_id(), parent.region_id());
+            assert_ne!(grandchild.region_id(), child.region_id());
+            let expected_region = grandchild.region_id();
+            let task_registry = registry.clone();
+            let task_io = Arc::clone(&io_cap);
+            let task_pressure = Arc::clone(&pressure);
+            let mut task = grandchild
+                .cx()
+                .spawn(move |cx| async move {
+                    assert_services(&cx, &task_registry, &task_io, &task_pressure);
+                    let ambient = Cx::current().expect("admitted descendant task context");
+                    assert_services(&ambient, &task_registry, &task_io, &task_pressure);
+                    assert_eq!(ambient.region_id(), expected_region);
+                    assert_eq!(ambient.task_id(), cx.task_id());
+                })
+                .unwrap();
+            task.join(&parent).await.unwrap();
+            grandchild.close().await.unwrap();
+            child.close().await.unwrap();
+
+            let mut restricted = parent.clone();
+            restricted.runtime_mask = CapSet::<true, false, false, false, false>::MASK;
+            let child = restricted
+                .open_child_region(ChildRegionSpec::inherit())
+                .await
+                .unwrap();
+            assert!(child.cx().io_cap_handle().is_some());
+            assert!(
+                child.cx().io().is_none(),
+                "inheritance cannot restore masked I/O authority"
+            );
+            assert_eq!(child.cx().runtime_mask, restricted.runtime_mask);
+            child.close().await.unwrap();
+        });
+        assert_eq!(
+            runtime.drain_root_region(Duration::from_secs(5)),
+            RootDrainOutcome::Quiescent
+        );
+        assert!(runtime.is_quiescent());
+    }
+}
+
+#[cfg(feature = "full-runtime")]
+#[test]
+fn child_region_inherits_verifiable_macaroons_and_the_callers_evidence_sink() {
+    use crate::cx::macaroon::{MacaroonToken, VerificationContext};
+    use crate::evidence_sink::{CollectorSink, EvidenceSink};
+    use crate::runtime::RootDrainOutcome;
+    use crate::security::key::AuthKey;
+
+    fn verify(cx: &Cx, key: &AuthKey, sink: &Arc<dyn EvidenceSink>) {
+        assert!(Arc::ptr_eq(
+            &cx.evidence_sink_handle().expect("caller's evidence sink"),
+            sink
+        ));
+        cx.verify_capability(key, "region-service-test", &VerificationContext::new())
+            .expect("the caller's grant remains verifiable");
+    }
+
+    for workers in [1, 2] {
+        let runtime = child_region_pool_runtime(workers);
+        let sink = Arc::new(CollectorSink::new());
+        let sink_handle: Arc<dyn EvidenceSink> = sink.clone();
+        runtime.block_on(async {
+            let key = AuthKey::from_seed(7);
+            let parent = Cx::current()
+                .unwrap()
+                .with_macaroon(MacaroonToken::mint(
+                    &key,
+                    "region-service-test",
+                    "child-region",
+                ))
+                .with_evidence_sink(Some(Arc::clone(&sink_handle)));
+            let child = parent
+                .open_child_region(ChildRegionSpec::inherit())
+                .await
+                .unwrap();
+            let grandchild = child
+                .cx()
+                .open_child_region(ChildRegionSpec::inherit())
+                .await
+                .unwrap();
+            verify(child.cx(), &key, &sink_handle);
+            verify(grandchild.cx(), &key, &sink_handle);
+            let task_sink = Arc::clone(&sink_handle);
+            let mut task = grandchild
+                .cx()
+                .spawn(move |cx| async move {
+                    verify(&cx, &key, &task_sink);
+                    verify(&Cx::current().unwrap(), &key, &task_sink);
+                })
+                .unwrap();
+            task.join(&parent).await.unwrap();
+            grandchild.close().await.unwrap();
+            child.close().await.unwrap();
+        });
+        assert_eq!(
+            sink.entries()
+                .iter()
+                .filter(|entry| {
+                    entry.component == "cx_macaroon" && entry.action == "verify_success"
+                })
+                .count(),
+            4
+        );
+        assert_eq!(
+            runtime.drain_root_region(Duration::from_secs(5)),
+            RootDrainOutcome::Quiescent
+        );
+        assert!(runtime.is_quiescent());
+    }
+}
+
+#[test]
 fn child_region_blocking_pool_dispatch_preserves_the_explicit_pool() {
     use crate::runtime::{BlockingPool, BlockingPoolOptions, RootDrainOutcome};
 

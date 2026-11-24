@@ -188,9 +188,7 @@ pub struct ChildRegionOpening<Caps = crate::cx::cap::All> {
     pending: Option<(Arc<AdmittedRegionSlot>, Weak<()>)>,
     failure: Option<ChildRegionError>,
     parent_mask: crate::cx::cap::CapMask,
-    #[cfg(feature = "full-runtime")]
-    parent_remote: Option<Arc<crate::remote::RemoteCap>>,
-    parent_blocking_pool: Option<crate::runtime::BlockingPoolHandle>,
+    parent_handles: Option<crate::cx::cx::InheritedHandles>,
     caps: PhantomData<fn() -> Caps>,
 }
 
@@ -199,16 +197,13 @@ impl<Caps> ChildRegionOpening<Caps> {
         slot: Arc<AdmittedRegionSlot>,
         liveness: Weak<()>,
         parent_mask: crate::cx::cap::CapMask,
-        #[cfg(feature = "full-runtime")] parent_remote: Option<Arc<crate::remote::RemoteCap>>,
-        parent_blocking_pool: Option<crate::runtime::BlockingPoolHandle>,
+        parent_handles: crate::cx::cx::InheritedHandles,
     ) -> Self {
         Self {
             pending: Some((slot, liveness)),
             failure: None,
             parent_mask,
-            #[cfg(feature = "full-runtime")]
-            parent_remote,
-            parent_blocking_pool,
+            parent_handles: Some(parent_handles),
             caps: PhantomData,
         }
     }
@@ -218,9 +213,7 @@ impl<Caps> ChildRegionOpening<Caps> {
             pending: None,
             failure: Some(error),
             parent_mask: crate::cx::cap::CapMask::none(),
-            #[cfg(feature = "full-runtime")]
-            parent_remote: None,
-            parent_blocking_pool: None,
+            parent_handles: None,
             caps: PhantomData,
         }
     }
@@ -240,27 +233,26 @@ impl<Caps> Future for ChildRegionOpening<Caps> {
         if let Some(outcome) = slot.take() {
             this.pending = None;
             return Poll::Ready(match outcome {
-                Ok(mut admitted) => {
+                Ok(admitted) => {
+                    // Arm the close backstop before replacing any handles:
+                    // a displaced capability can run arbitrary Drop code.
+                    let mut child = ChildRegion::<Caps>::from_admitted(admitted);
                     // The scheduler mints the principal with runtime wiring.
                     // Publication must not restore capabilities that the
                     // opener's ambient context had already relinquished.
-                    admitted.cx.runtime_mask = admitted.cx.runtime_mask.intersect(this.parent_mask);
+                    child.cx.runtime_mask = child.cx.runtime_mask.intersect(this.parent_mask);
                     // The scheduler cannot recover handles attached to this
                     // particular caller from the region record. Inherit the
                     // explicit handles without widening the mask or replacing
-                    // the freshly minted identity and gateways. An absent pool
-                    // must stay absent, and a caller-supplied pool must not be
-                    // silently replaced with the runtime's default pool.
-                    #[cfg(feature = "full-runtime")]
-                    {
-                        admitted.cx = admitted
-                            .cx
-                            .with_remote_cap_handle(this.parent_remote.take());
-                    }
-                    admitted.cx = admitted
-                        .cx
-                        .with_blocking_pool_handle(this.parent_blocking_pool.take());
-                    Ok(ChildRegion::from_admitted(admitted))
+                    // the freshly minted identity, drivers, clocks or gateways.
+                    // Intentional absence is preserved, while an absent caller
+                    // pressure handle retains the runtime's sampled pressure.
+                    child.cx.adopt_inherited_handles(
+                        this.parent_handles
+                            .take()
+                            .expect("an admitted opening retains its caller handles"),
+                    );
+                    Ok(child)
                 }
                 Err(error) => Err(ChildRegionError::Create(error)),
             });
@@ -333,8 +325,8 @@ impl<Caps> ChildRegion<Caps> {
             region_id: admitted.region_id,
             parent: admitted.parent,
             // The scheduler mints a Cx<All>. Re-type it to the opener's
-            // compile-time set; the runtime mask was already met with the
-            // opener's in ChildRegionOpening::poll.
+            // compile-time set. ChildRegionOpening::poll meets the runtime
+            // mask with the opener's before exposing this owned handle.
             cx: admitted.cx.retype(),
             close_notify: admitted.close_notify,
             close_receipt: admitted.close_receipt,

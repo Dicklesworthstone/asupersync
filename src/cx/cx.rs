@@ -271,13 +271,15 @@ struct CxHandles {
     fabric_capabilities: Arc<FabricCapabilityRegistry>,
 }
 
-/// The handles a spawned task inherits from the context that spawned it.
+/// The caller-owned handles inherited by a task or an owned child region.
 ///
 /// The spawner takes this snapshot and moves it into the task's admission
 /// slot. Admission builds the task's record context with it, and that record
 /// context is what `Cx::current()` returns inside the task. The context the
 /// spawn closure receives shares it, so both carry the same handles
 /// (br-asupersync-93zkbz).
+/// Region openings use the same service handles without task entropy or
+/// causality inputs; their principal keeps the scheduler's minted state.
 pub(crate) struct InheritedHandles {
     /// Taken by admission, which forks it for the task in spawn order.
     entropy: Option<Arc<dyn EntropySource>>,
@@ -4936,7 +4938,9 @@ impl<Caps> Cx<Caps> {
     /// invent ambient authority. A runtime mask without spawning authority
     /// returns [`ChildRegionError::RuntimeUnavailable`](crate::cx::ChildRegionError::RuntimeUnavailable) before enqueueing.
     /// The derived context preserves this context's runtime capability mask
-    /// and explicit blocking-pool handle, including a deliberately absent pool.
+    /// and attached I/O, registry, remote, blocking-pool, evidence, macaroon,
+    /// HTTP-client and pressure handles. A deliberately absent pool stays
+    /// absent; an absent pressure handle keeps the runtime's sampled pressure.
     /// Scheduler and capability budgets meet both this context's limits and
     /// the owning region's limits, even when the request supplies an override.
     ///
@@ -4997,6 +5001,7 @@ impl<Caps> Cx<Caps> {
             slot: std::sync::Arc::clone(&slot),
             parent_fallback: self.spawn_fallback_for(self.region_id()),
         };
+        let parent_handles = self.inherited_region_handles();
         if gateway
             .enqueue_region_command(crate::runtime::spawn_mailbox::RegionCommand::Create(
                 request,
@@ -5009,9 +5014,7 @@ impl<Caps> Cx<Caps> {
             slot,
             gateway.runtime_liveness_weak(),
             self.runtime_mask,
-            #[cfg(feature = "full-runtime")]
-            self.remote_cap_handle(),
-            self.blocking_pool_handle_for_inheritance(),
+            parent_handles,
         )
     }
 
@@ -6801,30 +6804,13 @@ impl<Caps> Cx<Caps> {
             None
         }
     }
-}
 
-impl<Caps> Cx<Caps>
-where
-    Caps: cap::HasSpawn + Send + Sync + 'static,
-{
-    /// Records the fallback [`Self::spawn_fallback_for`] returns; admission
-    /// sets it when it admits a task into a sealed region.
-    pub(crate) fn set_spawn_fallback_region(&self, region: Option<RegionId>) {
-        self.inner.write().spawn_fallback_region = region;
-    }
-
-    pub(crate) fn set_spawn_fallback_permitted(&mut self, permitted: bool) {
-        Arc::make_mut(&mut self.handles).spawn_fallback_permitted = permitted;
-    }
-
-    /// Snapshots the handles a task spawned from this context inherits:
-    /// the entropy source (forked for the task at admission) and the io-cap,
-    /// registry, remote, blocking-pool, evidence, macaroon, HTTP-client and
-    /// pressure handles. The spawner takes it outside the runtime lock and
-    /// moves it into the task's admission slot (br-asupersync-93zkbz).
-    pub(crate) fn inherited_handles(&self) -> InheritedHandles {
+    /// Snapshots caller-owned service handles without drawing entropy or
+    /// advancing the caller's logical clock. Owned child-region principals
+    /// keep those values from the scheduler's authoritative mint.
+    pub(crate) fn inherited_region_handles(&self) -> InheritedHandles {
         InheritedHandles {
-            entropy: Some(self.handles.entropy.clone()),
+            entropy: None,
             io_cap: self.io_cap_handle(),
             registry: self.registry_handle(),
             #[cfg(feature = "full-runtime")]
@@ -6840,16 +6826,16 @@ where
             ))]
             default_http_client: self.handles.default_http_client.clone(),
             pressure: self.pressure_handle(),
-            task_causality: self.task_causality_snapshot(),
+            task_causality: None,
         }
     }
 
-    /// Moves a spawner's inherited handles into an admission-built context,
-    /// mirroring `Scope::build_child_task_cx`: the handles replace what
-    /// admission built, and a spawner without a pressure handle keeps the
-    /// runtime's. Admission has already forked the spawner's entropy for the
-    /// task. This only moves fields: the context is still private
-    /// to admission, so `Arc::make_mut` does not clone (br-asupersync-93zkbz).
+    /// Moves caller-owned handles into an admission-built task or region
+    /// principal, mirroring `Scope::build_child_task_cx`. A caller without a
+    /// pressure handle keeps the runtime's. Minted identity, budgets, drivers,
+    /// entropy, logical clock and ownership gateways remain authoritative.
+    /// Call outside runtime locks when replacing a principal's handles;
+    /// displaced capability destructors can run user code.
     pub(crate) fn adopt_inherited_handles(&mut self, inherited: InheritedHandles) {
         let InheritedHandles {
             entropy: _,
@@ -6890,6 +6876,33 @@ where
         if pressure.is_some() {
             handles.pressure = pressure;
         }
+    }
+}
+
+impl<Caps> Cx<Caps>
+where
+    Caps: cap::HasSpawn + Send + Sync + 'static,
+{
+    /// Records the fallback [`Self::spawn_fallback_for`] returns; admission
+    /// sets it when it admits a task into a sealed region.
+    pub(crate) fn set_spawn_fallback_region(&self, region: Option<RegionId>) {
+        self.inner.write().spawn_fallback_region = region;
+    }
+
+    pub(crate) fn set_spawn_fallback_permitted(&mut self, permitted: bool) {
+        Arc::make_mut(&mut self.handles).spawn_fallback_permitted = permitted;
+    }
+
+    /// Snapshots the handles a task spawned from this context inherits:
+    /// the entropy source (forked for the task at admission) and the io-cap,
+    /// registry, remote, blocking-pool, evidence, macaroon, HTTP-client and
+    /// pressure handles. The spawner takes it outside the runtime lock and
+    /// moves it into the task's admission slot (br-asupersync-93zkbz).
+    pub(crate) fn inherited_handles(&self) -> InheritedHandles {
+        let mut handles = self.inherited_region_handles();
+        handles.entropy = Some(self.handles.entropy.clone());
+        handles.task_causality = self.task_causality_snapshot();
+        handles
     }
 
     /// Finishes an admission-built child context for the spawn closure,
