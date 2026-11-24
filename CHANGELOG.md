@@ -172,6 +172,14 @@ artifacts.
   Normal, uncancelled rollback keeps waiting for its acknowledgement. A valid
   idle acknowledgement remains successful through the task-result boundary,
   and helpers preserve the body's original outcome after failed cleanup.
+- **PostgreSQL failed isolated begins use bounded cancellation cleanup.**
+  After `BEGIN` succeeds, a failed isolation check uses the same cleanup grace
+  as direct rollback. Complete idle acknowledgements permit reuse without
+  clearing independent session dirtiness; silent peers retire the retained
+  socket with rollback debt. The original mismatch, missing-row, or server
+  error survives cancellation through the owning task's result boundary.
+  Hard dropping cleanup releases cancellation registrations and preserves
+  connection quarantine without claiming an asynchronous rollback completed.
 - **MySQL explicit rollback completes cancellation cleanup or retires the session.**
   Rollback and session-isolation restoration run with cancellation masked;
   an explicit-clock timer bounds an unresponsive exchange after cancellation

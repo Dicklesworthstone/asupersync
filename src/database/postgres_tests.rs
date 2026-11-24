@@ -3840,6 +3840,87 @@ mod tests {
         .concat()
     }
 
+    #[derive(Clone, Copy, Debug)]
+    enum IsolationVerificationFailure {
+        Mismatch,
+        MissingRow,
+        ServerError,
+    }
+
+    impl IsolationVerificationFailure {
+        const ALL: [Self; 3] = [Self::Mismatch, Self::MissingRow, Self::ServerError];
+
+        fn failed_begin_reply(self) -> Vec<u8> {
+            let verification = match self {
+                Self::Mismatch => isolation_level_reply("read committed"),
+                Self::MissingRow => [
+                    backend_message(b'T', &[0, 0]),
+                    command_complete_message("SHOW"),
+                    ready_for_query(b'T'),
+                ]
+                .concat(),
+                Self::ServerError => [
+                    backend_message(b'E', b"SERROR\0C42501\0Misolation verification denied\0\0"),
+                    ready_for_query(b'E'),
+                ]
+                .concat(),
+            };
+            [
+                command_complete_message("BEGIN"),
+                ready_for_query(b'T'),
+                verification,
+            ]
+            .concat()
+        }
+
+        fn assert_original_outcome(self, outcome: &Outcome<(), PgError>) {
+            match (self, outcome) {
+                (
+                    Self::Mismatch | Self::MissingRow,
+                    Outcome::Err(PgError::IsolationLevelMismatch {
+                        requested,
+                        observed,
+                    }),
+                ) => {
+                    assert_eq!(*requested, IsolationLevel::Serializable);
+                    assert_eq!(
+                        observed,
+                        if matches!(self, Self::MissingRow) {
+                            ""
+                        } else {
+                            "read committed"
+                        }
+                    );
+                }
+                (
+                    Self::ServerError,
+                    Outcome::Err(PgError::Server {
+                        code,
+                        message,
+                        diagnostic,
+                        ..
+                    }),
+                ) => {
+                    assert_eq!(code, "42501");
+                    assert_eq!(message, "isolation verification denied");
+                    assert_eq!(diagnostic.severity.as_deref(), Some("ERROR"));
+                }
+                (_, other) => {
+                    panic!("{self:?}: preserve the original verification error: {other:?}")
+                }
+            }
+        }
+    }
+
+    fn isolation_compensation_requests() -> Vec<u8> {
+        [
+            backend_message(b'Q', b"BEGIN ISOLATION LEVEL SERIALIZABLE READ WRITE\0"),
+            backend_message(b'Q', b"SHOW transaction_isolation\0"),
+            backend_message(b'Q', b"ROLLBACK\0"),
+        ]
+        .concat()
+    }
+
     async fn witness_managed_control_pending<F: std::future::Future>(
         mut operation: Pin<&mut F>,
         peer: &mut std::net::TcpStream,
@@ -4131,6 +4212,288 @@ mod tests {
                     assert_orphan_peer_closed(&mut peer, case);
                 }
             });
+        }
+    }
+
+    // br-asupersync-9g47af: BEGIN has succeeded, but verification must not
+    // strand its caller in a masked rollback or lose the original failure.
+    #[test]
+    fn cancelled_isolation_compensation_requires_idle_ack_or_retires_the_socket() {
+        use crate::database::pool::AsyncConnectionManager;
+
+        for workers in [1, 2] {
+            for failure in IsolationVerificationFailure::ALL {
+                for (command_tag, acknowledged, dirty) in [
+                    (false, false, false),
+                    (false, false, true),
+                    (false, true, false),
+                    (false, true, true),
+                    (true, false, false),
+                    (true, false, true),
+                    (true, true, false),
+                    (true, true, true),
+                ] {
+                    run_native_orphan_recovery_test(workers, move |request_cx| async move {
+                        let active_cx = Cx::current().expect("native compensation worker");
+                        let (mut conn, mut peer) = make_orphan_recovery_connection_with_peer();
+                        conn.inner.options.connect_timeout = Some(Duration::from_millis(50));
+                        conn.inner.needs_discard = dirty;
+                        let mut reply = failure.failed_begin_reply();
+                        if command_tag {
+                            reply.extend(command_complete_message("ROLLBACK"));
+                        }
+                        std::io::Write::write_all(&mut peer, &reply)
+                            .expect("write failed verification and partial cleanup");
+                        let mut begin = Box::pin(conn.begin_with_isolation(
+                            &request_cx,
+                            IsolationLevel::Serializable,
+                            false,
+                        ));
+                        witness_managed_control_pending(
+                            begin.as_mut(),
+                            &mut peer,
+                            &isolation_compensation_requests(),
+                        )
+                        .await;
+                        let reason = CancelReason::user("cancel isolated BEGIN cleanup");
+                        request_cx.cancel_with_reason(reason.clone());
+                        if acknowledged {
+                            if !command_tag {
+                                std::io::Write::write_all(
+                                    &mut peer,
+                                    &command_complete_message("ROLLBACK"),
+                                )
+                                .expect("write rollback completion");
+                            }
+                            std::io::Write::write_all(&mut peer, &ready_for_query(b'I'))
+                                .expect("acknowledge rollback to idle");
+                        }
+                        // The silent-peer cases have no further reply,
+                        // peer drop, or test poll loop to release this.
+                        let outcome = begin.await.map(drop);
+                        failure.assert_original_outcome(&outcome);
+                        assert_eq!(request_cx.cancel_reason(), Some(reason));
+                        assert!(!active_cx.is_cancel_requested());
+                        let manager = PgConnectionManager::new(test_pg_connect_options());
+                        if acknowledged {
+                            assert!(!conn.inner.closed);
+                            assert!(!conn.inner.needs_rollback);
+                            assert_eq!(conn.inner.transaction_status, b'I');
+                            assert_eq!(conn.inner.needs_discard, dirty);
+                            assert_eq!(manager.release_check(&mut conn), !dirty);
+                            reply_complete(&mut peer, "UPDATE 1", b'I');
+                            assert!(matches!(
+                                conn.execute_unchecked(
+                                    &active_cx,
+                                    "UPDATE after_compensation SET v = 1",
+                                )
+                                .await,
+                                Outcome::Ok(1)
+                            ));
+                            assert_eq!(
+                                read_frontend_frame(&mut peer),
+                                (b'Q', b"UPDATE after_compensation SET v = 1\0".to_vec())
+                            );
+                            conn.close().await.expect("close recovered connection");
+                            assert_eq!(read_frontend_frame(&mut peer), (b'X', Vec::new()));
+                        } else {
+                            assert_orphan_recovery_debt(&conn, dirty, "silent compensation");
+                            let expected_status = match failure {
+                                IsolationVerificationFailure::ServerError => b'E',
+                                _ => b'T',
+                            };
+                            assert_eq!(conn.inner.transaction_status, expected_status);
+                            assert!(!manager.release_check(&mut conn));
+                            assert!(!manager.is_valid(&active_cx, &mut conn).await);
+                            assert!(matches!(
+                                conn.execute_unchecked(&active_cx, "UPDATE must_not_run SET v = 1")
+                                    .await,
+                                Outcome::Err(PgError::ConnectionClosed)
+                            ));
+                        }
+                        // In the silent case conn is still retained:
+                        // expiry itself must have retired the socket.
+                        assert_orphan_peer_closed(&mut peer, "cancelled compensation");
+                    });
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn isolation_verification_error_survives_its_own_task_cancellation() {
+        for workers in [1, 2] {
+            for failure in IsolationVerificationFailure::ALL {
+                for acknowledged in [false, true] {
+                    run_native_orphan_recovery_test(workers, move |_| async move {
+                        let parent_cx = Cx::current().expect("native compensation parent");
+                        let mut child = parent_cx
+                            .spawn(move |child_cx| async move {
+                                let (mut conn, mut peer) =
+                                    make_orphan_recovery_connection_with_peer();
+                                conn.inner.options.connect_timeout =
+                                    Some(Duration::from_millis(50));
+                                std::io::Write::write_all(&mut peer, &failure.failed_begin_reply())
+                                    .expect("write original verification failure");
+                                let mut begin = Box::pin(conn.begin_with_isolation(
+                                    &child_cx,
+                                    IsolationLevel::Serializable,
+                                    false,
+                                ));
+                                witness_managed_control_pending(
+                                    begin.as_mut(),
+                                    &mut peer,
+                                    &isolation_compensation_requests(),
+                                )
+                                .await;
+                                child_cx.cancel_with_reason(CancelReason::user(
+                                    "cancel isolated BEGIN owner",
+                                ));
+                                if acknowledged {
+                                    reply_complete(&mut peer, "ROLLBACK", b'I');
+                                }
+                                let outcome = begin.await.map(drop);
+                                failure.assert_original_outcome(&outcome);
+                                if acknowledged {
+                                    assert!(!conn.inner.closed);
+                                    assert!(!conn.inner.needs_rollback);
+                                    assert!(!conn.in_transaction());
+                                    drop(conn);
+                                    assert_eq!(read_frontend_frame(&mut peer), (b'X', Vec::new()));
+                                } else {
+                                    assert_orphan_recovery_debt(
+                                        &conn,
+                                        false,
+                                        "cancelled begin owner",
+                                    );
+                                    // Keep conn alive through the EOF assertion.
+                                    assert_orphan_peer_closed(&mut peer, "cancelled begin owner");
+                                    drop(conn);
+                                }
+                                assert_orphan_peer_closed(&mut peer, "begin task result");
+                                // No caller checkpoint after begin: cleanup
+                                // must acknowledge cancellation before its
+                                // original domain error crosses TaskHandle.
+                                outcome
+                            })
+                            .expect("spawn isolated BEGIN owner");
+                        match child.join(&parent_cx).await {
+                            Ok(outcome) => failure.assert_original_outcome(&outcome),
+                            other => {
+                                panic!("preserve the typed begin error through join: {other:?}")
+                            }
+                        }
+                    });
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn healthy_isolation_compensation_waits_beyond_cancellation_grace() {
+        for workers in [1, 2] {
+            for failure in IsolationVerificationFailure::ALL {
+                run_native_orphan_recovery_test(workers, move |request_cx| async move {
+                    let active_cx = Cx::current().expect("native compensation worker");
+                    let (mut conn, mut peer) = make_orphan_recovery_connection_with_peer();
+                    conn.inner.options.connect_timeout = Some(Duration::from_millis(20));
+                    std::io::Write::write_all(&mut peer, &failure.failed_begin_reply())
+                        .expect("write healthy compensation fixture");
+                    let mut begin = Box::pin(conn.begin_with_isolation(
+                        &request_cx,
+                        IsolationLevel::Serializable,
+                        false,
+                    ));
+                    witness_managed_control_pending(
+                        begin.as_mut(),
+                        &mut peer,
+                        &isolation_compensation_requests(),
+                    )
+                    .await;
+                    crate::time::sleep_cx(&active_cx, Duration::from_millis(100))
+                        .await
+                        .expect("wait beyond cancellation-only cleanup grace");
+                    std::future::poll_fn(|task_cx| {
+                        assert!(begin.as_mut().poll(task_cx).is_pending());
+                        Poll::Ready(())
+                    })
+                    .await;
+                    reply_complete(&mut peer, "ROLLBACK", b'I');
+                    let outcome = begin.await.map(drop);
+                    failure.assert_original_outcome(&outcome);
+                    assert!(!request_cx.is_cancel_requested());
+                    assert!(!conn.inner.closed);
+                    assert!(!conn.inner.needs_rollback);
+                    assert!(!conn.in_transaction());
+                    drop(conn);
+                    assert_eq!(read_frontend_frame(&mut peer), (b'X', Vec::new()));
+                    assert_orphan_peer_closed(&mut peer, "healthy compensation");
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn dropping_isolation_compensation_releases_waiters_and_preserves_debt() {
+        for workers in [1, 2] {
+            for failure in IsolationVerificationFailure::ALL {
+                for cancel_before_drop in [false, true] {
+                    run_native_orphan_recovery_test(workers, move |request_cx| async move {
+                        let active_cx = Cx::current().expect("native compensation worker");
+                        let (mut conn, mut peer) = make_orphan_recovery_connection_with_peer();
+                        std::io::Write::write_all(&mut peer, &failure.failed_begin_reply())
+                            .expect("write dropped compensation fixture");
+                        let mut begin = Box::pin(conn.begin_with_isolation(
+                            &request_cx,
+                            IsolationLevel::Serializable,
+                            false,
+                        ));
+                        witness_managed_control_pending(
+                            begin.as_mut(),
+                            &mut peer,
+                            &isolation_compensation_requests(),
+                        )
+                        .await;
+                        if cancel_before_drop {
+                            request_cx.cancel_with_reason(CancelReason::user(
+                                "cancel before dropping compensation",
+                            ));
+                            // Arm the cancellation grace, then exercise its
+                            // hard-drop boundary without awaiting expiry.
+                            std::future::poll_fn(|task_cx| {
+                                assert!(begin.as_mut().poll(task_cx).is_pending());
+                                Poll::Ready(())
+                            })
+                            .await;
+                        }
+                        assert!(
+                            !request_cx
+                                .inner
+                                .read()
+                                .cancel_waker_registrations
+                                .is_empty()
+                        );
+                        drop(begin);
+                        assert!(
+                            request_cx
+                                .inner
+                                .read()
+                                .cancel_waker_registrations
+                                .is_empty()
+                        );
+                        assert_orphan_recovery_debt(&conn, false, "dropped begin compensation");
+                        assert!(matches!(
+                            conn.execute_unchecked(&active_cx, "UPDATE must_not_run SET v = 1")
+                                .await,
+                            Outcome::Err(PgError::ConnectionClosed)
+                        ));
+                        // Hard drop cannot await ROLLBACK. The quarantined
+                        // connection must stay unusable until it is disposed.
+                        drop(conn);
+                        assert_orphan_peer_closed(&mut peer, "dropped begin compensation");
+                    });
+                }
+            }
         }
     }
 

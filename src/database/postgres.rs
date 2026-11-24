@@ -7493,6 +7493,10 @@ impl PgConnection {
     ///
     /// The chosen level and read-only flag are recorded on the returned
     /// [`PgTransaction`] for introspection.
+    /// Verification failures run rollback cleanup before returning the original
+    /// error. After cancellation, that cleanup has the same bounded grace as
+    /// [`PgTransaction::rollback`]; an unanswered rollback retires the connection
+    /// and retains its rollback debt instead of admitting further operations.
     pub async fn begin_with_isolation(
         &mut self,
         cx: &Cx,
@@ -7593,19 +7597,39 @@ impl PgConnection {
         }
     }
 
+    fn transaction_cleanup_grace(&self) -> std::time::Duration {
+        self.inner
+            .options
+            .connect_timeout
+            .unwrap_or(self.inner.tls_options.connect_timeout_duration())
+            .min(std::time::Duration::from_millis(500))
+    }
+
     /// br-asupersync-9g47af — once `BEGIN ...` succeeds, any verification
     /// failure must either return the connection to idle or mark it for orphan
-    /// cleanup before the caller can reuse it.
+    /// cleanup before the caller can reuse it. Cancellation cannot leave this
+    /// internal rollback parked indefinitely on an unresponsive server.
     async fn rollback_isolated_begin_or_mark(&mut self, cx: &Cx) {
-        const MASKED_ROLLBACK_POLLS: u32 = 32;
-
-        match crate::combinator::commit_section(
+        let cleanup_grace = self.transaction_cleanup_grace();
+        let result = super::transaction::run_transaction_cleanup(
             cx,
-            MASKED_ROLLBACK_POLLS,
+            cleanup_grace,
             self.execute_transaction_control(cx, "ROLLBACK", PgTransactionControl::Rollback),
         )
-        .await
-        {
+        .await;
+        let Some(result) = result else {
+            // The pending cleanup has released its connection borrow. Keep
+            // the unanswered rollback debt and retire the actual socket even
+            // if the caller retains this connection after the failed begin.
+            self.inner.needs_rollback = true;
+            self.abort_in_flight_exchange();
+            let _ = cx.checkpoint();
+            cx.trace(
+                "begin_with_isolation cleanup grace expired; closed connection with rollback pending",
+            );
+            return;
+        };
+        match result {
             Outcome::Ok(_) => {}
             Outcome::Err(err) => {
                 self.inner.needs_rollback = true;
@@ -7625,6 +7649,12 @@ impl PgConnection {
                     "begin_with_isolation cleanup rollback panicked; marking connection for orphan cleanup",
                 );
             }
+        }
+        // The caller returns its original verification failure. Acknowledge
+        // cancellation outside cleanup's mask so the ordinary task boundary
+        // preserves that typed result instead of replacing it with task cancel.
+        if cx.is_cancel_requested() {
+            let _ = cx.checkpoint();
         }
     }
 
@@ -10898,13 +10928,7 @@ impl PgTransaction<'_> {
             return Outcome::Err(PgError::TransactionFinished);
         }
         trace_database_transaction(cx, "postgres", "rollback", "start");
-        let cleanup_grace = self
-            .conn
-            .inner
-            .options
-            .connect_timeout
-            .unwrap_or(self.conn.inner.tls_options.connect_timeout_duration())
-            .min(std::time::Duration::from_millis(500));
+        let cleanup_grace = self.conn.transaction_cleanup_grace();
         let result = super::transaction::run_transaction_cleanup(
             cx,
             cleanup_grace,
