@@ -47,6 +47,7 @@ use crate::runtime::region_table::RegionCreateError;
 use crate::runtime::resource_monitor::RegionPriority;
 use crate::runtime::spawn_mailbox::{
     AdmittedRegionSlot, RegionCommand, RegionLiveTasksQuery, SpawnGateway, TeardownWake,
+    wake_region_waiters,
 };
 use crate::types::{
     Budget, CancelReason, CapabilityBudget, CapabilityBudgetRequirements, RegionId, TaskId,
@@ -639,18 +640,37 @@ impl Future for RegionQuiescence {
     type Output = Result<(), ChildRegionError>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut state = self.state.lock();
-        if state.closed {
-            return Poll::Ready(Ok(()));
+        let needs_registration = {
+            let state = self.state.lock();
+            if state.closed {
+                return Poll::Ready(Ok(()));
+            }
+            !state
+                .waiters
+                .iter()
+                .any(|waker| waker.will_wake(cx.waker()))
+        };
+        if needs_registration {
+            // Cloning a RawWaker can reenter the runtime. Both that callback
+            // and retirement of a redundant clone must run outside the lock.
+            let mut candidate = Some(cx.waker().clone());
+            let closed = {
+                let mut state = self.state.lock();
+                if !state.closed
+                    && !state
+                        .waiters
+                        .iter()
+                        .any(|waker| waker.will_wake(cx.waker()))
+                {
+                    state.waiters.extend(candidate.take());
+                }
+                state.closed
+            };
+            drop(candidate);
+            if closed {
+                return Poll::Ready(Ok(()));
+            }
         }
-        if !state
-            .waiters
-            .iter()
-            .any(|waker| waker.will_wake(cx.waker()))
-        {
-            state.waiters.push(cx.waker().clone());
-        }
-        drop(state);
         // Checked after registering: teardown drops the liveness token and
         // then wakes this state's waiters, so a teardown racing this poll is
         // either seen here or wakes the registration above.
@@ -668,9 +688,7 @@ impl Future for RegionQuiescence {
 impl TeardownWake for Mutex<RegionCloseState> {
     fn wake_for_teardown(&self) {
         let waiters = std::mem::take(&mut self.lock().waiters);
-        for waker in waiters {
-            waker.wake();
-        }
+        wake_region_waiters(waiters);
     }
 }
 #[cfg(test)]

@@ -61,6 +61,242 @@ fn region_slot_abandonment_returns_or_discards_the_outcome() {
     assert!(abandoned_first.take().is_none(), "nobody would take it");
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+mod region_slot_callback_tests {
+    use super::*;
+    use std::task::{Wake, Waker};
+    use std::time::{Duration, Instant};
+
+    #[derive(Default)]
+    struct Counts {
+        wakes: AtomicUsize,
+        drops: AtomicUsize,
+        unlocked: AtomicUsize,
+        panic_payload_drops: AtomicUsize,
+    }
+
+    struct PayloadBomb(Arc<Counts>);
+
+    impl Drop for PayloadBomb {
+        fn drop(&mut self) {
+            self.0.panic_payload_drops.fetch_add(1, Ordering::SeqCst);
+            panic!("a contained region waiter panic payload must not be dropped");
+        }
+    }
+
+    struct SlotWaiter {
+        slot: Option<Weak<AdmittedRegionSlot>>,
+        counts: Arc<Counts>,
+        panic_wake: bool,
+        panic_drop: bool,
+    }
+
+    impl SlotWaiter {
+        fn observe(&self, waking: bool) {
+            if waking {
+                self.counts.wakes.fetch_add(1, Ordering::SeqCst);
+            } else {
+                self.counts.drops.fetch_add(1, Ordering::SeqCst);
+            }
+            if let Some(slot) = self.slot.as_ref().and_then(Weak::upgrade)
+                && slot.inner.try_lock().is_some()
+                && slot.waiters.try_lock().is_some()
+            {
+                self.counts.unlocked.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    impl Wake for SlotWaiter {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.observe(true);
+            if self.panic_wake {
+                std::panic::panic_any(PayloadBomb(Arc::clone(&self.counts)));
+            }
+        }
+    }
+
+    impl Drop for SlotWaiter {
+        fn drop(&mut self) {
+            self.observe(false);
+            if self.panic_drop {
+                std::panic::panic_any(PayloadBomb(Arc::clone(&self.counts)));
+            }
+        }
+    }
+
+    fn waiter(
+        slot: Option<&Arc<AdmittedRegionSlot>>,
+        counts: &Arc<Counts>,
+        panic_wake: bool,
+        panic_drop: bool,
+    ) -> Waker {
+        Waker::from(Arc::new(SlotWaiter {
+            slot: slot.map(Arc::downgrade),
+            counts: Arc::clone(counts),
+            panic_wake,
+            panic_drop,
+        }))
+    }
+
+    // Before containment, a wake plus final-owner Drop can abort, and a
+    // lost later publication can park a native opener forever. Bound both
+    // failure modes in a child process instead of risking the whole suite.
+    fn isolated(test_name: &str) -> bool {
+        const CHILD_ENV: &str = "ASUPERSYNC_REGION_SLOT_CALLBACK_CHILD";
+        if std::env::var_os(CHILD_ENV).as_deref() == Some(std::ffi::OsStr::new(test_name)) {
+            return true;
+        }
+        let mut child =
+            std::process::Command::new(std::env::current_exe().expect("test executable"))
+                .args([
+                    "--exact",
+                    &format!(
+                        "runtime::spawn_mailbox::tests::region_slot_callback_tests::{test_name}"
+                    ),
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(CHILD_ENV, test_name)
+                .env("RUST_BACKTRACE", "0")
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("run isolated region waiter regression");
+        let started = Instant::now();
+        let timed_out = loop {
+            if child.try_wait().expect("poll regression child").is_some() {
+                break false;
+            }
+            if started.elapsed() >= Duration::from_secs(30) {
+                break true;
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+        if timed_out {
+            let _ = child.kill();
+        }
+        let output = child.wait_with_output().expect("reap regression child");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !timed_out && output.status.success() && stdout.contains("1 passed; 0 failed"),
+            "region waiter regression failed (timeout={timed_out}): {}\n{stdout}\n{stderr}",
+            output.status
+        );
+        false
+    }
+
+    #[test]
+    fn publication_and_teardown_keep_every_waiter() {
+        if !isolated("publication_and_teardown_keep_every_waiter") {
+            return;
+        }
+        for publish in [false, true] {
+            for (panic_wake, panic_drop) in
+                [(false, false), (true, false), (false, true), (true, true)]
+            {
+                let slot = Arc::new(AdmittedRegionSlot::new());
+                let counts = Arc::new(Counts::default());
+                slot.register(waiter(Some(&slot), &counts, panic_wake, panic_drop));
+                slot.register(waiter(Some(&slot), &counts, false, false));
+                if publish {
+                    slot.publish(Err(region_create_failure()));
+                } else {
+                    slot.wake_waiters();
+                }
+                assert_eq!(counts.wakes.load(Ordering::SeqCst), 2);
+                assert_eq!(counts.drops.load(Ordering::SeqCst), 2);
+                assert_eq!(counts.unlocked.load(Ordering::SeqCst), 4);
+                assert_eq!(counts.panic_payload_drops.load(Ordering::SeqCst), 0);
+                assert!(slot.waiters.lock().is_empty());
+                assert_eq!(slot.is_pending(), !publish);
+                if publish {
+                    assert!(matches!(slot.take(), Some(Err(_))));
+                } else {
+                    assert!(slot.take().is_none());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn late_registration_contains_wake_and_final_owner_drop() {
+        if !isolated("late_registration_contains_wake_and_final_owner_drop") {
+            return;
+        }
+        for (panic_wake, panic_drop) in [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let slot = Arc::new(AdmittedRegionSlot::new());
+            slot.publish(Err(region_create_failure()));
+            let counts = Arc::new(Counts::default());
+            slot.register(waiter(Some(&slot), &counts, panic_wake, panic_drop));
+            assert_eq!(counts.wakes.load(Ordering::SeqCst), 1);
+            assert_eq!(counts.drops.load(Ordering::SeqCst), 1);
+            assert_eq!(counts.unlocked.load(Ordering::SeqCst), 2);
+            assert_eq!(counts.panic_payload_drops.load(Ordering::SeqCst), 0);
+            assert!(slot.waiters.lock().is_empty());
+            assert!(matches!(slot.take(), Some(Err(_))));
+        }
+    }
+
+    #[test]
+    fn native_batch_keeps_later_minted_children_owned_after_waker_panics() {
+        use crate::cx::ChildRegionSpec;
+        use crate::runtime::{RootDrainOutcome, RuntimeBuilder};
+
+        if !isolated("native_batch_keeps_later_minted_children_owned_after_waker_panics") {
+            return;
+        }
+        for sharded in [false, true] {
+            for (panic_wake, panic_drop) in [(true, false), (false, true), (true, true)] {
+                let runtime = RuntimeBuilder::current_thread()
+                    .with_sharded_state(sharded)
+                    .build()
+                    .unwrap();
+                let counts = Arc::new(Counts::default());
+                let callback_counts = Arc::clone(&counts);
+                let later_wakes = Arc::new(CountWakes(AtomicUsize::new(0)));
+                let later_callback = Arc::clone(&later_wakes);
+                runtime.block_on(async move {
+                    // The current-thread caller owns the sole worker loan
+                    // throughout this poll. Queue both creates and register
+                    // their waiters before the first await yields admission.
+                    let parent = crate::cx::Cx::current().expect("native root context");
+                    let mut first = parent.open_child_region(ChildRegionSpec::inherit());
+                    let mut later = parent.open_child_region(ChildRegionSpec::inherit());
+                    {
+                        let first_waker = waiter(None, &callback_counts, panic_wake, panic_drop);
+                        let mut context = Context::from_waker(&first_waker);
+                        assert!(Pin::new(&mut first).poll(&mut context).is_pending());
+                        let later_waker = Waker::from(later_callback);
+                        let mut context = Context::from_waker(&later_waker);
+                        assert!(Pin::new(&mut later).poll(&mut context).is_pending());
+                    }
+                    let first = first.await.expect("first child remains owned");
+                    let later = later.await.expect("later minted child is published");
+                    assert_ne!(first.region_id(), later.region_id());
+                    later.close().await.expect("later child reaches quiescence");
+                    first.close().await.expect("first child reaches quiescence");
+                });
+                assert_eq!(counts.wakes.load(Ordering::SeqCst), 1);
+                assert_eq!(counts.drops.load(Ordering::SeqCst), 1);
+                assert_eq!(counts.panic_payload_drops.load(Ordering::SeqCst), 0);
+                assert_eq!(later_wakes.0.load(Ordering::SeqCst), 1);
+                assert_eq!(
+                    runtime.drain_root_region(Duration::from_secs(5)),
+                    RootDrainOutcome::Quiescent
+                );
+                assert!(runtime.is_quiescent());
+            }
+        }
+    }
+}
+
 /// Embedded-table admission for the owner-pinned local lane, matching
 /// the production drain entry (`admit_local_spawn_request_in`).
 fn admit_local_embedded(

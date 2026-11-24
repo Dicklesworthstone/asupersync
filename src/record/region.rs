@@ -7,12 +7,12 @@ use crate::record::finalizer::{Finalizer, FinalizerStack};
 use crate::record::task::TaskOutcome;
 use crate::runtime::region_heap::{HeapIndex, RegionHeap};
 use crate::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
+use crate::sync::pl::RwLock;
 use crate::tracing_compat::{Span, debug, info_span, warn};
 use crate::types::rref::{RRef, RRefAccessWitness, RRefError};
 use crate::types::{
     Budget, CancelReason, CapabilityBudget, CurveBudget, RRefAccess, RegionId, TaskId, Time,
 };
-use crate::sync::pl::RwLock;
 use std::cell::Cell;
 use std::sync::{Arc, Weak};
 
@@ -2296,9 +2296,10 @@ impl RegionRecord {
                 notify.closed = true;
                 std::mem::take(&mut notify.waiters)
             };
-            for waker in waiters {
-                waker.wake();
-            }
+            // Recovery has the same foreign-callback boundary as ordinary
+            // close: isolate notification and retirement so a hostile waiter
+            // cannot suppress the remaining close notifications.
+            RegionCloseWakes { waiters }.dispatch();
         }
     }
 }

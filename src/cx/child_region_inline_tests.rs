@@ -774,6 +774,139 @@ impl std::task::Wake for CountWakes {
     }
 }
 
+#[test]
+fn quiescence_registration_retains_distinct_observers_and_deduplicates_repolls() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let state = Arc::new(Mutex::new(RegionCloseState {
+        closed: false,
+        waiters: Vec::new(),
+    }));
+    let mut first = Box::pin(RegionQuiescence::watch(&state, None));
+    let mut second = Box::pin(RegionQuiescence::watch(&state, None));
+    let first_wakes = Arc::new(CountWakes(AtomicUsize::new(0)));
+    let second_wakes = Arc::new(CountWakes(AtomicUsize::new(0)));
+    let first_waker = std::task::Waker::from(Arc::clone(&first_wakes));
+    let second_waker = std::task::Waker::from(Arc::clone(&second_wakes));
+    let mut first_context = Context::from_waker(&first_waker);
+    let mut second_context = Context::from_waker(&second_waker);
+
+    assert!(first.as_mut().poll(&mut first_context).is_pending());
+    assert!(first.as_mut().poll(&mut first_context).is_pending());
+    assert!(second.as_mut().poll(&mut second_context).is_pending());
+    assert_eq!(state.lock().waiters.len(), 2);
+    drop(first);
+    state.lock().closed = true;
+    state.wake_for_teardown();
+    assert_eq!(first_wakes.0.load(Ordering::SeqCst), 1);
+    assert_eq!(second_wakes.0.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        second.as_mut().poll(&mut second_context),
+        Poll::Ready(Ok(()))
+    ));
+    assert!(state.lock().waiters.is_empty());
+}
+
+#[test]
+fn teardown_notifies_every_quiescence_observer_after_a_callback_panics() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Wake, Waker};
+
+    #[derive(Default)]
+    struct Observations {
+        wakes: AtomicUsize,
+        drops: AtomicUsize,
+        locked_callbacks: AtomicUsize,
+    }
+
+    struct Probe {
+        state: Weak<Mutex<RegionCloseState>>,
+        observations: Arc<Observations>,
+        panic_on_wake: bool,
+        panic_on_drop: bool,
+    }
+
+    impl Probe {
+        fn observe_lock(&self) {
+            if self
+                .state
+                .upgrade()
+                .is_some_and(|state| state.try_lock().is_none())
+            {
+                self.observations
+                    .locked_callbacks
+                    .fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    impl Wake for Probe {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.observe_lock();
+            self.observations.wakes.fetch_add(1, Ordering::SeqCst);
+            assert!(!self.panic_on_wake, "injected close observer wake panic");
+        }
+    }
+
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            self.observe_lock();
+            self.observations.drops.fetch_add(1, Ordering::SeqCst);
+            assert!(!self.panic_on_drop, "injected close observer drop panic");
+        }
+    }
+
+    // Separate wake and destructor failures keep the regression safe to run
+    // against the old consuming-wake implementation as well.
+    for (panic_on_wake, panic_on_drop) in [(true, false), (false, true)] {
+        let state = Arc::new(Mutex::new(RegionCloseState {
+            closed: false,
+            waiters: Vec::new(),
+        }));
+        let first = Arc::new(Observations::default());
+        let second = Arc::new(Observations::default());
+        let mut observers = Vec::new();
+        for (observations, wake_panic, drop_panic) in [
+            (Arc::clone(&first), panic_on_wake, panic_on_drop),
+            (Arc::clone(&second), false, false),
+        ] {
+            let waker = Waker::from(Arc::new(Probe {
+                state: Arc::downgrade(&state),
+                observations,
+                panic_on_wake: wake_panic,
+                panic_on_drop: drop_panic,
+            }));
+            let mut observer = Box::pin(RegionQuiescence::watch(&state, None));
+            assert!(
+                observer
+                    .as_mut()
+                    .poll(&mut Context::from_waker(&waker))
+                    .is_pending()
+            );
+            observers.push(observer);
+            // The queued registration now owns the final waker handle.
+            drop(waker);
+        }
+        let dispatch = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            state.wake_for_teardown();
+        }));
+        assert!(dispatch.is_ok(), "a callback must not escape teardown");
+        for observations in [&first, &second] {
+            assert_eq!(observations.wakes.load(Ordering::SeqCst), 1);
+            assert_eq!(observations.drops.load(Ordering::SeqCst), 1);
+            assert_eq!(observations.locked_callbacks.load(Ordering::SeqCst), 0);
+        }
+        assert!(state.lock().waiters.is_empty());
+        assert!(!state.lock().closed, "teardown does not invent quiescence");
+        state.wake_for_teardown();
+        assert_eq!(second.wakes.load(Ordering::SeqCst), 1);
+    }
+}
+
 /// A close awaited outside the runtime is woken by the runtime's teardown
 /// and fails closed, instead of pending forever on a region that can no
 /// longer finish closing (the monitor-watch teardown shape, werypv).

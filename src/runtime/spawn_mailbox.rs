@@ -63,12 +63,12 @@ use crate::runtime::scheduler::global_queue::GlobalFifoQueue;
 use crate::runtime::state::SpawnError;
 use crate::runtime::stored_task::StoredTask;
 use crate::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use crate::sync::pl::{Mutex, RwLock};
 use crate::trace::TraceBufferHandle;
 use crate::trace::event::TraceEvent;
 use crate::types::Outcome;
 use crate::types::{Budget, CancelReason, RegionId, TaskId, Time};
 use crate::util::{ArenaIndex, CachePadded};
-use crate::sync::pl::{Mutex, RwLock};
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
@@ -1908,6 +1908,17 @@ impl BranchRegionSlot {
     }
 }
 
+/// Delivers every detached region waiter without unwinding its publisher.
+///
+/// A scheduler turn can already own several minted regions awaiting
+/// publication. A callback failure in one slot must not discard those later
+/// outcomes and leave their regions without an owner. The shared dispatcher
+/// isolates wake and final-owner destruction separately; this outer boundary
+/// also contains its first panic and never destroys an opaque panic payload.
+pub(crate) fn wake_region_waiters(waiters: impl IntoIterator<Item = std::task::Waker>) {
+    contain_denied_cleanup(|| crate::runtime::io_driver::wake_each(waiters));
+}
+
 /// One-shot slot the worker fills when a `RegionCommand::Create` resolves.
 ///
 /// Mirrors the publish-after-admission discipline of [`AdmittedTaskSlot`]:
@@ -1976,9 +1987,7 @@ impl AdmittedRegionSlot {
         if let Some(Ok(admitted)) = orphan {
             drop(crate::cx::ChildRegion::<crate::cx::cap::All>::from_admitted(admitted));
         }
-        for waker in waiters {
-            waker.wake();
-        }
+        wake_region_waiters(waiters);
     }
 
     /// Returns the published outcome, taking it out of the slot.
@@ -2002,7 +2011,7 @@ impl AdmittedRegionSlot {
         let inner = self.inner.lock();
         if self.published.load(Ordering::Acquire) {
             drop(inner);
-            waker.wake_by_ref();
+            wake_region_waiters([waker]);
             return;
         }
         let mut waiters = self.waiters.lock();
@@ -2024,9 +2033,7 @@ impl AdmittedRegionSlot {
             let _inner = self.inner.lock();
             std::mem::take(&mut *self.waiters.lock())
         };
-        for waker in waiters {
-            waker.wake();
-        }
+        wake_region_waiters(waiters);
     }
 
     /// Marks the slot as abandoned by its only consumer and returns an
@@ -2467,38 +2474,38 @@ impl SpawnGateway {
     ) -> Result<(), SpawnError> {
         #[cfg(feature = "full-runtime")]
         {
-        let Some(key) = self.required_spawn_key.get() else {
-            return Ok(());
-        };
-        let denied = || SpawnError::AuthorizationDenied {
-            region,
-            cx_id: authority.map_or_else(
-                || "missing caller capability".to_owned(),
-                |authority| format!("{:?}", authority.caller),
-            ),
-        };
-        let authority = authority.ok_or_else(denied)?;
-        let token = authority.token.as_ref().ok_or_else(denied)?;
-        let mut context = crate::cx::macaroon::VerificationContext::new()
-            .with_region(region.as_u64())
-            .with_task(authority.caller.as_u64())
-            .with_resource(format!("regions/{}/spawn", region.as_u64()))
-            .with_custom("operation", "spawn")
-            .with_custom("poll_quota", budget.poll_quota.to_string())
-            .with_custom("priority", budget.priority.to_string())
-            .with_custom(
-                "cost_quota",
-                budget
-                    .cost_quota
-                    .map_or_else(|| "unlimited".to_owned(), |cost| cost.to_string()),
-            );
-        context.current_time_ms = self.clock.as_ref().map(|clock| clock.now().as_millis());
-        if let Some(deadline) = budget.deadline {
-            context = context.with_custom("deadline_ms", deadline.as_millis().to_string());
-        }
-        token
-            .verify_for_identifier(key, &format!("spawn:region_{}", region.as_u64()), &context)
-            .map_err(|_| denied())
+            let Some(key) = self.required_spawn_key.get() else {
+                return Ok(());
+            };
+            let denied = || SpawnError::AuthorizationDenied {
+                region,
+                cx_id: authority.map_or_else(
+                    || "missing caller capability".to_owned(),
+                    |authority| format!("{:?}", authority.caller),
+                ),
+            };
+            let authority = authority.ok_or_else(denied)?;
+            let token = authority.token.as_ref().ok_or_else(denied)?;
+            let mut context = crate::cx::macaroon::VerificationContext::new()
+                .with_region(region.as_u64())
+                .with_task(authority.caller.as_u64())
+                .with_resource(format!("regions/{}/spawn", region.as_u64()))
+                .with_custom("operation", "spawn")
+                .with_custom("poll_quota", budget.poll_quota.to_string())
+                .with_custom("priority", budget.priority.to_string())
+                .with_custom(
+                    "cost_quota",
+                    budget
+                        .cost_quota
+                        .map_or_else(|| "unlimited".to_owned(), |cost| cost.to_string()),
+                );
+            context.current_time_ms = self.clock.as_ref().map(|clock| clock.now().as_millis());
+            if let Some(deadline) = budget.deadline {
+                context = context.with_custom("deadline_ms", deadline.as_millis().to_string());
+            }
+            token
+                .verify_for_identifier(key, &format!("spawn:region_{}", region.as_u64()), &context)
+                .map_err(|_| denied())
         }
         #[cfg(not(feature = "full-runtime"))]
         {
