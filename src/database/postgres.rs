@@ -10592,9 +10592,10 @@ impl PgTransaction<'_> {
 
     #[must_use]
     pub(crate) fn requires_rollback_before_commit(&self) -> bool {
-        self.conn.inner.needs_rollback
-            || self.conn.inner.needs_discard
-            || self.conn.inner.transaction_status == b'E'
+        // Session-changing commands also set needs_discard, even when the
+        // current transaction is healthy (for example, SET LOCAL). That
+        // marker controls pool reuse, not whether this transaction may commit.
+        self.conn.inner.needs_rollback || self.conn.inner.transaction_status == b'E'
     }
 
     pub(crate) fn poison_for_rollback(&mut self) {
@@ -10643,7 +10644,7 @@ impl PgTransaction<'_> {
         // needs_discard alone (set by any session-changing statement, such as
         // SET LOCAL) keeps the connection out of the pool but does not stop a
         // commit.
-        if self.conn.inner.needs_rollback || self.conn.inner.transaction_status == b'E' {
+        if self.requires_rollback_before_commit() {
             trace_database_transaction(cx, "postgres", "commit", "err");
             return Outcome::Err(PgError::Protocol(
                 "transaction must roll back before commit".to_string(),

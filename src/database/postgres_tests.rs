@@ -8597,6 +8597,263 @@ mod tests {
         );
     }
 
+    fn run_set_local_helper_case(workers: usize, retry: bool, abandoned_savepoint: bool) {
+        use crate::database::pool::AsyncConnectionManager;
+        use crate::database::transaction::{
+            PgSavepoint, RetryPolicy, ScopedTransactionFuture, TransactionReplaySafety,
+            with_pg_transaction_retry_with_state, with_pg_transaction_with_state,
+        };
+
+        const SET_LOCAL: &str = "SET LOCAL application_name = 'borrowed_helper'";
+        const WRITE: &str = "UPDATE helper_items SET value = value + 1";
+        const REUSE: &str = "UPDATE helper_items SET value = value + 0";
+        const DEADLINE: Duration = Duration::from_secs(10);
+
+        struct CompletionSignal(std::sync::mpsc::Sender<()>);
+
+        impl Drop for CompletionSignal {
+            fn drop(&mut self) {
+                // Panicking or dropping the task must release the host wait.
+                let _ = self.0.send(());
+            }
+        }
+
+        struct State<'a> {
+            sql: &'a str,
+            pending: &'a std::sync::mpsc::Sender<()>,
+            attempts: &'a mut usize,
+            abandoned_savepoint: bool,
+        }
+
+        async fn body(
+            tx: &mut PgTransaction<'_>,
+            cx: &Cx,
+            state: &mut State<'_>,
+        ) -> Outcome<u64, PgError> {
+            let set_result = {
+                let mut set = std::pin::pin!(tx.execute_unchecked(cx, state.sql));
+                let mut reported = false;
+                std::future::poll_fn(|task_cx| {
+                    let result = set.as_mut().poll(task_cx);
+                    if result.is_pending() && !reported {
+                        state.pending.send(()).expect("SET LOCAL Pending witness");
+                        reported = true;
+                    }
+                    result
+                })
+                .await
+            };
+            assert_eq!(set_result.unwrap(), 0);
+            // Establish the formerly failing state through the real command
+            // path: SET has marked the session for pool discard, while the
+            // transaction remains open and has no rollback obligation.
+            assert!(tx.conn.inner.needs_discard);
+            assert!(!tx.conn.inner.needs_rollback);
+            assert_eq!(tx.conn.inner.transaction_status, b'T');
+            let affected = tx.execute_unchecked(cx, WRITE).await.unwrap();
+            assert_eq!(affected, 1);
+            if state.abandoned_savepoint {
+                let savepoint = PgSavepoint::new(tx, cx, "unfinished").await.unwrap();
+                drop(savepoint);
+                assert!(tx.conn.inner.needs_rollback);
+            }
+            *state.attempts += 1;
+            Outcome::Ok(affected)
+        }
+
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        let (pending, pending_rx) = std::sync::mpsc::channel();
+        let (peer_completed, peer_completed_rx) = std::sync::mpsc::channel();
+        let responder = move || {
+            peer.set_write_timeout(Some(DEADLINE))
+                .expect("peer write deadline");
+            for (sql, tag) in [("BEGIN", "BEGIN"), (SET_LOCAL, "SET"), (WRITE, "UPDATE 1")] {
+                assert_eq!(
+                    read_frontend_frame(&mut peer),
+                    (b'Q', format!("{sql}\0").into_bytes())
+                );
+                if sql == SET_LOCAL {
+                    pending_rx
+                        .recv_timeout(DEADLINE)
+                        .expect("SET LOCAL must park before its reply");
+                }
+                reply_complete(&mut peer, tag, b'T');
+            }
+            if abandoned_savepoint {
+                assert_eq!(
+                    read_frontend_frame(&mut peer),
+                    (b'Q', b"SAVEPOINT unfinished\0".to_vec())
+                );
+                reply_complete(&mut peer, "SAVEPOINT", b'T');
+                let mut rollbacks = 0;
+                loop {
+                    let command = read_frontend_frame(&mut peer);
+                    if command == (b'Q', b"ROLLBACK\0".to_vec()) {
+                        rollbacks += 1;
+                        // The connection may first drain the orphan marker
+                        // before executing the explicit rollback. Permit that
+                        // existing extra cleanup, but never COMMIT or a loop.
+                        assert!(rollbacks <= 2, "rollback cleanup must terminate");
+                        reply_complete(&mut peer, "ROLLBACK", b'I');
+                    } else {
+                        assert!(rollbacks > 0, "rollback must precede reuse");
+                        assert_eq!(command, (b'Q', format!("{REUSE}\0").into_bytes()));
+                        break;
+                    }
+                }
+            } else {
+                assert_eq!(read_frontend_frame(&mut peer), (b'Q', b"COMMIT\0".to_vec()));
+                reply_complete(&mut peer, "COMMIT", b'I');
+                assert_eq!(
+                    read_frontend_frame(&mut peer),
+                    (b'Q', format!("{REUSE}\0").into_bytes())
+                );
+            }
+            reply_complete(&mut peer, "UPDATE 1", b'I');
+            assert_eq!(read_frontend_frame(&mut peer), (b'X', Vec::new()));
+        };
+        let _responder = std::thread::spawn(move || {
+            // The closure owns the socket and releases it before publishing
+            // either success or a protocol assertion panic to the host.
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(responder));
+            let _ = peer_completed.send(result);
+        });
+
+        let runtime = crate::runtime::RuntimeBuilder::multi_thread()
+            .worker_threads(workers)
+            .with_reactor(crate::runtime::reactor::create_reactor().expect("native reactor"))
+            .build()
+            .expect("native SET LOCAL helper runtime");
+        let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+        let completion = CompletionSignal(completed_tx);
+        let task = runtime.handle().spawn(async move {
+            // Capture the guard before the first poll, including cancellation
+            // or dropping an unpolled scenario in the completion signal.
+            let _completion = completion;
+            let cx = Cx::current().expect("native helper context");
+            let sql = String::from(SET_LOCAL);
+            let mut attempts = 0;
+            let mut state = State {
+                sql: sql.as_str(),
+                pending: &pending,
+                attempts: &mut attempts,
+                abandoned_savepoint,
+            };
+            let outcome = if retry {
+                let policy = RetryPolicy {
+                    max_retries: 1,
+                    base_delay: Duration::ZERO,
+                    max_delay: Duration::ZERO,
+                };
+                with_pg_transaction_retry_with_state(
+                    &mut conn,
+                    &cx,
+                    &policy,
+                    TransactionReplaySafety::ReplaySafe,
+                    &mut state,
+                    |tx, cx, state| ScopedTransactionFuture::new(body(tx, cx, state)),
+                )
+                .await
+            } else {
+                with_pg_transaction_with_state(&mut conn, &cx, &mut state, |tx, cx, state| {
+                    ScopedTransactionFuture::new(body(tx, cx, state))
+                })
+                .await
+            };
+            assert_eq!(
+                attempts, 1,
+                "session changes or poison must not replay the body"
+            );
+            if abandoned_savepoint {
+                assert!(matches!(outcome, Outcome::Err(PgError::Protocol(message))
+                        if message == "transaction must roll back before commit"));
+            } else {
+                assert!(
+                    matches!(outcome, Outcome::Ok(1)),
+                    "SET LOCAL must allow commit: {outcome:?}"
+                );
+                assert!(
+                    conn.needs_discard(),
+                    "successful commit must retain pool hygiene"
+                );
+                let manager = PgConnectionManager::new(
+                    PgConnectOptions::parse("postgres://localhost/testdb").unwrap(),
+                );
+                assert!(
+                    !manager.release_check(&mut conn),
+                    "a marked session cannot return to the pool"
+                );
+            }
+            assert_eq!(conn.inner.transaction_status, b'I');
+            assert!(
+                !conn.inner.needs_rollback,
+                "helper cleanup must finish before return"
+            );
+            assert!(!conn.inner.closed);
+            assert!(matches!(
+                conn.execute_unchecked(&cx, REUSE).await,
+                Outcome::Ok(1)
+            ));
+            conn.close().await.unwrap();
+        });
+        // This deadline does not depend on a native worker, timer, or wake.
+        // Preserve the original result if shutdown later unblocks the task.
+        let completed = completed_rx.recv_timeout(DEADLINE);
+        let shutdown = runtime.shutdown_drained(DEADLINE);
+        let stopped = runtime.shutdown_timeout(DEADLINE);
+        let peer_result = peer_completed_rx.recv_timeout(DEADLINE);
+        // Both bounded cleanup phases and the bounded peer wait finish before
+        // any assertion or stored panic can escape. Poll once, never block_on.
+        let mut task = std::pin::pin!(task);
+        let task_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            task.as_mut()
+                .poll(&mut Context::from_waker(std::task::Waker::noop()))
+        }));
+        assert!(
+            completed.is_ok(),
+            "workers={workers} retry={retry} abandoned_savepoint={abandoned_savepoint}: helper did not finish within {DEADLINE:?}: {completed:?}; drain: {shutdown:?}"
+        );
+        assert_eq!(
+            shutdown.outcome,
+            crate::runtime::RootDrainOutcome::Quiescent
+        );
+        assert_eq!(shutdown.live_tasks, 0);
+        assert_eq!(shutdown.pending_spawns, 0);
+        assert_eq!(shutdown.pending_obligations, 0);
+        assert_eq!(shutdown.queued_finalizers, 0);
+        assert!(stopped, "native workers must retire");
+        match task_result {
+            Ok(Poll::Ready(())) => {}
+            Ok(Poll::Pending) => panic!("helper task must be ready after native workers retire"),
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+        match peer_result {
+            Ok(Ok(())) => {}
+            Ok(Err(payload)) => std::panic::resume_unwind(payload),
+            Err(error) => {
+                panic!("SET LOCAL transaction peer did not finish within {DEADLINE:?}: {error}")
+            }
+        }
+    }
+
+    #[test]
+    fn set_local_helpers_commit_without_clearing_pool_discard() {
+        for workers in [1, 2] {
+            for retry in [false, true] {
+                run_set_local_helper_case(workers, retry, false);
+            }
+        }
+    }
+
+    #[test]
+    fn set_local_helpers_still_refuse_an_abandoned_savepoint() {
+        for workers in [1, 2] {
+            for retry in [false, true] {
+                run_set_local_helper_case(workers, retry, true);
+            }
+        }
+    }
+
     #[test]
     fn execute_rejects_row_returning_response() {
         let (mut conn, mut peer) = make_test_connection_with_peer();
