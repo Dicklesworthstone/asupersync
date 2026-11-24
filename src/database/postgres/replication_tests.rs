@@ -985,3 +985,262 @@ fn control_translates_poller_deadlines_to_the_original_clock() {
     assert!(owner.inner.read().cancel_waker_registrations.is_empty());
     assert!(poller.inner.read().cancel_waker_registrations.is_empty());
 }
+
+// Scripted TCP peers below exercise the public setup -> snapshot -> stream
+// path. These are wire/lifecycle regressions, not live-server MVCC proof.
+fn expect_slot_query(socket: &mut TcpStream, command: &str) {
+    let (tag, data) = receive(socket);
+    assert_eq!(tag, b'Q', "replication control uses simple Query framing");
+    let mut expected = command.as_bytes().to_vec();
+    expected.push(0);
+    assert_eq!(data, expected);
+}
+
+fn slot_command_complete(command: &str, state: u8) -> Vec<u8> {
+    let mut tag = command.as_bytes().to_vec();
+    tag.push(0);
+    let mut bytes = frame(b'C', &tag);
+    bytes.extend(frame(b'Z', &[state]));
+    bytes
+}
+
+fn slot_result(
+    columns: &[(&str, i32)],
+    values: &[Option<&str>],
+    command: &str,
+    state: u8,
+) -> Vec<u8> {
+    assert_eq!(columns.len(), values.len());
+    let mut description = i16::try_from(columns.len()).unwrap().to_be_bytes().to_vec();
+    for (name, oid) in columns {
+        description.extend_from_slice(name.as_bytes());
+        description.push(0);
+        description.extend_from_slice(&0i32.to_be_bytes());
+        description.extend_from_slice(&0i16.to_be_bytes());
+        description.extend_from_slice(&oid.to_be_bytes());
+        description.extend_from_slice(&(-1i16).to_be_bytes());
+        description.extend_from_slice(&(-1i32).to_be_bytes());
+        description.extend_from_slice(&0i16.to_be_bytes());
+    }
+    let mut row = i16::try_from(values.len()).unwrap().to_be_bytes().to_vec();
+    for value in values {
+        if let Some(value) = value {
+            row.extend_from_slice(&i32::try_from(value.len()).unwrap().to_be_bytes());
+            row.extend_from_slice(value.as_bytes());
+        } else {
+            row.extend_from_slice(&(-1i32).to_be_bytes());
+        }
+    }
+    let mut bytes = frame(b'T', &description);
+    bytes.extend(frame(b'D', &row));
+    bytes.extend(slot_command_complete(command, state));
+    bytes
+}
+
+fn created_slot_response(snapshot: Option<&str>) -> Vec<u8> {
+    slot_result(
+        &[("slot_name", 25), ("consistent_point", 25), ("snapshot_name", 25), ("output_plugin", 25)],
+        &[Some("slot_1"), Some("0/42"), snapshot, Some("pgoutput")],
+        "CREATE_REPLICATION_SLOT",
+        b'I',
+    )
+}
+
+fn snapshot_transaction_peer(listener: &TcpListener) -> TcpStream {
+    let mut socket = accept(listener);
+    let mut length = [0; 4];
+    socket.read_exact(&mut length).unwrap();
+    let len = i32::from_be_bytes(length);
+    assert!((8..4096).contains(&len));
+    let mut bytes = length.to_vec();
+    bytes.resize(len as usize, 0);
+    socket.read_exact(&mut bytes[4..]).unwrap();
+    let startup = parse_startup_message(&bytes).unwrap();
+    assert!(!startup.parameters.contains_key("replication"));
+    assert_eq!(startup.parameters.get("database").map(String::as_str), Some("application"));
+    authenticate(&mut socket);
+    expect_slot_query(&mut socket, "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    socket.write_all(&slot_command_complete("BEGIN", b'T')).unwrap();
+    expect_slot_query(&mut socket, "SHOW transaction_isolation");
+    socket.write_all(&slot_result(
+        &[("transaction_isolation", 25)], &[Some("repeatable read")], "SHOW", b'T',
+    )).unwrap();
+    socket
+}
+
+#[test]
+fn native_replication_bootstraps_snapshot_then_streams_from_its_consistent_point() {
+    use super::super::IsolationLevel;
+    for workers in [1, 2] {
+        let (listener, url) = listener();
+        let peer = std::thread::spawn(move || {
+            let mut socket = accept(&listener);
+            startup(&mut socket);
+            authenticate(&mut socket);
+            expect_slot_query(&mut socket, "IDENTIFY_SYSTEM");
+            socket.write_all(&slot_result(
+                &[("systemid", 25), ("timeline", 20), ("xlogpos", 25), ("dbname", 25)],
+                &[Some("7341279311200193942"), Some("3"), Some("0/80"), Some("application")],
+                "IDENTIFY_SYSTEM", b'I',
+            )).unwrap();
+            expect_slot_query(&mut socket, "CREATE_REPLICATION_SLOT \"slot_1\" LOGICAL pgoutput EXPORT_SNAPSHOT");
+            socket.write_all(&created_slot_response(Some("00000003-0000001B-1"))).unwrap();
+            let mut copy = snapshot_transaction_peer(&listener);
+            expect_slot_query(&mut copy, "SET TRANSACTION SNAPSHOT '00000003-0000001B-1'");
+            copy.write_all(&slot_command_complete("SET", b'T')).unwrap();
+            expect_slot_query(&mut copy, "SELECT id FROM initial_copy");
+            copy.write_all(&slot_result(&[("id", 23)], &[Some("7")], "SELECT 1", b'T')).unwrap();
+            expect_slot_query(&mut copy, "COMMIT");
+            copy.write_all(&slot_command_complete("COMMIT", b'I')).unwrap();
+            expect_slot_query(&mut socket, "START_REPLICATION SLOT \"slot_1\" LOGICAL 0/42 (proto_version '1', publication_names '\"pub\"')");
+            let mut bytes = frame(b'W', &[0, 0, 0]);
+            bytes.extend(wal(&begin()));
+            bytes.extend(keepalive(0x200, true));
+            socket.write_all(&bytes).unwrap();
+            // Neither slot setup, snapshot import, nor decoding acknowledges WAL.
+            assert_feedback(&mut socket, [0, 0, 0]);
+            finish_peer(&mut socket);
+        });
+        let runtime = runtime(workers);
+        runtime.block_on(async {
+            let cx = Cx::current().unwrap();
+            let wakes = cancel_waker_tokens(&cx);
+            let mut connection = ok(PgReplicationConnection::connect(&cx, &url).await);
+            let identity = ok(connection.identify_system(&cx).await);
+            assert_eq!(identity.system_id, 7_341_279_311_200_193_942);
+            assert_eq!(identity.timeline, 3);
+            assert_eq!(identity.database.as_deref(), Some("application"));
+            let slot = ok(connection.create_slot(&cx, PgReplicationSlotOptions::new("slot_1").unwrap()).await);
+            assert_eq!(slot.snapshot_name(), Some("00000003-0000001B-1"));
+            assert_eq!(slot.consistent_point(), PgLsn::new(0x42));
+            assert!(!slot.is_temporary());
+            let config = slot.replication_config(["pub"]).unwrap();
+            let mut copy = ok(PgConnection::connect(&cx, &url).await);
+            let mut transaction = match copy.begin_with_isolation(&cx, IsolationLevel::RepeatableRead, true).await {
+                Outcome::Ok(transaction) => transaction,
+                _ => panic!("snapshot transaction failed to begin"),
+            };
+            ok(slot.import_snapshot(&cx, &mut transaction).await);
+            drop(slot);
+            // An imported snapshot belongs to its transaction after the
+            // replication-side borrow has been released.
+            let rows = ok(transaction.query_unchecked(&cx, "SELECT id FROM initial_copy").await);
+            assert_eq!(rows[0].get_i32("id").unwrap(), 7);
+            ok(transaction.commit(&cx).await);
+            let mut stream = ok(connection.start(&cx, config).await);
+            assert!(matches!(ok(stream.next(&cx).await).unwrap().pgoutput().unwrap(), Some(PgOutputMessage::Begin { xid: 42, .. })));
+            assert!(matches!(ok(stream.next(&cx).await), Some(PgReplicationEvent::PrimaryKeepAlive { reply_requested: true, .. })));
+            assert_eq!(stream.feedback(), PgReplicationFeedback::default());
+            ok(stream.finish(&cx).await);
+            assert_eq!(cancel_waker_tokens(&cx), wakes);
+        });
+        peer.join().unwrap();
+        assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+    }
+}
+
+#[test]
+fn native_replication_slot_flags_and_explicit_drop_preserve_control_reuse() {
+    for workers in [1, 2] {
+        let (listener, url) = listener();
+        let peer = std::thread::spawn(move || {
+            let mut socket = accept(&listener);
+            startup(&mut socket);
+            authenticate(&mut socket);
+            expect_slot_query(&mut socket, "CREATE_REPLICATION_SLOT \"slot_1\" TEMPORARY LOGICAL pgoutput (TWO_PHASE true, SNAPSHOT 'nothing')");
+            socket.write_all(&created_slot_response(None)).unwrap();
+            expect_slot_query(&mut socket, "DROP_REPLICATION_SLOT \"slot_1\" WAIT");
+            socket.write_all(&slot_command_complete("DROP_REPLICATION_SLOT", b'I')).unwrap();
+            expect_slot_query(&mut socket, "IDENTIFY_SYSTEM");
+            socket.write_all(&slot_result(
+                &[("systemid", 25), ("timeline", 23), ("xlogpos", 25), ("dbname", 25)],
+                &[Some("1"), Some("1"), Some("0/80"), Some("application")],
+                "IDENTIFY_SYSTEM", b'I',
+            )).unwrap();
+            closed(&mut socket);
+        });
+        let runtime = runtime(workers);
+        runtime.block_on(async {
+            let cx = Cx::current().unwrap();
+            let mut connection = ok(PgReplicationConnection::connect(&cx, &url).await);
+            let options = PgReplicationSlotOptions::new("slot_1").unwrap()
+                .temporary(true).two_phase(true).export_snapshot(false);
+            let slot = ok(connection.create_slot(&cx, options).await);
+            assert!(slot.is_temporary());
+            assert!(slot.snapshot_name().is_none());
+            assert!(slot.replication_config(["pub"]).unwrap().start_command().unwrap().contains("proto_version '3'"));
+            drop(slot);
+            assert!(matches!(connection.drop_slot(&cx, "invalid;slot", true).await, Outcome::Err(PgError::Protocol(_))));
+            ok(connection.drop_slot(&cx, "slot_1", true).await);
+            assert_eq!(ok(connection.identify_system(&cx).await).timeline, 1);
+        });
+        peer.join().unwrap();
+        assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+    }
+}
+
+#[test]
+fn native_replication_control_rejects_oversized_error_and_ambiguous_drop_without_replay() {
+    for workers in [1, 2] {
+        for case in 0..3 {
+            let (listener, url) = listener();
+            let requested = Arc::new(AtomicBool::new(false));
+            let peer = {
+                let requested = Arc::clone(&requested);
+                std::thread::spawn(move || {
+                    let mut socket = accept(&listener);
+                    startup(&mut socket);
+                    authenticate(&mut socket);
+                    expect_slot_query(&mut socket, "CREATE_REPLICATION_SLOT \"slot_1\" LOGICAL pgoutput EXPORT_SNAPSHOT");
+                    match case {
+                        0 => {
+                            let mut header = vec![b'T'];
+                            header.extend_from_slice(&(16_385i32 + 4).to_be_bytes());
+                            socket.write_all(&header).unwrap();
+                        }
+                        1 => socket.write_all(&frame(b'E', b"SERROR\0C42710\0Mslot already exists\0\0")).unwrap(),
+                        _ => socket.write_all(&[b'T', 0, 0]).unwrap(),
+                    }
+                    requested.store(true, Ordering::Release);
+                    closed(&mut socket);
+                })
+            };
+            let runtime = runtime(workers);
+            runtime.block_on(async {
+                let cx = Cx::current().unwrap();
+                let wakes = cancel_waker_tokens(&cx);
+                let mut connection = ok(PgReplicationConnection::connect(&cx, &url).await);
+                let options = PgReplicationSlotOptions::new("slot_1").unwrap();
+                if case == 2 {
+                    let mut future = Box::pin(connection.create_slot(&cx, options));
+                    poll_fn(|task| {
+                        assert!(future.as_mut().poll(task).is_pending());
+                        if requested.load(Ordering::Acquire) {
+                            Poll::Ready(())
+                        } else {
+                            task.waker().wake_by_ref();
+                            Poll::Pending
+                        }
+                    }).await;
+                    drop(future);
+                } else {
+                    let outcome = connection.create_slot(&cx, options).await;
+                    if case == 1 {
+                        assert!(matches!(outcome, Outcome::Err(PgError::Server { code, .. }) if code == "42710"));
+                    } else {
+                        assert!(matches!(outcome, Outcome::Err(PgError::Protocol(_))));
+                    }
+                }
+                let raw = connection.connection.as_ref().unwrap();
+                assert!(raw.inner.closed);
+                if case == 0 {
+                    assert!(raw.inner.backend_frame.body.is_empty(), "oversized body was allocated");
+                }
+                assert!(matches!(connection.identify_system(&cx).await, Outcome::Err(PgError::ConnectionClosed)));
+                assert_eq!(cancel_waker_tokens(&cx), wakes);
+            });
+            peer.join().unwrap();
+            assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+        }
+    }
+}

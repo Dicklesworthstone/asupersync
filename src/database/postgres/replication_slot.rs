@@ -1,5 +1,6 @@
 //! Explicit logical-slot setup and a borrowed exported-snapshot lifetime.
 
+use super::super::{IsolationLevel, PgTransaction};
 use super::{
     Cx, FrontendMessage, MessageBuffer, MessageReader, Outcome, PendingWrite, PgConnection,
     PgError, PgLsn, PgReplicationConfig, PgReplicationConnection, ReplicationControl, WriteKind,
@@ -106,8 +107,9 @@ impl PgReplicationSlotOptions {
 ///
 /// This value borrows the replication connection, preventing another command
 /// from invalidating the snapshot while it is being imported. Open a separate
-/// ordinary connection and import the snapshot into a `REPEATABLE READ`
-/// transaction before reading any table. After import, the transaction retains
+/// ordinary connection to the same publisher and database, then use
+/// [`Self::import_snapshot`] in a `REPEATABLE READ` transaction before reading
+/// any table. After import, the transaction retains
 /// its snapshot independently. Build a stream config with
 /// [`Self::replication_config`], release this value, and start streaming from
 /// the consistent position. Multiple readers may import the same snapshot.
@@ -159,6 +161,66 @@ impl PgReplicationSlot<'_> {
         PgReplicationConfig::new(self.name(), publications, self.consistent_point)
             .map(|config| config.two_phase(self.options.two_phase))
     }
+    /// Import this snapshot into a separate ordinary connection's transaction.
+    ///
+    /// The receiving connection must target the same publisher and database.
+    /// Begin with `begin_with_isolation(RepeatableRead, true)` and call this
+    /// before its first table query. PostgreSQL checks snapshot validity and
+    /// transaction state. Multiple transactions may import this snapshot.
+    ///
+    /// The replication connection stays borrowed through the await. The
+    /// original owner's and caller's cancellation/deadline bounds both apply.
+    /// An interrupted import poisons the receiving transaction for rollback
+    /// and closes any incomplete wire exchange; it cannot be reused with an
+    /// uncertain snapshot. No command is sent on the replication connection.
+    pub async fn import_snapshot(
+        &self,
+        cx: &Cx,
+        transaction: &mut PgTransaction<'_>,
+    ) -> Outcome<(), PgError> {
+        let Some(snapshot) = self.snapshot_name() else {
+            return Outcome::Err(protocol("this replication slot did not export a snapshot"));
+        };
+        if transaction.isolation_level() != Some(IsolationLevel::RepeatableRead) {
+            return Outcome::Err(protocol(
+                "replication snapshots require an explicitly REPEATABLE READ transaction",
+            ));
+        }
+        // Validate on receipt and quote independently of the server's spelling.
+        let sql = format!("SET TRANSACTION SNAPSHOT '{}'", snapshot.replace('\'', "''"));
+        let mut control = ReplicationControl::new(&self.connection.owner);
+        let mut guard = SnapshotImportGuard {
+            transaction,
+            owner: cx.clone(),
+            complete: false,
+        };
+        let result = control
+            .drive(cx, async {
+                Ok(guard.transaction.execute_unchecked(cx, &sql).await)
+            })
+            .await;
+        match result {
+            Ok(Outcome::Ok(_)) => {
+                guard.complete = true;
+                Outcome::Ok(())
+            }
+            Err(error) => {
+                // The outer owner can cancel independently of the receiving
+                // query's Cx. Its partially sent operation still needs cleanup.
+                if matches!(&error, PgError::Cancelled(_))
+                    && guard.transaction.conn.inner.closed
+                {
+                    cx.with_ambient(guard.transaction.conn.wire_cancel_in_drain(cx))
+                        .await;
+                }
+                outcome_from_error(error)
+            }
+            Ok(Outcome::Err(error)) => outcome_from_error(error),
+            Ok(Outcome::Cancelled(reason)) => Outcome::Cancelled(reason),
+            Ok(Outcome::Panicked(payload)) => Outcome::Panicked(payload),
+        }
+    }
+
 }
 
 impl Drop for PgReplicationSlot<'_> {
@@ -307,6 +369,24 @@ impl PgReplicationConnection {
                         .await;
                 }
                 Err(error)
+            }
+        }
+    }
+}
+
+struct SnapshotImportGuard<'transaction, 'connection> {
+    transaction: &'transaction mut PgTransaction<'connection>,
+    owner: Cx,
+    complete: bool,
+}
+
+impl Drop for SnapshotImportGuard<'_, '_> {
+    fn drop(&mut self) {
+        if !self.complete {
+            self.transaction.poison_for_rollback();
+            if self.transaction.conn.inner.closed {
+                let _ambient = self.owner.clone().set_current_restricted();
+                self.transaction.conn.abort_in_flight_exchange();
             }
         }
     }
