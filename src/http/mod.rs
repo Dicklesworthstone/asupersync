@@ -77,6 +77,9 @@ pub mod h3_native;
 pub mod h3_quic;
 pub mod pool;
 
+/// Bounded incremental Server-Sent Events decoding and client streams.
+pub mod sse;
+
 /// High-level pooled [`Client`] facade.
 ///
 /// Home of the capability-gated `Client::default_for_runtime` accessor — the
