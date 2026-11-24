@@ -1936,66 +1936,70 @@ fn resolver_does_not_requery_servers_that_answered() {
     crate::test_complete!("resolver_does_not_requery_servers_that_answered");
 }
 
-// A server that answers AAAA but never A: the lookup returns the IPv6
-// address, but must not cache it, or IPv4-only callers would get no
-// usable address for the whole TTL.
+// Exercise both orders: the first family may consume time before the second
+// answers, or the first answer must survive a timeout in the second family.
 #[test]
 fn resolver_does_not_cache_an_answer_missing_a_failed_family() {
     init_test("resolver_does_not_cache_an_answer_missing_a_failed_family");
 
-    let socket = UdpSocket::bind(SocketAddr::from(([127, 0, 0, 1], 0))).expect("bind");
-    socket
-        .set_read_timeout(Some(Duration::from_millis(50)))
-        .expect("set UDP timeout");
-    let addr = socket.local_addr().expect("local addr");
-    let mut zone = BTreeMap::new();
-    zone.insert(
-        ("dual.example.test".to_string(), 28),
-        vec![TestDnsRecord::Aaaa {
-            ttl: 300,
-            addr: Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 7),
-        }],
-    );
-    let stop = Arc::new(AtomicBool::new(false));
-    let server_stop = Arc::clone(&stop);
-    let server = thread::spawn(move || {
-        let mut buf = [0u8; 2048];
-        while !server_stop.load(Ordering::Relaxed) {
-            if let Ok((n, peer)) = socket.recv_from(&mut buf) {
-                let (_, _, qtype) = parse_test_dns_question(&buf[..n]);
-                // Answer AAAA; let every A query time out.
-                if qtype == 28 {
-                    let response = build_test_dns_response(&buf[..n], &zone, false);
-                    let _ = socket.send_to(&response, peer);
+    for (qtype, address, record) in [
+        (
+            28,
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+            TestDnsRecord::Aaaa {
+                ttl: 300,
+                addr: Ipv6Addr::LOCALHOST,
+            },
+        ),
+        (
+            1,
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            TestDnsRecord::A {
+                ttl: 300,
+                addr: Ipv4Addr::LOCALHOST,
+            },
+        ),
+    ] {
+        let socket = UdpSocket::bind(SocketAddr::from(([127, 0, 0, 1], 0))).expect("bind");
+        socket
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .expect("set UDP timeout");
+        let addr = socket.local_addr().expect("local addr");
+        let zone = BTreeMap::from([(("dual.example.test".to_string(), qtype), vec![record])]);
+        let stop = Arc::new(AtomicBool::new(false));
+        let server_stop = Arc::clone(&stop);
+        let server = thread::spawn(move || {
+            let mut buf = [0u8; 2048];
+            while !server_stop.load(Ordering::Relaxed) {
+                if let Ok((n, peer)) = socket.recv_from(&mut buf) {
+                    let (_, _, requested) = parse_test_dns_question(&buf[..n]);
+                    if requested == qtype {
+                        let response = build_test_dns_response(&buf[..n], &zone, false);
+                        let _ = socket.send_to(&response, peer);
+                    }
                 }
             }
-        }
-    });
+        });
 
-    let resolver = Resolver::with_config(ResolverConfig {
-        nameservers: vec![addr],
-        cache_enabled: true,
-        retries: 0,
-        // Every A query waits out this timeout; the AAAA answer must come
-        // back within it from the server thread, which a loaded test
-        // worker can leave unscheduled for well over 600 ms.
-        timeout: Duration::from_secs(3),
-        ..ResolverConfig::default()
-    });
-    let lookup = future::block_on(async { resolver.lookup_ip("dual.example.test").await })
-        .expect("the AAAA record is returned");
-    stop.store(true, Ordering::Relaxed);
-    server.join().expect("server thread");
+        let resolver = Resolver::with_config(ResolverConfig {
+            nameservers: vec![addr],
+            cache_enabled: true,
+            retries: 0,
+            timeout: Duration::from_secs(3),
+            ..ResolverConfig::default()
+        });
+        let result = future::block_on(resolver.lookup_ip("dual.example.test"));
+        stop.store(true, Ordering::Relaxed);
+        server.join().expect("server thread");
 
-    assert_eq!(
-        lookup.addresses(),
-        &[IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 7))]
-    );
-    assert_eq!(lookup.ttl(), Duration::ZERO);
-    assert!(
-        resolver.cache.get_ip_result("dual.example.test").is_none(),
-        "an answer missing a failed family is not cached"
-    );
+        let lookup = result.expect("the responding address family survives its sibling's timeout");
+        assert_eq!(lookup.addresses(), &[address]);
+        assert_eq!(lookup.ttl(), Duration::ZERO);
+        assert!(
+            resolver.cache.get_ip_result("dual.example.test").is_none(),
+            "an answer missing a failed family is not cached"
+        );
+    }
 
     crate::test_complete!("resolver_does_not_cache_an_answer_missing_a_failed_family");
 }

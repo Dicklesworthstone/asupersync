@@ -2177,22 +2177,28 @@ impl Resolver {
         entropy: &dyn EntropySource,
         stop: &AtomicBool,
     ) -> Result<LookupIp, DnsError> {
-        let context = SyncDnsQueryContext {
-            timeout,
-            time: SyncTimeSource::Wall {
-                started: Instant::now(),
-                #[cfg(not(any(test, feature = "test-internals")))]
-                marker: std::marker::PhantomData,
-            },
-            entropy,
-            stop: Some(stop),
-        };
+        let started = Instant::now();
         let mut addresses = Vec::new();
         let mut ttl = None;
         let mut last_error = None;
 
-        for query_type in [DnsQueryType::Aaaa, DnsQueryType::A] {
-            check_dns_abandoned(context.stop)?;
+        // Both families share the same start time. Reserve part of the original
+        // deadline for A, even when every AAAA query is silently dropped. A
+        // quick AAAA answer leaves the full remainder available to A.
+        for (query_type, family_deadline) in
+            [(DnsQueryType::Aaaa, timeout / 2), (DnsQueryType::A, timeout)]
+        {
+            let context = SyncDnsQueryContext {
+                timeout: family_deadline,
+                time: SyncTimeSource::Wall {
+                    started,
+                    #[cfg(not(any(test, feature = "test-internals")))]
+                    marker: std::marker::PhantomData,
+                },
+                entropy,
+                stop: Some(stop),
+            };
+            check_dns_abandoned(Some(stop))?;
             match Self::query_records_inner_sync(
                 host,
                 query_type,
@@ -2229,7 +2235,7 @@ impl Resolver {
             }
         }
 
-        check_dns_abandoned(context.stop)?;
+        check_dns_abandoned(Some(stop))?;
         if addresses.is_empty() {
             Err(last_error.unwrap_or_else(|| DnsError::NoRecords(host.to_string())))
         } else if last_error.is_some() {
