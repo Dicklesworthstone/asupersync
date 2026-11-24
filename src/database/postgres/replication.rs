@@ -1,9 +1,11 @@
 //! Caller-driven PostgreSQL logical replication over a dedicated connection.
 //!
 //! [`PgReplicationConnection`] negotiates `replication=database` using the
-//! ordinary PostgreSQL TLS and authentication implementation. Starting a stream
-//! uses an existing pgoutput slot and publication names; this API never creates
-//! or drops a slot. Protocol 1 remains the default; explicitly enabling
+//! ordinary PostgreSQL TLS and authentication implementation. Applications can
+//! identify the publisher, explicitly create a pgoutput slot and import its
+//! consistent snapshot, or start from an existing slot and publication names.
+//! Slot creation and deletion are explicit; dropping a connection never deletes
+//! a persistent slot. Protocol 1 remains the default; explicitly enabling
 //! [`PgReplicationConfig::streaming`] negotiates version 2 and delivers changes
 //! from large in-progress transactions before commit. [`PgReplicationConfig::two_phase`]
 //! opts into version 3 to follow prepared transactions through commit or rollback.
@@ -36,6 +38,10 @@ use std::pin::Pin;
 use std::str::FromStr;
 use std::task::{Context, Poll};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+#[path = "replication_slot.rs"]
+mod slot;
+pub use slot::{PgReplicationIdentity, PgReplicationSlot, PgReplicationSlotOptions};
 
 /// Default maximum retained backend message body, including its WAL envelope.
 pub const DEFAULT_MAX_REPLICATION_MESSAGE_BYTES: usize = 1024 * 1024;
@@ -116,16 +122,7 @@ impl PgReplicationConfig {
         S: Into<String>,
     {
         let slot = slot.into();
-        if slot.is_empty()
-            || slot.len() > 63
-            || !slot
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
-        {
-            return Err(protocol(
-                "slot name must be 1..=63 lowercase ASCII letters, digits, or underscores",
-            ));
-        }
+        slot::validate_slot_name(&slot)?;
         let mut names = Vec::new();
         for name in publications {
             let name = name.into();
@@ -388,7 +385,7 @@ impl PgReplicationFeedback {
     }
 }
 
-/// An authenticated logical walsender connection, ready to start one stream.
+/// An authenticated logical walsender connection, ready for slot setup or streaming.
 ///
 /// It deliberately cannot be inserted into the ordinary query pool or expose
 /// extended-query APIs. Reconnection is explicit and retains no hidden slot
