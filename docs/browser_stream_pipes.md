@@ -117,11 +117,28 @@ The handle has three lifecycle operations:
 | `cancel(reason?)` | Request cancellation and await native cleanup plus task publication. |
 | `retire(reason?)` | Await a separate cleanup receipt; explicitly retry refused task cancellation or terminal publication. |
 
-Cancellation aborts native piping and waits for pending writes, source
-cancellation, and destination abort. Repeated requests do not duplicate those
+Cancellation aborts native piping. Successful cancellation waits for pending
+writes, source cancellation, and destination abort; failed native cleanup remains
+a failure. Repeated requests do not duplicate those
 host effects. Invalid cancellation reasons fail without changing the operation.
 A pending host promise can keep cleanup pending indefinitely; the SDK does not
 declare quiescence or invent a close deadline while that work remains live.
+
+If cancellation races a rejecting write, some native `pipeTo` implementations
+reject and release their locks without invoking the source's cancellation hook.
+After that failed native settlement, the owned pipe explicitly requests native
+source cancellation and destination abort, and waits for both operations before
+publishing its task. This cancels an otherwise-open producer and keeps its
+cleanup owned. A competing endpoint lock is a cleanup refusal that retains
+ownership for an explicit retirement retry. The original pipe failure remains
+an error even when this additional cleanup succeeds.
+
+Native terminal states still constrain recovery: aborting an already-errored
+writable cannot replay its underlying sink's skipped `abort` callback, and a
+terminal stream cannot expose an earlier cleanup promise the host stopped
+awaiting. Sinks that own external resources must drain them on a rejecting write;
+the owned WebSocket writable adapter does this. A native cleanup rejection is
+never evidence that an inaccessible underlying callback finished successfully.
 
 An optional `signal` is a borrowed native `AbortSignal`. The SDK observes a
 private dependent signal, so an earlier caller listener cannot suppress the

@@ -7,9 +7,9 @@ export interface BrowserStreamPipeOptions {
 }
 
 export interface BrowserStreamPipeHandle {
-  /** First terminal receipt, after native pipe cleanup and task publication. */
+  /** First terminal receipt, after native settlement, remaining cleanup and publication. */
   readonly closed: Promise<Outcome<void>>;
-  /** Stop the pipe and await source cancellation, sink abort and publication. */
+  /** Stop the pipe and await native settlement, remaining cleanup and publication. */
   cancel(reason?: string): Promise<Outcome<void>>;
   /** Independent cleanup receipt; retries refused cancellation/publication. */
   retire(reason?: string): Promise<Outcome<void>>;
@@ -24,8 +24,9 @@ export interface BrowserStreamPipeTask {
 
 type Failure = Exclude<Outcome<never>, { outcome: "ok" }>;
 const ok = (): Outcome<void> => Object.freeze({ outcome: "ok", value: undefined });
-const fail = (message: string, code: "capability_denied" | "compatibility_rejected" | "internal_failure" = "internal_failure"): Failure =>
-  Object.freeze({ outcome: "err", failure: Object.freeze({ code, recoverability: "permanent", message }) });
+const fail = (message: string, code: "capability_denied" | "compatibility_rejected" | "internal_failure" = "internal_failure",
+  recoverability: "transient" | "permanent" = "permanent"): Failure =>
+  Object.freeze({ outcome: "err", failure: Object.freeze({ code, recoverability, message }) });
 function cancelled(kind: string, reason: string): Failure {
   return Object.freeze({ outcome: "cancelled", cancellation: Object.freeze({
     kind, phase: "completed", origin_region: "browser-stream-pipe", origin_task: null,
@@ -101,11 +102,13 @@ function prepare(host: Record<string, unknown> | undefined, readable: ReadableSt
   const readableLocked = Object.getOwnPropertyDescriptor(Readable.prototype, "locked")?.get;
   const writableLocked = Object.getOwnPropertyDescriptor(Writable.prototype, "locked")?.get;
   const pipeTo = Readable.prototype.pipeTo;
+  const cancelSource = Readable.prototype.cancel, abortDestination = Writable.prototype.abort;
   const abort = Controller.prototype.abort;
   const signalOf = Object.getOwnPropertyDescriptor(Controller.prototype, "signal")?.get;
   const aborted = Object.getOwnPropertyDescriptor(Signal.prototype, "aborted")?.get;
   const add = Events.prototype.addEventListener, remove = Events.prototype.removeEventListener;
-  if ([readableLocked, writableLocked, pipeTo, abort, signalOf, aborted, add, remove].some(fn => typeof fn !== "function")
+  if ([readableLocked, writableLocked, pipeTo, cancelSource, abortDestination, abort, signalOf, aborted, add, remove]
+      .some(fn => typeof fn !== "function")
       || Object.getPrototypeOf(readable) !== Readable.prototype || Object.getPrototypeOf(writable) !== Writable.prototype
       || Reflect.apply(readableLocked!, readable, []) || Reflect.apply(writableLocked!, writable, [])) {
     throw new TypeError("Expected unlocked same-realm native streams");
@@ -129,14 +132,16 @@ function prepare(host: Record<string, unknown> | undefined, readable: ReadableSt
   if (Reflect.apply(readableLocked!, readable, []) || Reflect.apply(writableLocked!, writable, [])) {
     throw new TypeError("Stream locked during pipe preflight");
   }
-  return { pipeTo, abort, controller, privateSignal, signal, aborted: aborted!, add, remove };
+  return { pipeTo, cancelSource, abortDestination, readableLocked: readableLocked!, writableLocked: writableLocked!,
+    abort, controller, privateSignal, signal, aborted: aborted!, add, remove };
 }
 
 /**
  * Native pipeTo owns backpressure, error propagation and both stream locks.
- * Its terminal promise covers source cancel/destination abort or close, but
- * cannot force arbitrary host promises to settle. Chunks are not converted,
- * copied, size-limited or rolled back; producer/consumer queues stay host-owned.
+ * Failed cancellation also retires endpoints left open by native pipeTo. Native
+ * APIs cannot replay cleanup on terminal streams or expose earlier hook promises.
+ * Chunks are not converted, copied, size-limited or rolled back; producer/consumer
+ * queues stay host-owned, and arbitrary host promises cannot be forced to settle.
  */
 export function createBrowserStreamPipeManager(dependencies: {
   globalObject(): Record<string, unknown> | undefined;
@@ -157,6 +162,8 @@ export function createBrowserStreamPipeManager(dependencies: {
     terminal: Outcome<void> | null = null;
     cancellation: Failure | null = null;
     cleanupFailure: Failure | null = null;
+    recoveryFailure: Failure | null = null;
+    readonly recovered = { source: false, destination: false };
     nativeDone = false;
     needsCancel = false;
     cancelAccepted = false;
@@ -229,6 +236,31 @@ export function createBrowserStreamPipeManager(dependencies: {
       if (!this.nativeDone) this.requestCancel(reason, kind);
       return this.joinRetirement();
     }
+    async recoverEndpoint(side: "source" | "destination"): Promise<Failure | null> {
+      if (this.recovered[side]) return null;
+      const native = this.prepared, source = side === "source";
+      const endpoint = source ? this.readable : this.writable;
+      const locked = source ? native.readableLocked : native.writableLocked;
+      const cleanup = source ? native.cancelSource : native.abortDestination;
+      try {
+        // No await between the native lock check and admission. A locked stream
+        // has refused cleanup; an unlocked native call makes it terminal even
+        // if its underlying cleanup hook subsequently rejects.
+        if (Reflect.apply(locked, endpoint, [])) {
+          return fail("Stream pipe " + side + " cleanup is blocked by a native lock", "compatibility_rejected", "transient");
+        }
+        const completion = Reflect.apply(cleanup, endpoint, [this.abortReason]) as Promise<void>;
+        try { await completion; }
+        catch {
+          this.recoveryFailure ??= fail(source
+            ? "Stream pipe source cancellation failed" : "Stream pipe destination abort failed");
+        }
+        this.recovered[side] = true;
+        return null;
+      } catch {
+        return fail("Stream pipe " + side + " cleanup could not start", "compatibility_rejected", "transient");
+      }
+    }
     joinRetirement(): Promise<Outcome<void>> {
       if (this.released) return Promise.resolve(ok());
       if (this.attempt) return this.attempt;
@@ -247,6 +279,19 @@ export function createBrowserStreamPipeManager(dependencies: {
           }
           if (this.abortFailure && !this.nativeDone) { receipt.resolve(issue ?? this.abortFailure); return; }
           await this.nativeSettled.promise;
+          if (this.cleanupFailure) {
+            // An in-flight write rejection can make native pipeTo skip its
+            // queued abort/cancel action. Recover after it releases the locks.
+            // Each operation is idempotent on terminal native streams; an
+            // errored writable cannot replay its underlying abort callback.
+            // Run both even when ABI cancellation or the other endpoint failed.
+            const recovery = await Promise.all([this.recoverEndpoint("source"), this.recoverEndpoint("destination")]);
+            issue ??= recovery.find(failure => failure !== null) ?? null;
+            if (Reflect.apply(this.prepared.readableLocked, this.readable, [])
+                || Reflect.apply(this.prepared.writableLocked, this.writable, [])) {
+              issue ??= fail("Stream pipe cleanup is blocked by a native lock", "compatibility_rejected", "transient");
+            }
+          }
           if (this.signalListener && this.prepared.signal) {
             try {
               Reflect.apply(this.prepared.remove, this.prepared.signal, ["abort", this.signalListener]);
@@ -269,7 +314,7 @@ export function createBrowserStreamPipeManager(dependencies: {
           // attempt even though the settled pipe has released both locks. The
           // accepted terminal task is retired; a later owner-close retry can
           // finish without pretending the first cleanup attempt succeeded.
-          receipt.resolve(issue ?? this.cleanupFailure ?? ok());
+          receipt.resolve(issue ?? this.recoveryFailure ?? this.cleanupFailure ?? ok());
         } catch {
           const issue = fail("Stream pipe retirement failed");
           if (this.nativeDone) this.closed.resolve(issue);

@@ -291,6 +291,118 @@ test("scope cancellation waits for a parked write, source cancellation, and sink
   unlocked(readable, writable);
 });
 
+for (const refuseCancel of [false, true]) {
+  test("cancelled rejected write awaits skipped source cleanup; task cancellation refused=" + refuseCancel, async t => {
+    const faults = { refuseCancel }, f = fixture(t, faults);
+    const writing = deferred(), write = deferred(), cancelling = deferred(), cleanup = deferred();
+    f.releases.push(write.resolve, cleanup.resolve);
+    let pulled = false, cancels = 0, aborts = 0;
+    const { readable, writable } = parked({
+      pull(controller) { if (!pulled) { pulled = true; controller.enqueue("unsent"); } },
+      cancel() { cancels++; cancelling.resolve(); return cleanup.promise; },
+    }, {
+      write() { writing.resolve(); return write.promise; },
+      abort() { aborts++; },
+      close() { assert.fail("a rejected write cannot close the sink successfully"); },
+    });
+    Object.defineProperty(readable, "cancel", { value() { assert.fail("instance cancel invoked"); } });
+    Object.defineProperty(writable, "abort", { value() { assert.fail("instance abort invoked"); } });
+    const handle = value(f.start(readable, writable));
+    await bounded(writing.promise);
+    f.closing.add("owner");
+    const closing = f.manager.drainScopes(new Set(["owner"]), "scope_close");
+    write.reject(new Error("PRIVATE_REJECTED_WRITE"));
+    await bounded(cancelling.promise);
+    await pending(closing);
+    await pending(handle.closed);
+    assert.equal(f.tasks.size, 1);
+    assert.equal(f.calls.join.length, 0);
+    unlocked(readable, writable);
+    const other = parked();
+    assert.equal(f.start(readable, other.writable, {}, "sibling").outcome, "err");
+    assert.equal(f.start(other.readable, writable, {}, "sibling").outcome, "err");
+    assert.equal(f.calls.spawn.length, 1, "recovery retains both SDK endpoint reservations");
+    cleanup.resolve();
+    const receipt = await bounded(closing), terminal = await bounded(handle.closed);
+    assert.equal(receipt.outcome, "err");
+    assert.equal(terminal.outcome, "err");
+    if (refuseCancel) {
+      assert.equal(f.tasks.size, 1);
+      faults.refuseCancel = false;
+      assert.equal((await bounded(handle.retire("retry publication"))).outcome, "err");
+    } else {
+      assert.equal(terminal.failure.message, "Native stream pipe failed", "write failure stays terminal");
+    }
+    assert.equal(f.tasks.size, 0);
+    assert.equal(f.calls.join.length, 1);
+    assert.equal(cancels, 1);
+    assert.equal(aborts, 0, "an errored writable cannot replay its underlying abort hook");
+    assert.doesNotMatch(JSON.stringify({ receipt, terminal }), /PRIVATE_REJECTED_WRITE|PRIVATE_AUTHORITY/);
+    assert.equal((await bounded(handle.retire())).outcome, "ok");
+    assert.equal(cancels, 1, "retirement retry must not replay accepted source cleanup");
+    unlocked(readable, writable);
+  });
+}
+
+test("recovered source cleanup failure stays separate from the original write failure", async t => {
+  const f = fixture(t), writing = deferred(), write = deferred(), cancelling = deferred(), cleanup = deferred();
+  f.releases.push(write.resolve, cleanup.resolve);
+  let pulled = false, cancels = 0;
+  const { readable, writable } = parked({
+    pull(controller) { if (!pulled) { pulled = true; controller.enqueue("unsent"); } },
+    cancel() { cancels++; cancelling.resolve(); return cleanup.promise; },
+  }, { write() { writing.resolve(); return write.promise; } });
+  const handle = value(f.start(readable, writable));
+  await bounded(writing.promise);
+  const retiring = handle.retire("owner closing");
+  write.reject(new Error("PRIVATE_REJECTED_WRITE"));
+  await bounded(cancelling.promise);
+  await pending(retiring);
+  assert.equal(f.calls.join.length, 0);
+  cleanup.reject(new Error("PRIVATE_RECOVERED_CLEANUP"));
+  const receipt = await bounded(retiring), terminal = await bounded(handle.closed);
+  assert.equal(receipt.outcome, "err");
+  assert.equal(receipt.failure.message, "Stream pipe source cancellation failed");
+  assert.equal(terminal.outcome, "err");
+  assert.equal(terminal.failure.message, "Native stream pipe failed");
+  assert.equal(f.tasks.size, 0);
+  assert.equal(cancels, 1);
+  assert.doesNotMatch(JSON.stringify({ receipt, terminal }), /PRIVATE_REJECTED_WRITE|PRIVATE_RECOVERED_CLEANUP|PRIVATE_AUTHORITY/);
+  assert.equal((await bounded(handle.retire())).outcome, "ok");
+  assert.equal(cancels, 1);
+  unlocked(readable, writable);
+});
+
+test("recovery keeps ownership when a source cleanup callback takes a foreign native lock", async t => {
+  const f = fixture(t), writing = deferred(), write = deferred();
+  let pulled = false, cancels = 0, reader;
+  f.releases.push(write.resolve, () => { reader?.releaseLock(); reader = undefined; });
+  const { readable, writable } = parked({
+    pull(controller) { if (!pulled) { pulled = true; controller.enqueue("unsent"); } },
+    cancel() { cancels++; reader = readable.getReader(); },
+  }, { write() { writing.resolve(); return write.promise; } });
+  const handle = value(f.start(readable, writable));
+  await bounded(writing.promise);
+  const retiring = handle.retire("owner closing");
+  write.reject(new Error("PRIVATE_REJECTED_WRITE"));
+  const receipt = await bounded(retiring);
+  assert.equal(receipt.outcome, "err");
+  assert.equal(receipt.failure.recoverability, "transient");
+  assert.equal(f.calls.join.length, 0);
+  assert.equal(f.tasks.size, 1);
+  assert.equal(cancels, 1);
+  reader.releaseLock(); reader = undefined;
+  const other = parked();
+  assert.equal(f.start(readable, other.writable, {}, "sibling").outcome, "err");
+  assert.equal(f.calls.spawn.length, 1);
+  assert.equal((await bounded(handle.retire("retry after unlocking"))).outcome, "err");
+  assert.equal(f.tasks.size, 0);
+  assert.equal(f.calls.join.length, 1);
+  assert.equal(cancels, 1);
+  assert.equal((await bounded(handle.retire())).outcome, "ok");
+  unlocked(readable, writable);
+});
+
 test("caller AbortSignal is borrowed and manual cancellation does not abort it", async t => {
   const f = fixture(t), controller = new AbortController();
   const add = controller.signal.addEventListener, remove = controller.signal.removeEventListener;

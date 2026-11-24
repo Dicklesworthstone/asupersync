@@ -630,6 +630,47 @@ test("WASM scope close waits for a parked pipe write and both native cleanup pro
   }));
 });
 
+test("WASM cancelled pipe retains its task until skipped source cleanup finishes", { timeout: 5000 }, async t => {
+  const writing = pipeDeferred(), cancelling = pipeDeferred(), releaseCancel = pipeDeferred();
+  let rejectWrite;
+  const write = new Promise((_, reject) => { rejectWrite = reject; });
+  t.after(() => { rejectWrite(new Error("fixture cleanup")); releaseCancel.resolve(); });
+  const { scope, snapshot } = await fixture(t);
+  let pulled = false, cancelCalls = 0;
+  const { readable, writable } = parkedPipe({
+    pull(controller) {
+      if (!pulled) { pulled = true; controller.enqueue(Uint8Array.of(1, 2, 3)); }
+    },
+    cancel() { cancelCalls++; cancelling.resolve(); return releaseCancel.promise; },
+  }, {
+    write() { writing.resolve(); return write; },
+  });
+  const handle = ok(scope.pipeTo(readable, writable));
+  await bounded(writing.promise);
+  const closing = scope.closeAsync();
+  rejectWrite(new Error("write rejected after owner cancellation"));
+  await bounded(cancelling.promise);
+  await pipePending(closing);
+  await pipePending(handle.closed);
+  assert.equal(cancelCalls, 1, "an open source is actually cancelled after native pipe rejection");
+  assert.equal(snapshot().tasks.total, 1, "source cleanup still belongs to the real ABI task");
+  releaseCancel.resolve();
+  assert.equal((await bounded(closing)).outcome, "err", "cleanup must not erase the original pipe failure");
+  assert.equal((await bounded(handle.closed)).outcome, "err");
+  pipeUnlocked(readable, writable);
+  assert.equal(snapshot().tasks.total, 0);
+  assert.equal(snapshot().tasks.cleanup_pending, 0);
+  ok(await bounded(scope.closeAsync()));
+  assert.equal(cancelCalls, 1, "owner-close retry does not repeat the source hook");
+  console.log(JSON.stringify({
+    scenario_id: "browser-pipe-rejected-write-source-cleanup-packaged-wasm",
+    wasm_task_counts: [0, 1, 1, 0], source_cancel_calls: cancelCalls,
+    original_failure_preserved: true, owner_waited_for_source_cleanup: true,
+    evidence_scope: "actual SDK; checked-in JS/WASM task ledger; native Node streams",
+    no_claim: ["browser-engine execution", "Rust rebuild", "replaying an errored sink's underlying abort callback"],
+  }));
+});
+
 test("WASM ancestor close drains descendant pipes while a sibling remains live", { timeout: 5000 }, async t => {
   const { runtime, scope, snapshot } = await fixture(t);
   const child = ok(scope.enterScope("pipe-child"));
