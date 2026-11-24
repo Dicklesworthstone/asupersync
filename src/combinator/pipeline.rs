@@ -45,6 +45,7 @@ use crate::cx::{ChildRegion, ChildRegionError, ChildRegionSpec, Cx, Scope};
 use crate::record::{ObligationAbortReason, ObligationKind};
 use crate::runtime::obligation_mailbox::{ObligationAdmissionError, ObligationToken};
 use crate::runtime::{JoinError, SpawnError, TaskHandle};
+use crate::stream::Stream;
 use crate::types::Policy;
 use crate::types::cancel::CancelReason;
 use crate::types::outcome::PanicPayload;
@@ -64,7 +65,7 @@ use std::task::{Context, Poll};
 /// an item bound, not a byte bound on caller-owned input storage or allocations
 /// made by transforms and the sink. Every configured edge has its own bound.
 /// Runtime obligation quota must also allow transient checked channel permits.
-/// A work credit is admitted before `Iterator::next`, including the final EOF
+/// A work credit is admitted before pulling the next input, including the final EOF
 /// probe, whose unused credit is explicitly aborted. Thus even empty input
 /// needs authority to inspect the iterator; a zero runtime quota refuses first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -274,6 +275,42 @@ type PipelineWorker<E> = Box<
         + Send,
 >;
 
+/// Input to a bounded pipeline. Iterables enter lazily when workers have been
+/// admitted. Stream inputs can additionally park between items.
+pub trait PipelineSource {
+    /// Value transferred to the first pipeline stage.
+    type InputItem;
+    /// Source polled by the coordinator while it owns a work credit.
+    type InputStream: Stream<Item = Self::InputItem>;
+
+    /// Opens the source after admission and before its first poll.
+    fn into_pipeline_stream(self) -> Self::InputStream;
+}
+
+impl<I: IntoIterator> PipelineSource for I {
+    type InputItem = I::Item;
+    type InputStream = crate::stream::Iter<I::IntoIter>;
+
+    fn into_pipeline_stream(self) -> Self::InputStream {
+        crate::stream::iter(self)
+    }
+}
+
+/// Stream input retained by [`Scope::pipeline_stream`] or
+/// [`ScopedPipelineExecution::from_stream`]. The coordinator pins the source,
+/// so callers can pass a stream that is not `Unpin`.
+#[derive(Debug)]
+pub struct PipelineStream<S>(S);
+
+impl<S: Stream> PipelineSource for PipelineStream<S> {
+    type InputItem = S::Item;
+    type InputStream = S;
+
+    fn into_pipeline_stream(self) -> S {
+        self.0
+    }
+}
+
 /// Lazy, typed stages executed as real tasks in an existing scope.
 ///
 /// [`Self::then`] can change the item type at every bounded channel edge.
@@ -289,12 +326,12 @@ type PipelineWorker<E> = Box<
 /// Dropping the running future requests cancellation; synchronous drop cannot
 /// drain, and the region remains the quiescence boundary.
 #[must_use = "a pipeline executes only when run is awaited"]
-pub struct PipelineExecution<'scope, I: IntoIterator, T, E, P: Policy> {
+pub struct PipelineExecution<'scope, I: PipelineSource, T, E, P: Policy> {
     scope: Scope<'scope, P>,
     cx: Cx,
     inputs: I,
     config: PipelineExecutionConfig,
-    ingress: mpsc::Sender<PipelineItem<I::Item>>,
+    ingress: mpsc::Sender<PipelineItem<I::InputItem>>,
     output: mpsc::Receiver<PipelineItem<T>>,
     workers: Vec<PipelineWorker<E>>,
 }
@@ -351,14 +388,14 @@ pub struct PipelineExecution<'scope, I: IntoIterator, T, E, P: Policy> {
 /// # }
 /// ```
 #[must_use = "a scoped pipeline executes only when run is awaited"]
-pub struct ScopedPipelineExecution<I: IntoIterator, T, E> {
+pub struct ScopedPipelineExecution<I: PipelineSource, T, E> {
     inner: Option<PipelineExecution<'static, I, T, E, crate::types::policy::FailFast>>,
 }
 
-impl<I, E> ScopedPipelineExecution<I, I::Item, E>
+impl<I, E> ScopedPipelineExecution<I, I::InputItem, E>
 where
-    I: IntoIterator,
-    I::Item: Send + 'static,
+    I: PipelineSource,
+    I::InputItem: Send + 'static,
     E: Send + 'static,
 {
     /// Creates an identity pipeline without entering the source or runtime.
@@ -370,10 +407,25 @@ where
     }
 }
 
+impl<S, E> ScopedPipelineExecution<PipelineStream<S>, S::Item, E>
+where
+    S: Stream,
+    S::Item: Send + 'static,
+    E: Send + 'static,
+{
+    /// Creates a child-region pipeline from an asynchronous source. A pending
+    /// source wakes through its own waker, worker completion, or cancellation.
+    /// No source poll occurs while the sink-acknowledged work window is full.
+    #[must_use]
+    pub fn from_stream(cx: &Cx, inputs: S, config: PipelineExecutionConfig) -> Self {
+        Self::new(cx, PipelineStream(inputs), config)
+    }
+}
+
 impl<I, T, E> ScopedPipelineExecution<I, T, E>
 where
-    I: IntoIterator,
-    I::Item: Send + 'static,
+    I: PipelineSource,
+    I::InputItem: Send + 'static,
     T: Send + 'static,
     E: Send + 'static,
 {
@@ -463,7 +515,7 @@ where
     }
 }
 
-impl<I: IntoIterator, T, E> Drop for ScopedPipelineExecution<I, T, E> {
+impl<I: PipelineSource, T, E> Drop for ScopedPipelineExecution<I, T, E> {
     fn drop(&mut self) {
         let Some(inner) = self.inner.take() else {
             return;
@@ -521,10 +573,10 @@ impl Drop for PipelineBoundaryDrop<'_> {
     }
 }
 
-impl<'scope, I, E, P> PipelineExecution<'scope, I, I::Item, E, P>
+impl<'scope, I, E, P> PipelineExecution<'scope, I, I::InputItem, E, P>
 where
-    I: IntoIterator,
-    I::Item: Send + 'static,
+    I: PipelineSource,
+    I::InputItem: Send + 'static,
     E: Send + 'static,
     P: Policy,
 {
@@ -555,10 +607,48 @@ where
     }
 }
 
+impl<'scope, P: Policy> Scope<'scope, P> {
+    /// Builds a bounded pipeline over an asynchronous source. The source is
+    /// polled only while a work credit is available. A parked source can be
+    /// interrupted by stage failure or owner cancellation while workers drain.
+    pub fn pipeline_stream<S, E>(
+        &self,
+        cx: &Cx,
+        config: PipelineExecutionConfig,
+        inputs: S,
+    ) -> PipelineExecution<'scope, PipelineStream<S>, S::Item, E, P>
+    where
+        S: Stream,
+        S::Item: Send + 'static,
+        E: Send + 'static,
+    {
+        PipelineExecution::from_stream(self, cx, inputs, config)
+    }
+}
+
+impl<'scope, S, E, P> PipelineExecution<'scope, PipelineStream<S>, S::Item, E, P>
+where
+    S: Stream,
+    S::Item: Send + 'static,
+    E: Send + 'static,
+    P: Policy,
+{
+    /// Creates a lazy streaming pipeline under an existing scope.
+    #[must_use]
+    pub fn from_stream(
+        scope: &Scope<'scope, P>,
+        cx: &Cx,
+        inputs: S,
+        config: PipelineExecutionConfig,
+    ) -> Self {
+        Self::new(scope, cx, PipelineStream(inputs), config)
+    }
+}
+
 impl<'scope, I, T, E, P> PipelineExecution<'scope, I, T, E, P>
 where
-    I: IntoIterator,
-    I::Item: Send + 'static,
+    I: PipelineSource,
+    I::InputItem: Send + 'static,
     T: Send + 'static,
     E: Send + 'static,
     P: Policy,
@@ -650,7 +740,7 @@ where
     pub async fn run<F, Fut>(self, sink: F) -> PipelineExecutionReport<E>
     where
         I: Send,
-        I::IntoIter: Send,
+        I::InputStream: Send,
         F: FnMut(Cx, T) -> Fut + Send + 'static,
         Fut: Future<Output = Outcome<(), E>> + Send + 'static,
     {
@@ -1315,17 +1405,17 @@ impl<E> Drop for PipelineOwner<'_, E> {
 async fn pipeline_coordinate<I, E>(
     cx: &Cx,
     inputs: I,
-    ingress: mpsc::Sender<PipelineItem<I::Item>>,
+    ingress: mpsc::Sender<PipelineItem<I::InputItem>>,
     config: PipelineExecutionConfig,
     acknowledgements: &mut mpsc::Receiver<usize>,
     owner: &mut PipelineOwner<'_, E>,
 ) where
-    I: IntoIterator,
+    I: PipelineSource,
 {
-    let mut inputs = inputs.into_iter();
+    let mut inputs = std::pin::pin!(inputs.into_pipeline_stream());
     let mut ingress = Some(ingress);
     let mut quantum = 0;
-    loop {
+    'coordinate: loop {
         if owner.failure.is_some() {
             break;
         }
@@ -1373,7 +1463,19 @@ async fn pipeline_coordinate<I, E>(
                 index,
                 token: Some(token),
             };
-            let Some(value) = inputs.next() else {
+            // Keep the same credit and pending pull across acknowledgement
+            // wakes. Failure or cancellation interrupts even a silent source.
+            let mut pull = std::pin::pin!(std::future::poll_fn(|task| {
+                inputs.as_mut().poll_next(task)
+            }));
+            let item = loop {
+                match owner.pump(acknowledgements, pull.as_mut()).await {
+                    Ok(Some(item)) => break item,
+                    Ok(None) => crate::runtime::yield_now().await,
+                    Err(()) => break 'coordinate,
+                }
+            };
+            let Some(value) = item else {
                 credit.abort();
                 owner.ingress_closed = true;
                 drop(ingress.take());
