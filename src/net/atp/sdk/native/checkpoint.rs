@@ -12,7 +12,7 @@
 use super::{
     BufferReader, MAX_UPLOAD_BUFFER, NativeAdmission, NativeTransferClient, NativeTransferError,
     NativeUploadCleanupError, NativeUploadError, NativeUploadOptions, SPOOL_CREATE_ATTEMPTS, Spool,
-    SpoolProgress, checkpoint, spool_source, validate_upload,
+    SpoolObserver, SpoolProgress, checkpoint, spool_source, validate_upload,
 };
 use crate::atp::object::{ContentId, ObjectId};
 use crate::cx::{Cx, Scope};
@@ -627,10 +627,24 @@ impl NativeTransferClient {
         cx: &Cx,
         remote: SocketAddr,
         options: NativeUploadOptions,
-        mut reader: R,
+        reader: R,
     ) -> Result<NativeCheckpointPreparation, NativeCheckpointError> {
         validate_upload(cx, &options)?;
-        let admission = Arc::new(self.admit_sender()?);
+        let admission = self.admit_sender()?;
+        Self::prepare_reader_admitted(cx, remote, options, reader, admission, None).await
+    }
+
+    pub(super) async fn prepare_reader_admitted<R: AsyncRead + Unpin>(
+        cx: &Cx,
+        remote: SocketAddr,
+        options: NativeUploadOptions,
+        mut reader: R,
+        admission: NativeAdmission,
+        observer: Option<Arc<dyn SpoolObserver>>,
+    ) -> Result<NativeCheckpointPreparation, NativeCheckpointError> {
+        // Scope-owned preparation must recheck its actual child authority.
+        validate_upload(cx, &options)?;
+        let admission = Arc::new(admission);
         let mut record = Journal {
             version: JOURNAL_VERSION,
             file_name: options.file_name.clone(),
@@ -678,7 +692,7 @@ impl NativeTransferClient {
             options.source_idle_timeout,
             SpoolProgress {
                 written: &mut record.source_bytes,
-                observer: None,
+                observer: observer.as_deref(),
             },
         )
         .await;

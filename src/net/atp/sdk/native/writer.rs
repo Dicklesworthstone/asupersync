@@ -6,6 +6,12 @@
 //! The manifest-first wire still starts only after EOF; this is not a live
 //! unknown-length network stream.
 
+#[cfg(unix)]
+#[path = "checkpoint_writer.rs"]
+mod checkpoint;
+#[cfg(unix)]
+pub use checkpoint::{NativeCheckpointWriter, NativeCheckpointWriterTerminal};
+
 use super::super::{NativeTransferClient, NativeTransferError};
 use super::{
     MAX_UPLOAD_BUFFER, NativeUploadError, NativeUploadOptions, NativeUploadReport,

@@ -11,6 +11,8 @@ pub mod recovery;
 
 #[path = "writer.rs"]
 mod writer;
+#[cfg(unix)]
+pub use writer::{NativeCheckpointWriter, NativeCheckpointWriterTerminal};
 pub use writer::{NativeUploadWriter, NativeUploadWriterTerminal};
 
 use super::{NativeAdmission, NativeTransferClient, NativeTransferError, committed_send};

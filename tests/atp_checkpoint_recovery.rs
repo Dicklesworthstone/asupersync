@@ -9,6 +9,9 @@
 // (rust-lang #159228) will turn into a hard error.
 #![recursion_limit = "256"]
 
+#[path = "atp_native_sdk/checkpoint_writer.rs"]
+mod writer;
+
 use asupersync::Cx;
 use asupersync::net::atp::protocol::PeerId;
 use asupersync::net::atp::sdk::native::upload::recovery::{
