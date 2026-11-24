@@ -14,8 +14,10 @@ use super::{
     NativeUploadCleanupError, NativeUploadError, NativeUploadOptions, SPOOL_CREATE_ATTEMPTS, Spool,
     SpoolProgress, checkpoint, spool_source, validate_upload,
 };
+use crate::atp::object::{ContentId, ObjectId};
 use crate::cx::{Cx, Scope};
 use crate::io::AsyncRead;
+use crate::net::atp::transport_common::{EntryDigest, flat_merkle_root_from_digests};
 use crate::net::atp::transport_quic::{self, ReceiveReceipt, SendReport};
 use crate::runtime::{TaskHandle, spawn_blocking_io};
 use crate::types::Policy;
@@ -34,6 +36,8 @@ const JOURNAL_VERSION: u32 = 1;
 // Older readers must refuse a cancelled checkpoint, rather than silently
 // ignoring a sidecar and admitting another send from its retained payload.
 const CANCELLED_JOURNAL_VERSION: u32 = 2;
+// Earlier versions require the entire source byte count in a successful receipt.
+const REUSED_JOURNAL_VERSION: u32 = 3;
 const JOURNAL_LIMIT: u64 = 128 * 1024;
 /// Finite lifetime network-attempt ceiling for one durable checkpoint.
 pub const MAX_CHECKPOINT_ATTEMPTS: u64 = 32;
@@ -206,6 +210,10 @@ pub type NativeCheckpointTask = TaskHandle<Result<NativeCheckpointAttempt, Nativ
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StoredReceipt {
+    // Present only for v3 reduced-payload receipts. This was hashed from the
+    // same retained bytes as source_sha256, before network admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    verified_content_id: Option<ContentId>,
     transfer_id: String,
     bytes_sent: u64,
     files: u32,
@@ -219,6 +227,7 @@ struct StoredReceipt {
 impl StoredReceipt {
     fn capture(report: &SendReport) -> Self {
         Self {
+            verified_content_id: None,
             transfer_id: report.transfer_id.clone(),
             bytes_sent: report.bytes_sent,
             files: report.files,
@@ -288,10 +297,15 @@ impl Journal {
     }
 
     fn validate(&self) -> Result<(), NativeCheckpointError> {
-        if !matches!(
-            (self.version, self.cancelled),
-            (JOURNAL_VERSION, false) | (CANCELLED_JOURNAL_VERSION, true)
-        ) {
+        let supported = match self.version {
+            JOURNAL_VERSION => !self.cancelled,
+            CANCELLED_JOURNAL_VERSION => self.cancelled,
+            REUSED_JOURNAL_VERSION => {
+                !self.cancelled && self.state == NativeCheckpointState::Acknowledged
+            }
+            _ => false,
+        };
+        if !supported {
             return Err(NativeCheckpointError::Invalid("unsupported schema version"));
         }
         if self.cancelled && self.state == NativeCheckpointState::Acknowledged {
@@ -318,10 +332,15 @@ impl Journal {
             }
             NativeCheckpointState::Acknowledged => {
                 (1..=MAX_CHECKPOINT_ATTEMPTS).contains(&self.attempt)
-                    && self
-                        .receipt
-                        .as_ref()
-                        .is_some_and(|r| self.receipt_matches(&r.report()))
+                    && self.receipt.as_ref().is_some_and(|receipt| {
+                        let reused = self.version == REUSED_JOURNAL_VERSION;
+                        (receipt.bytes_sent < self.source_bytes) == reused
+                            && receipt.verified_content_id.is_some() == reused
+                            && self.receipt_matches(
+                                &receipt.report(),
+                                receipt.verified_content_id.as_ref(),
+                            )
+                    })
             }
         };
         if !valid {
@@ -332,11 +351,25 @@ impl Journal {
         Ok(())
     }
 
-    fn receipt_matches(&self, report: &SendReport) -> bool {
-        report.peer == self.remote
+    fn receipt_matches(&self, report: &SendReport, verified: Option<&ContentId>) -> bool {
+        let matches_source = match verified {
+            Some(content_id) => {
+                let root = flat_merkle_root_from_digests(&[EntryDigest {
+                    rel_path: self.file_name.clone(),
+                    size: self.source_bytes,
+                    content_id: ObjectId::content(content_id.clone()),
+                    content_sha256: self.source_sha256,
+                }]);
+                report.merkle_root_hex == root
+            }
+            None => report.bytes_sent == self.source_bytes,
+        };
+        matches_source
+            && report.peer == self.remote
             && report.files == 1
             && report.receipt.files == 1
-            && report.receipt.bytes_received == self.source_bytes
+            && report.bytes_sent <= self.source_bytes
+            && report.receipt.bytes_received == report.bytes_sent
             && report.receipt.committed
             && report.receipt.sha_ok
             && report.receipt.merkle_ok
@@ -880,7 +913,7 @@ impl NativeTransferClient {
             });
         }
         let next_attempt = record.next_attempt(retry)?;
-        let source = verify_source(cx, &lease, &record).await?;
+        let (source, content_id) = verify_source(cx, &lease, &record).await?;
         checkpoint(cx)?;
         record.attempt = next_attempt;
         record.state = NativeCheckpointState::Sending;
@@ -908,7 +941,7 @@ impl NativeTransferClient {
         .map_err(NativeTransferError::from)
         .map_err(NativeCheckpointError::from)
         .and_then(|report| {
-            if record.receipt_matches(&report) {
+            if record.receipt_matches(&report, Some(&content_id)) {
                 Ok(report)
             } else {
                 Err(NativeCheckpointError::ReceiptMismatch(Box::new(report)))
@@ -918,7 +951,12 @@ impl NativeTransferClient {
         if let Ok(report) = &outcome {
             let mut completed = record.clone();
             completed.state = NativeCheckpointState::Acknowledged;
-            completed.receipt = Some(StoredReceipt::capture(report));
+            let mut receipt = StoredReceipt::capture(report);
+            if report.bytes_sent < record.source_bytes {
+                completed.version = REUSED_JOURNAL_VERSION;
+                receipt.verified_content_id = Some(content_id);
+            }
+            completed.receipt = Some(receipt);
             // Terminal publication must not discard a real result merely
             // because cancellation arrived after the native operation returned.
             match persist_record(&lease, &completed, receipt_nonce).await {
@@ -967,7 +1005,7 @@ async fn verify_source(
     cx: &Cx,
     lease: &Arc<Lease>,
     record: &Journal,
-) -> Result<PathBuf, NativeCheckpointError> {
+) -> Result<(PathBuf, ContentId), NativeCheckpointError> {
     let owner = Arc::clone(lease);
     let name = record.file_name.clone();
     let (path, mut file) = spawn_blocking_io(move || {
@@ -998,6 +1036,7 @@ async fn verify_source(
             .min(MAX_UPLOAD_BUFFER)
     ];
     let mut hash = Sha256::new();
+    let mut content = ContentId::streaming();
     let mut total = 0;
     loop {
         checkpoint(cx)?;
@@ -1020,12 +1059,13 @@ async fn verify_source(
         }
         total += count as u64;
         hash.update(&buffer[..count]);
+        content.update(&buffer[..count]);
     }
     let digest: [u8; 32] = hash.finalize().into();
     if total != record.source_bytes || digest != record.source_sha256 {
         return Err(NativeCheckpointError::SourceChanged);
     }
-    Ok(path)
+    Ok((path, content.finalize()))
 }
 
 #[cfg(test)]
