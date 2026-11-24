@@ -22,9 +22,9 @@ const turn = () => new Promise(resolve => setImmediate(resolve));
 async function pending(promise) { let settled = false; void promise.then(() => { settled = true; }, () => { settled = true; }); await turn(); assert.equal(settled, false); }
 function value(outcome) { assert.equal(outcome.outcome, "ok", JSON.stringify(outcome)); return outcome.value; }
 function noListeners(socket) { for (const type of ["open", "message", "error", "close"]) assert.equal(getEventListeners(socket, type).length, 0, `${type} listeners retired`); }
-async function load() {
+async function load(contents = source) {
   // Absence of host WebSocket/AbortSignal/MessageEvent at module import is valid.
-  const module = new SourceTextModule(stripTypeScriptTypes(source, { mode: "transform" }), { context: createContext({}) });
+  const module = new SourceTextModule(stripTypeScriptTypes(contents, { mode: "transform" }), { context: createContext({}) });
   await module.link(() => assert.fail("WebSocket manager added a runtime dependency"));
   await module.evaluate(); return module.namespace;
 }
@@ -70,7 +70,8 @@ class Socket extends FaultTarget {
 function fixture(t, faults = {}, globals = {}) {
   const calls = { spawn: [], cancel: [], join: [] }, tasks = new Set(), sockets = [], handles = [];
   const scopes = new Set(["region:1:1:PRIVATE_AUTHORITY", "region:2:1:PRIVATE_AUTHORITY"]), closing = new Set();
-  const host = { WebSocket: Socket, EventTarget: FaultTarget, MessageEvent, AbortSignal, ReadableStream, ...globals };
+  const host = { WebSocket: Socket, EventTarget: FaultTarget, MessageEvent, AbortSignal,
+    ReadableStream, WritableStream, WritableStreamDefaultController, ...globals };
   const manager = api.createBrowserWebSocketManager({ globalObject: () => host,
     isTracked: key => scopes.has(key), isClosing: key => closing.has(key) });
   function adopt(socket = new Socket(), options = {}, scope = "region:1:1:PRIVATE_AUTHORITY") {
@@ -327,6 +328,219 @@ test("sendWhenReady timer cleanup refusal retains ownership until retirement suc
   assert.equal((await handle.retire()).outcome, "ok"); assert.equal(timers.live.size, 0); assert.equal(f.tasks.size, 0);
   assert.equal(socket.sent.length, 0); assert.equal(f.calls.join.length, 1);
 });
+test("writable conversion is memoized and exclusive without taking receive ownership", async t => {
+  const timers = sendTimers(), f = fixture(t, {}, timers.host), socket = new Socket({ state: 1 });
+  const handle = value(f.adopt(socket, { maxSendBufferedBytes: 2 }));
+  socket.buffered = 2;
+  const manual = handle.sendWhenReady("x");
+  assert.equal(handle.toWritableStream().outcome, "err", "cannot overtake a manual waiter");
+  socket.buffered = 0; timers.fire(); assert.equal((await manual).outcome, "ok");
+  const stream = value(handle.toWritableStream());
+  assert.equal(value(handle.toWritableStream()), stream);
+  assert.equal(handle.send("manual").failure.code, "compatibility_rejected");
+  assert.equal((await handle.sendWhenReady("manual")).failure.code, "compatibility_rejected");
+  const writer = stream.getWriter();
+  void writer.closed.catch(() => {});
+  await writer.write("a"); await writer.write(Uint8Array.of(3, 4));
+  assert.equal(socket.sent[0], "x"); assert.equal(socket.sent[1], "a");
+  assert.deepEqual(Array.from(socket.sent[2]), [3, 4]);
+  const reader = value(handle.toReadableStream()).getReader();
+  socket.message("duplex"); assert.equal((await reader.read()).value, "duplex");
+  reader.releaseLock(); writer.releaseLock();
+});
+
+for (const missing of ["WritableStream", "WritableStreamDefaultController"]) {
+  test(`writable conversion refuses missing ${missing} without taking manual ownership`, async t => {
+    const f = fixture(t, {}, { [missing]: undefined }), socket = new Socket({ state: 1 });
+    const handle = value(f.adopt(socket));
+    assert.equal(handle.toWritableStream().outcome, "err");
+    assert.equal(handle.send("still manual").outcome, "ok");
+    assert.equal((await handle.sendWhenReady("still open")).outcome, "ok");
+    assert.equal(socket.closes.length, 0);
+  });
+}
+
+for (const afterAttach of [false, true]) {
+  test(`failed writable signal installation releases its unpublished conversion (${afterAttach ? "after" : "before"} attach)`, async t => {
+    let signal;
+    class SignalEvents extends EventTarget {
+      addEventListener(type, listener, options) {
+        if (this instanceof AbortSignal) {
+          signal = this;
+          if (afterAttach) super.addEventListener(type, listener, options);
+          throw new Error("private writable setup detail");
+        }
+        super.addEventListener(type, listener, options);
+      }
+    }
+    const f = fixture(t, {}, { EventTarget: SignalEvents }), socket = new Socket({ state: 1 });
+    const handle = value(f.adopt(socket));
+    assert.equal(handle.toWritableStream().outcome, "err");
+    assert.equal(getEventListeners(signal, "abort").length, 0);
+    assert.equal(handle.send("manual ownership retained").outcome, "ok");
+    assert.equal(socket.closes.length, 0); assert.equal(f.tasks.size, 1);
+  });
+}
+
+test("writable conversion rechecks owner admission after native start hooks", async t => {
+  let signal; let owner;
+  class SignalEvents extends EventTarget {
+    addEventListener(type, listener, options) {
+      super.addEventListener(type, listener, options);
+      if (this instanceof AbortSignal) { signal = this; owner.closing.add("region:1:1:PRIVATE_AUTHORITY"); }
+    }
+  }
+  owner = fixture(t, {}, { EventTarget: SignalEvents });
+  const socket = new Socket({ state: 1 }), handle = value(owner.adopt(socket));
+  assert.equal(handle.toWritableStream().outcome, "err");
+  assert.equal(getEventListeners(signal, "abort").length, 0, "unpublished conversion drops its native hook");
+  const drained = owner.manager.drainScopes(owner.scopes, "scope_close");
+  await pending(drained); socket.finish();
+  assert.equal((await drained).outcome, "ok"); assert.equal(owner.tasks.size, 0);
+});
+
+test("native writable backpressure stalls its pipe until send credit, then joins real close", async t => {
+  const timers = sendTimers(), f = fixture(t, {}, timers.host), socket = new Socket({ state: 1 });
+  const handle = value(f.adopt(socket, { maxSendBufferedBytes: 2 }));
+  socket.buffered = 2;
+  let pulls = 0;
+  const source = new ReadableStream({ pull(controller) {
+    pulls += 1;
+    if (pulls === 1) controller.enqueue("a");
+    else if (pulls === 2) controller.enqueue(Uint8Array.of(1, 2));
+    else controller.close();
+  } }, { highWaterMark: 0 });
+  const pipe = source.pipeTo(value(handle.toWritableStream()));
+  await pending(pipe); assert.equal(pulls, 1); assert.equal(socket.sent.length, 0);
+  socket.buffered = 0; timers.fire(); await turn();
+  assert.deepEqual(socket.sent.map(item => typeof item === "string" ? item : Array.from(item)), ["a", [1, 2]]);
+  assert.equal(socket.closes.length, 1); await pending(pipe); assert.equal(f.calls.join.length, 0);
+  socket.finish(); await pipe;
+  assert.equal((await handle.closed).outcome, "ok"); assert.equal(f.calls.join.length, 1);
+  assert.equal(source.locked, false); assert.equal(value(handle.toWritableStream()).locked, false);
+});
+
+test("writer.abort interrupts a blocked send immediately but awaits native cleanup", async t => {
+  const timers = sendTimers(), f = fixture(t, {}, timers.host), socket = new Socket({ state: 1 });
+  const handle = value(f.adopt(socket, { maxSendBufferedBytes: 1 }));
+  const writer = value(handle.toWritableStream()).getWriter();
+  void writer.closed.catch(() => {});
+  socket.buffered = 1;
+  const writing = writer.write("x"); void writing.catch(() => {});
+  await pending(writing); assert.equal(timers.live.size, 1);
+  const aborted = writer.abort({ private: "do not render producer reasons" });
+  await pending(aborted); await pending(writing);
+  assert.equal(timers.live.size, 0, "controller.signal interrupts before sink.abort runs");
+  assert.equal(socket.sent.length, 0); assert.equal(socket.closes.length, 1); assert.equal(f.calls.join.length, 0);
+  socket.finish();
+  await assert.rejects(writing, error => error.cause?.outcome === "cancelled");
+  await aborted;
+  assert.equal((await handle.closed).outcome, "cancelled");
+  assert.equal(f.calls.join.length, 1); assert.equal(f.tasks.size, 0); writer.releaseLock();
+});
+
+test("a shared adoption and pipe signal interrupts buffered writes without waiting for credit", async t => {
+  const timers = sendTimers(), f = fixture(t, {}, timers.host), socket = new Socket({ state: 1 });
+  const controller = new AbortController();
+  const handle = value(f.adopt(socket, { maxSendBufferedBytes: 1, signal: controller.signal }));
+  socket.buffered = 1;
+  const source = new ReadableStream({
+    pull(controller) { controller.enqueue("x"); },
+  }, { highWaterMark: 0 });
+  const stream = value(handle.toWritableStream());
+  const piped = source.pipeTo(stream, { signal: controller.signal }); void piped.catch(() => {});
+  await pending(piped); assert.equal(timers.live.size, 1);
+  controller.abort("pipe stopped");
+  await pending(piped); assert.equal(timers.live.size, 0); assert.equal(socket.sent.length, 0);
+  assert.equal(socket.closes.length, 1); assert.equal(f.calls.join.length, 0);
+  socket.finish(); await assert.rejects(piped);
+  // Native pipeTo owns source cancellation and rejection ordering. The adapter
+  // guarantees its socket's cleanup; it does not strengthen host pipe semantics.
+  assert.equal(f.tasks.size, 0);
+  assert.equal(source.locked, false); assert.equal(stream.locked, false);
+});
+
+test("graceful handle.close fencing a blocked writer does not upgrade to cancellation", async t => {
+  const timers = sendTimers(), f = fixture(t, {}, timers.host), socket = new Socket({ state: 1 });
+  const handle = value(f.adopt(socket, { maxSendBufferedBytes: 1 }));
+  const writer = value(handle.toWritableStream()).getWriter();
+  void writer.closed.catch(() => {});
+  socket.buffered = 1;
+  const writing = writer.write("x"); void writing.catch(() => {});
+  await pending(writing);
+  const closing = handle.close();
+  await pending(writing); await pending(closing); assert.equal(timers.live.size, 0);
+  socket.finish();
+  await assert.rejects(writing, error => error.cause?.outcome === "err");
+  assert.equal((await closing).outcome, "ok"); assert.equal((await handle.closed).outcome, "ok");
+  assert.equal(f.calls.cancel.length, 0); assert.equal(f.calls.join.length, 1); writer.releaseLock();
+});
+
+test("a rejected native write retires its socket before exposing failure", async t => {
+  const f = fixture(t), socket = new Socket({ state: 1 }), handle = value(f.adopt(socket, { maxMessageBytes: 1 }));
+  const writer = value(handle.toWritableStream()).getWriter();
+  void writer.closed.catch(() => {});
+  const writing = writer.write("too large"); void writing.catch(() => {});
+  await pending(writing); assert.equal(socket.closes.length, 1); assert.equal(f.calls.join.length, 0);
+  socket.finish();
+  await assert.rejects(writing, error => error.cause?.failure?.code === "capability_denied");
+  assert.equal(f.tasks.size, 0); assert.equal(socket.sent.length, 0); writer.releaseLock();
+});
+
+test("idle writer.closed observes remote close only after native task publication", async t => {
+  const f = fixture(t), socket = new Socket({ state: 1 }), handle = value(f.adopt(socket));
+  const writer = value(handle.toWritableStream()).getWriter();
+  const closed = writer.closed; void closed.catch(() => {});
+  await pending(closed); socket.finish();
+  await assert.rejects(closed, error => error.cause?.outcome === "err");
+  assert.equal((await handle.closed).outcome, "ok", "a closed writer does not rewrite clean peer closure");
+  assert.equal(f.calls.join.length, 1); assert.equal(f.tasks.size, 0); writer.releaseLock();
+});
+
+test("writable signal cleanup refusal retains ownership for explicit retirement retry", async t => {
+  let signal; let refuseRemove = true;
+  class SignalEvents extends EventTarget {
+    addEventListener(type, listener, options) {
+      super.addEventListener(type, listener, options);
+      if (this instanceof AbortSignal) signal = this;
+    }
+    removeEventListener(type, listener, options) {
+      if (this instanceof AbortSignal && refuseRemove) throw new Error("private detach detail");
+      super.removeEventListener(type, listener, options);
+    }
+  }
+  const f = fixture(t, {}, { EventTarget: SignalEvents }), socket = new Socket({ state: 1 });
+  const handle = value(f.adopt(socket)), writer = value(handle.toWritableStream()).getWriter();
+  void writer.closed.catch(() => {});
+  assert.equal(getEventListeners(signal, "abort").length, 1);
+  const closing = writer.close(); void closing.catch(() => {});
+  await pending(closing); socket.finish();
+  await assert.rejects(closing, error => error.cause?.outcome === "err");
+  assert.equal(f.calls.join.length, 0); assert.equal(f.tasks.size, 1);
+  assert.equal(getEventListeners(signal, "abort").length, 1);
+  refuseRemove = false; assert.equal((await handle.retire()).outcome, "ok");
+  assert.equal(getEventListeners(signal, "abort").length, 0); assert.equal(f.tasks.size, 0); writer.releaseLock();
+});
+
+test("refused ABI cancellation still detaches the writable abort signal", async t => {
+  let signal;
+  class SignalEvents extends EventTarget {
+    addEventListener(type, listener, options) {
+      super.addEventListener(type, listener, options);
+      if (this instanceof AbortSignal) signal = this;
+    }
+  }
+  const faults = { refuseCancel: true }, f = fixture(t, faults, { EventTarget: SignalEvents });
+  const socket = new Socket({ state: 1 }), handle = value(f.adopt(socket));
+  const writer = value(handle.toWritableStream()).getWriter(); void writer.closed.catch(() => {});
+  const aborted = writer.abort(); void aborted.catch(() => {});
+  await pending(aborted); socket.finish();
+  await assert.rejects(aborted, error => error.cause?.outcome === "err");
+  assert.equal(getEventListeners(signal, "abort").length, 0, "host cleanup is independent of ABI refusal");
+  assert.equal(f.tasks.size, 1); faults.refuseCancel = false;
+  assert.equal((await handle.retire()).outcome, "ok"); assert.equal(f.tasks.size, 0); writer.releaseLock();
+});
+
 test("graceful close validates code/reason then waits for the clean handshake", async t => {
   const f = fixture(t), socket = new Socket({ state: 1 }), handle = value(f.adopt(socket));
   assert.equal((await handle.close({ code: 1009 })).outcome, "err");
@@ -536,4 +750,48 @@ test("sendWhenReady pipelines ordered messages through a real native WebSocket w
   await remote.finish(); assert.equal((await closed).outcome, "ok"); await remote.disconnected;
   assert.deepEqual(remote.received.filter(message => message.opcode !== 8), expected);
   assert.equal(calls.length, 1); assert.equal(live.size, 0);
+});
+
+test("owned native pipe sends exact messages to a real WebSocket peer and joins both owners", { timeout: 5000 }, async t => {
+  const pipeApi = await load(readFileSync(new URL("../packages/browser/src/stream-pipe.ts", import.meta.url), "utf8"));
+  const remote = await peer(t), socket = new WebSocket(remote.url), calls = [], pipeCalls = [], live = new Set();
+  let polls = 0;
+  const host = { WebSocket, EventTarget, MessageEvent, AbortSignal, AbortController,
+    ReadableStream, WritableStream, WritableStreamDefaultController,
+    setTimeout(callback, delay) {
+      polls += 1;
+      const token = setTimeout(() => { live.delete(token); callback(); }, delay);
+      live.add(token); assert.equal(live.size, 1); return token;
+    },
+    clearTimeout(token) { clearTimeout(token); live.delete(token); },
+  };
+  const dependencies = { globalObject: () => host, isTracked: () => true, isClosing: () => false };
+  const manager = api.createBrowserWebSocketManager(dependencies);
+  const handle = value(manager.adopt("region:pipe:PRIVATE_AUTHORITY", () => ok({ key: "task:socket", cancel: () => ok(undefined),
+    join: outcome => { calls.push(outcome); assert.equal(socket.readyState, WebSocket.CLOSED);
+      noListeners(socket); assert.equal(live.size, 0); return outcome; } }), socket,
+  { maxMessageBytes: 4, maxSendBufferedBytes: 4 }));
+  t.after(() => handle.retire());
+  assert.equal((await handle.opened).outcome, "ok"); await remote.connected;
+  const expected = [];
+  let index = 0;
+  const source = new ReadableStream({ pull(controller) {
+    if (index === 12) { controller.close(); return; }
+    const payload = index % 2 ? Uint8Array.of(index, 0, 255) : `p${String(index).padStart(2, "0")}`;
+    expected.push({ opcode: typeof payload === "string" ? 1 : 2, payload: Buffer.from(payload) });
+    index += 1; controller.enqueue(payload);
+  } }, { highWaterMark: 0 });
+  const sink = value(handle.toWritableStream());
+  const pipes = pipeApi.createBrowserStreamPipeManager(dependencies);
+  const piped = value(pipes.start("region:pipe:PRIVATE_AUTHORITY", () => ok({ key: "task:pipe", cancel: () => ok(undefined),
+    join: outcome => { pipeCalls.push(outcome); assert.equal(source.locked, false); assert.equal(sink.locked, false);
+      assert.equal(calls.length, 1, "socket retirement precedes pipe publication"); return outcome; } }), source, sink));
+  t.after(() => piped.retire());
+  await remote.closing;
+  await pending(piped.closed); assert.equal(calls.length, 0); assert.equal(pipeCalls.length, 0);
+  assert.ok(polls > 0, "native pipe exercised actual WebSocket bufferedAmount backpressure");
+  await remote.finish(); assert.equal((await piped.closed).outcome, "ok"); await remote.disconnected;
+  assert.equal((await handle.closed).outcome, "ok");
+  assert.deepEqual(remote.received.filter(message => message.opcode !== 8), expected);
+  assert.equal(calls.length, 1); assert.equal(pipeCalls.length, 1); assert.equal(live.size, 0);
 });

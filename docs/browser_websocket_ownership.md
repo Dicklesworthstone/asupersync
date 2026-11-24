@@ -2,7 +2,7 @@
 
 `RegionHandle.adoptWebSocket(socket, options)` transfers a connecting or open
 native WebSocket into an existing SDK region. It adds awaitable opening, sending
-and receiving, a bounded inbox, native stream consumption, and a complete asynchronous
+and receiving, a bounded inbox, native stream pipelines, and a complete asynchronous
 cleanup barrier. It does not create a connection or grant network authority.
 The existing `openWebSocket` and low-level WebSocket ABI remain unchanged.
 
@@ -141,6 +141,55 @@ cannot wait for send credit. Closing, cancellation, and transport failure retire
 the pending send and its timer. A settled send remains a local native-buffer
 admission receipt, not proof that the peer received or committed the message.
 Continue to await `closed` or successful `retire()` for socket cleanup.
+
+## Sending through a native stream pipeline
+
+`toWritableStream()` returns one memoized
+`WritableStream<string | Uint8Array>`. A successful conversion transfers sending
+to that stream: manual `send()` and `sendWhenReady()` are then refused.
+Conversion is refused while a manual send is pending. Receiving remains
+independent, so the same socket can also have an owned readable stream.
+
+Each native write uses the bounded send-admission path above. The writable has
+a high-water mark of one message; producers must await writes or respect
+`writer.ready`. Additional writes queued by the caller, source queues, and
+transform queues remain outside the adapter's memory bound. Conversion requires
+native `WritableStream` and writable-controller abort-signal support. Missing
+support leaves manual sending available.
+
+After awaiting `socket.opened`, use the stream with the existing region-owned
+pipeline API:
+
+```ts
+import { unwrapOutcome } from "@asupersync/browser";
+
+// outgoingMessages is a native ReadableStream<string | Uint8Array>.
+// The socket was adopted with this same viewController.signal.
+const writable = unwrapOutcome(socket.toWritableStream());
+const pipe = unwrapOutcome(scope.pipeTo(outgoingMessages, writable, {
+  signal: viewController.signal,
+}));
+unwrapOutcome(await pipe.closed);
+```
+
+On source EOF, the pipeline closes the writable, which closes the entire socket
+and waits for the native close handshake and task publication. It is not a
+half-close of only the send direction. A write failure also retires the socket
+before rejecting; an already-requested graceful close retains its original
+outcome. An unexpected remote close errors an idle writable after the socket's
+terminal publication, so its writer cannot remain open indefinitely.
+
+`writer.abort()` interrupts a write waiting for native buffer credit through the
+writable controller's abort signal. It then joins socket retirement. Abort
+reasons are not inspected or formatted. Failed cleanup rejects with a structured
+Outcome in `error.cause` and remains owned for an explicit `retire()` retry.
+
+Native `pipeTo` waits for its current write before aborting its destination.
+For prompt cancellation of a pipeline blocked on socket capacity, give socket
+adoption and the pipeline the same AbortSignal, as above, or close their region
+with `closeAsync()`. The region cancels both owners before waiting for either.
+Cancelling only the pipe can wait for the current write to gain capacity. No
+timer fabricates a successful socket close or a peer acknowledgement.
 
 ## Native Streams and parent cancellation
 

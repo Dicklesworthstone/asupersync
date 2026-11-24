@@ -36,6 +36,16 @@ export interface BrowserWebSocketHandle {
   /** Wait for native buffer credit on an open socket. One owned message may wait;
    * binary data is snapshotted. Success acknowledges local buffering only. */
   sendWhenReady(value: BrowserWebSocketMessage): Promise<Outcome<void>>;
+  /** Transfer sending to one memoized native writable stream. Await opened
+   * before writing. Each write waits for local buffer credit; it is not a
+   * delivery receipt. Respect writer.ready: native caller queues are not bounded
+   * by this adapter. Closing the writer closes the whole WebSocket and awaits
+   * native close/task publication; abort retires that same owner.
+   *
+   * Native pipeTo waits for its current write before aborting a destination.
+   * For prompt cancellation during a blocked pipe write, give adoption and the
+   * pipe the same AbortSignal, or close their owning scope with closeAsync. */
+  toWritableStream(): Outcome<WritableStream<BrowserWebSocketMessage>>;
   close(options?: BrowserWebSocketCloseOptions): Promise<Outcome<void>>;
   cancel(reason?: string): Promise<Outcome<void>>;
   /** Independent cleanup receipt; retries refused cancellation/publication. */
@@ -159,6 +169,10 @@ interface SendTimer {
   clearing: boolean;
   clear(token: unknown): void;
 }
+interface WritableSupport {
+  Stream: typeof WritableStream;
+  signal: (this: WritableStreamDefaultController) => AbortSignal;
+}
 
 interface Host {
   prototype: object;
@@ -173,6 +187,7 @@ interface Host {
   remove: EventTarget["removeEventListener"];
   data: (this: MessageEvent) => unknown;
   Stream: typeof ReadableStream | undefined;
+  writableSupport(): WritableSupport;
   sendTimers(): SendTimers;
   signal?: AbortSignal;
   aborted?: (this: AbortSignal) => boolean;
@@ -196,6 +211,15 @@ function prepare(host: Record<string, unknown> | undefined, socket: WebSocket, o
     add: EventTargetClass.prototype.addEventListener, remove: EventTargetClass.prototype.removeEventListener,
     data: Object.getOwnPropertyDescriptor(MessageEventClass.prototype, "data")?.get!,
     Stream: typeof host?.ReadableStream === "function" ? host.ReadableStream as typeof ReadableStream : undefined,
+    writableSupport() {
+      const Stream = host?.WritableStream as typeof WritableStream | undefined;
+      const Controller = host?.WritableStreamDefaultController as typeof WritableStreamDefaultController | undefined;
+      const signal = Controller && Object.getOwnPropertyDescriptor(Controller.prototype, "signal")?.get;
+      if (typeof Stream !== "function" || typeof signal !== "function") {
+        throw new TypeError("native writable stream cancellation is unavailable");
+      }
+      return { Stream, signal };
+    },
     sendTimers() {
       // Only backpressured sends need timers. Import, adoption and synchronous
       // sends remain available in hosts without this optional capability.
@@ -259,6 +283,13 @@ export function createBrowserWebSocketManager(dependencies: {
     streamController: ReadableStreamDefaultController<BrowserWebSocketMessage> | null = null;
     streamEnded = false;
     nativePulling = false;
+    writableConverting = false;
+    writable: WritableStream<BrowserWebSocketMessage> | null = null;
+    writableController: WritableStreamDefaultController | null = null;
+    writableSignal: AbortSignal | null = null;
+    writableAbortListener: EventListener | null = null;
+    writableClosing = false;
+    writableEnded = false;
     operation: Outcome<void> | null = null;
     publicationFailure: Failure | null = null;
     closing = false;
@@ -284,6 +315,7 @@ export function createBrowserWebSocketManager(dependencies: {
         receive: () => this.receive(false), toReadableStream: () => this.toReadableStream(),
         send: (value: BrowserWebSocketMessage) => this.send(value),
         sendWhenReady: (value: BrowserWebSocketMessage) => this.sendWhenReady(value),
+        toWritableStream: () => this.toWritableStream(),
         close: (options?: BrowserWebSocketCloseOptions) => this.close(options),
         cancel: (reason?: string) => this.cancel(reason), retire: (reason?: string) => this.retire(reason),
       });
@@ -371,6 +403,7 @@ export function createBrowserWebSocketManager(dependencies: {
       void this.joinRetirement();
     }
     finishStream(): void {
+      this.finishWritable();
       if (!this.streamController || this.streamEnded) return;
       const failure = this.publicationFailure ?? (this.operation?.outcome !== "ok" ? this.operation : null);
       if (failure) { this.streamEnded = true; this.streamController.error(streamError(failure)); }
@@ -439,7 +472,99 @@ export function createBrowserWebSocketManager(dependencies: {
         return ok(stream);
       } catch { return fail("WebSocket stream conversion failed", "compatibility_rejected"); }
     }
+    toWritableStream(): Outcome<WritableStream<BrowserWebSocketMessage>> {
+      if (this.writable) return ok(this.writable);
+      if (this.writableConverting || this.pendingSend || this.sendTimer) {
+        return fail("WebSocket has a pending manual send or conversion", "compatibility_rejected");
+      }
+      if (this.closing || this.hostClosed || this.released) {
+        return fail("WebSocket is closing", "compatibility_rejected");
+      }
+      // Host capability access and construction may reenter the handle. Reserve
+      // this direction before either, without taking receive ownership.
+      this.writableConverting = true;
+      try {
+        const native = this.prepared.native;
+        const { Stream, signal } = native.writableSupport();
+        if (this.closing || this.hostClosed || this.released || dependencies.isClosing(this.scopeKey)
+            || !dependencies.isTracked(this.scopeKey)) {
+          return fail("WebSocket owner is closing", "capability_denied");
+        }
+        let setupFailure: Failure | null = null;
+        const stream = new Stream<BrowserWebSocketMessage>({
+          start: controller => {
+            this.writableController = controller;
+            try {
+              this.writableSignal = Reflect.apply(signal, controller, []);
+              this.writableAbortListener = () => {
+                // Native sink.abort waits for an in-flight write. Its controller
+                // signal fires immediately, so interrupt our bounded waiter now.
+                void this.retire("WebSocket writable stream aborted", "websocket_stream_abort");
+              };
+              Reflect.apply(native.add, this.writableSignal, ["abort", this.writableAbortListener]);
+            } catch { setupFailure = fail("WebSocket writable cancellation setup failed"); }
+          },
+          write: async chunk => {
+            const sent = await this.sendWhenReady(chunk, true);
+            if (sent.outcome === "ok") return;
+            // A failed native stream cannot be reused. Join the same socket's
+            // cleanup before rejecting; a local send refusal is not retirement.
+            // An explicit graceful close may have fenced this unsent write.
+            // Preserve that already established outcome instead of escalating it.
+            const retired = await (this.closing ? this.joinRetirement()
+              : this.retire("WebSocket writable stream failed"));
+            throw streamError(retired.outcome === "ok" ? sent : retired);
+          },
+          close: async () => {
+            this.writableClosing = true;
+            const terminal = await this.close();
+            this.writableEnded = true;
+            if (terminal.outcome !== "ok") throw streamError(terminal);
+          },
+          abort: async () => {
+            const retired = await this.retire("WebSocket writable stream aborted", "websocket_stream_abort");
+            this.writableEnded = true;
+            if (retired.outcome !== "ok") throw streamError(retired);
+            const terminal = await this.closed.promise;
+            if (terminal.outcome === "err" || terminal.outcome === "panicked") throw streamError(terminal);
+          },
+        }, { highWaterMark: 1 });
+        if (setupFailure || this.closing || this.hostClosed || this.released
+            || dependencies.isClosing(this.scopeKey) || !dependencies.isTracked(this.scopeKey)) {
+          return this.refuseWritableConversion(setupFailure ?? fail("WebSocket closed during writable conversion"));
+        }
+        this.writable = stream;
+        return ok(stream);
+      } catch {
+        return this.refuseWritableConversion(fail("WebSocket writable conversion requires native cancellation support", "compatibility_rejected"));
+      } finally { this.writableConverting = false; }
+    }
+    refuseWritableConversion(failure: Failure): Failure {
+      try { this.writableController?.error(streamError(failure)); } catch { /* No stream was published. */ }
+      this.writableController = null;
+      const cleanup = this.clearWritableSignal();
+      if (cleanup) this.stop(cleanup, "websocket_stream_setup");
+      return cleanup ?? failure;
+    }
+    clearWritableSignal(): Failure | null {
+      if (!this.writableAbortListener || !this.writableSignal) return null;
+      try {
+        Reflect.apply(this.prepared.native.remove, this.writableSignal, ["abort", this.writableAbortListener]);
+        this.writableAbortListener = null; this.writableSignal = null;
+        return null;
+      } catch { return fail("WebSocket writable signal cleanup failed"); }
+    }
+    finishWritable(): void {
+      if (!this.writableController || this.writableEnded || this.writableClosing) return;
+      const failure = this.publicationFailure ?? (this.operation?.outcome !== "ok" ? this.operation : null)
+        ?? (this.released ? fail("WebSocket closed before its writable stream", "compatibility_rejected") : null);
+      if (failure) {
+        this.writableEnded = true;
+        this.writableController.error(streamError(failure));
+      }
+    }
     send(value: BrowserWebSocketMessage): Outcome<void> {
+      if (this.writable || this.writableConverting) return fail("WebSocket send ownership was transferred", "compatibility_rejected");
       if (this.closing || this.hostClosed || this.released) return fail("WebSocket is closing", "compatibility_rejected");
       try {
         const native = this.prepared.native;
@@ -458,7 +583,10 @@ export function createBrowserWebSocketManager(dependencies: {
         Reflect.apply(native.send, this.socket, [value]); return ok(undefined);
       } catch { return fail("WebSocket send failed"); }
     }
-    sendWhenReady(value: BrowserWebSocketMessage): Promise<Outcome<void>> {
+    sendWhenReady(value: BrowserWebSocketMessage, nativeConsumer = false): Promise<Outcome<void>> {
+      if (!nativeConsumer && (this.writable || this.writableConverting)) {
+        return Promise.resolve(fail("WebSocket send ownership was transferred", "compatibility_rejected"));
+      }
       if (this.pendingSend || this.sendTimer) return Promise.resolve(fail("WebSocket already has a pending send", "compatibility_rejected"));
       if (this.closing || this.hostClosed || this.released) return Promise.resolve(this.unsentOutcome());
       const receipt = deferred<Outcome<void>>();
@@ -647,6 +775,8 @@ export function createBrowserWebSocketManager(dependencies: {
               this.signalListener = null;
             } catch { issue ??= fail("WebSocket signal cleanup failed"); }
           }
+          const writableCleanup = this.clearWritableSignal();
+          issue ??= writableCleanup;
           const terminal = this.operation ?? ok(undefined);
           if (!issue && !this.ownerReleased) {
             const published = checked(this.task.join(terminal));

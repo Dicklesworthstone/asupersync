@@ -47,7 +47,7 @@ async function loadSdk(globals = {}) {
   const context = createContext({
     console, AbortController, AbortSignal, ArrayBuffer, DataView, Uint8Array, URL,
     EventTarget, MessageEvent, WebSocket,
-    TextEncoder, TextDecoder, ReadableStream, WritableStream, WebAssembly,
+    TextEncoder, TextDecoder, ReadableStream, WritableStream, WritableStreamDefaultController, WebAssembly,
     MessageChannel, BroadcastChannel, Response, Request, structuredClone,
     queueMicrotask, setTimeout, clearTimeout, window: {}, document: {},
     isSecureContext: true,
@@ -121,11 +121,15 @@ function channel(t, sdk) {
   return pair;
 }
 
-test("WASM WebSocket ownership waits for native peer close and retires its real ABI task", { timeout: 5000 }, async (t) => {
-  let resolveConnected, resolveClosing, resolveDisconnected;
+for (const pipeSending of [false, true]) test(
+  pipeSending ? "WASM WebSocket pipe joins both real ABI tasks only after native peer close"
+    : "WASM WebSocket ownership waits for native peer close and retires its real ABI task",
+  { timeout: 5000 }, async (t) => {
+  let resolveConnected, resolveClosing, resolveDisconnected, resolveDelivered;
   const connected = new Promise(resolve => { resolveConnected = resolve; });
   const peerClosing = new Promise(resolve => { resolveClosing = resolve; });
   const disconnected = new Promise(resolve => { resolveDisconnected = resolve; });
+  const delivered = new Promise(resolve => { resolveDelivered = resolve; });
   const server = createServer();
   let peerSocket;
   let input = Buffer.alloc(0);
@@ -154,6 +158,9 @@ test("WASM WebSocket ownership waits for native peer close and retires its real 
         for (let i = 0; i < payload.length; i += 1) payload[i] ^= input[2 + i % 4];
         input = input.subarray(6 + length);
         received.push({ opcode, payload });
+        if (received.filter(message => message.opcode === 1 || message.opcode === 2).length === (pipeSending ? 2 : 1)) {
+          resolveDelivered();
+        }
         if (opcode === 8) resolveClosing(payload);
       }
     };
@@ -179,12 +186,28 @@ test("WASM WebSocket ownership waits for native peer close and retires its real 
   assert.equal(snapshot().tasks.total, 1, "adoption admitted a real checked-in ABI task");
   ok(await bounded(handle.opened));
   await bounded(connected);
-  ok(handle.send("owned-ledger-send"));
+  let pipe, readable, writable, sourceCancelled = false;
+  if (pipeSending) {
+    writable = ok(handle.toWritableStream());
+    readable = new ReadableStream({
+      start(controller) {
+        controller.enqueue("owned-ledger-send");
+        controller.enqueue(Uint8Array.of(3, 7, 9));
+        // Keep the producer open so owner cancellation must retire both sides.
+      },
+      cancel() { sourceCancelled = true; },
+    }, { highWaterMark: 0 });
+    pipe = ok(scope.pipeTo(readable, writable));
+    assert.equal(snapshot().tasks.total, 2, "pipe and socket each own an actual ABI task");
+  } else {
+    ok(handle.send("owned-ledger-send"));
+  }
   const text = handle.receive();
   peerSocket.write(frame(1, Buffer.from("héllo through WASM ownership")));
   peerSocket.write(frame(2, Buffer.from([0, 255, 7])));
   assert.equal(ok(await bounded(text)).value, "héllo through WASM ownership");
   assert.deepEqual([...ok(await bounded(handle.receive())).value], [0, 255, 7]);
+  await bounded(delivered);
 
   const pendingRead = handle.receive();
   let ownerSettled = false;
@@ -197,13 +220,22 @@ test("WASM WebSocket ownership waits for native peer close and retires its real 
   assert.equal(socket.readyState, WebSocket.CLOSING);
   assert.equal(ownerSettled, false, "scope close cannot outrun the peer's close acknowledgement");
   assert.equal(terminalSettled, false, "task terminal is withheld until native close");
-  assert.equal(snapshot().tasks.total, 1, "the live native close remains owned in the ABI ledger");
+  assert.equal(snapshot().tasks.total, pipeSending ? 2 : 1, "native close and any pipe remain owned in the ABI ledger");
   assert.equal(received.find(message => message.opcode === 1).payload.toString(), "owned-ledger-send");
+  if (pipeSending) {
+    assert.deepEqual([...received.find(message => message.opcode === 2).payload], [3, 7, 9]);
+    await pipePending(pipe.closed);
+  }
 
   peerSocket.end(frame(8, closePayload));
   ok(await bounded(closing));
   assert.equal((await bounded(pendingRead)).outcome, "cancelled");
   assert.equal((await bounded(handle.closed)).outcome, "cancelled");
+  if (pipeSending) {
+    assert.equal((await bounded(pipe.closed)).outcome, "cancelled");
+    assert.equal(sourceCancelled, true);
+    pipeUnlocked(readable, writable);
+  }
   await bounded(disconnected);
   assert.equal(socket.readyState, WebSocket.CLOSED);
   assert.deepEqual(listenerCounts(), beforeListeners, "all owned native socket listeners retired");
@@ -211,10 +243,11 @@ test("WASM WebSocket ownership waits for native peer close and retires its real 
   assert.equal(snapshot().tasks.cleanup_pending, 0);
   await closeRuntime();
   console.log(JSON.stringify({
-    scenario_id: "browser-websocket-owned-packaged-wasm",
-    received_messages: 2, sent_messages: 1,
+    scenario_id: pipeSending ? "browser-websocket-pipe-owned-packaged-wasm" : "browser-websocket-owned-packaged-wasm",
+    received_messages: 2, sent_messages: pipeSending ? 2 : 1,
     pending_owner_close_before_peer_ack: true,
-    wasm_task_counts: [0, 1, 1, 0], native_listeners_after_close: listenerCounts(),
+    wasm_task_counts: pipeSending ? [0, 1, 2, 2, 0] : [0, 1, 1, 0],
+    native_listeners_after_close: listenerCounts(),
     evidence_scope: "actual SDK, checked-in JS/WASM handle ledger, native Node WebSocket and HTTP-upgrade peer",
     no_claim: ["browser-engine execution", "Rust rebuild", "Rust executor dispatch"],
   }));
