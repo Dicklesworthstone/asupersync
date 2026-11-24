@@ -3026,7 +3026,10 @@ impl From<StreamingError> for QuicTransportError {
 
 impl From<crate::net::quic_native::NativeQuicConnectionError> for QuicTransportError {
     fn from(err: crate::net::quic_native::NativeQuicConnectionError) -> Self {
-        Self::Quic(err.to_string())
+        match err {
+            NativeQuicConnectionError::Cancelled => Self::Cancelled,
+            other => Self::Quic(other.to_string()),
+        }
     }
 }
 
@@ -3041,7 +3044,10 @@ impl From<ManagedEndpointError> for QuicTransportError {
 
 impl From<SymbolDatagramError> for QuicTransportError {
     fn from(err: SymbolDatagramError) -> Self {
-        Self::Quic(err.to_string())
+        match err {
+            SymbolDatagramError::Connection(NativeQuicConnectionError::Cancelled) => Self::Cancelled,
+            other => Self::Quic(other.to_string()),
+        }
     }
 }
 

@@ -2869,6 +2869,166 @@ mod tests {
     }
 
     #[test]
+    fn quic_error_conversions_keep_non_cancellation_diagnostics() {
+        let connection = QuicTransportError::from(NativeQuicConnectionError::InvalidState(
+            "cancelled is diagnostic text, not a cancellation",
+        ));
+        assert!(matches!(
+            connection,
+            QuicTransportError::Quic(message)
+                if message == "invalid native quic connection state: cancelled is diagnostic text, not a cancellation"
+        ));
+
+        let datagram = QuicTransportError::from(SymbolDatagramError::Connection(
+            NativeQuicConnectionError::InvalidState("not established"),
+        ));
+        assert!(matches!(
+            datagram,
+            QuicTransportError::Quic(message)
+                if message == "quic connection error: InvalidState(\"not established\")"
+        ));
+    }
+
+    #[test]
+    fn quic_frame_transport_preserves_cancellation_without_admitting_bytes() {
+        let (cx, mut client, mut server) = established_pair();
+        let cancelled = cancelled_test_cx();
+        assert!(matches!(
+            QuicFrameTransport::open(&cancelled, &mut client),
+            Err(QuicTransportError::Cancelled)
+        ));
+
+        let mut tx = QuicFrameTransport::open(&cx, &mut client).expect("open control stream");
+        assert_eq!(
+            tx.stream(),
+            first_client_bidi_stream(),
+            "cancelled open must not consume a stream id"
+        );
+        let mut rx = QuicFrameTransport::for_stream(tx.stream());
+        let frame = Frame::new(
+            ProtocolVersion::CURRENT,
+            FrameType::Handshake,
+            b"admitted".to_vec(),
+        )
+        .expect("handshake frame");
+        tx.send(&cx, &mut client, &frame).expect("queue initial frame");
+        pump_until_idle(
+            &cx,
+            &mut client,
+            &mut server,
+            DEFAULT_MAX_PACKET_BYTES,
+            2_000,
+        )
+        .expect("deliver initial frame");
+        assert_eq!(
+            rx.try_recv(&cx, &mut server)
+                .expect("read established control stream")
+                .expect("initial frame was delivered")
+                .payload(),
+            b"admitted"
+        );
+
+        let queued = client.inner().pending_stream_data_bytes();
+        assert!(matches!(
+            tx.send(&cancelled, &mut client, &frame),
+            Err(QuicTransportError::Cancelled)
+        ));
+        assert_eq!(client.inner().pending_stream_data_bytes(), queued);
+        assert!(matches!(
+            rx.try_recv(&cancelled, &mut server),
+            Err(QuicTransportError::Cancelled)
+        ));
+        assert!(rx.try_recv(&cx, &mut server).expect("no extra frame").is_none());
+    }
+
+    #[test]
+    fn native_frame_transport_preserves_cancellation_without_admitting_bytes() {
+        let (cx, client_api, server_api) = established_pair();
+        let mut client = client_api.inner().clone();
+        let mut server = server_api.inner().clone();
+        let cancelled = cancelled_test_cx();
+        assert!(matches!(
+            NativeQuicFrameTransport::open(&cancelled, &mut client),
+            Err(QuicTransportError::Cancelled)
+        ));
+
+        let mut tx = NativeQuicFrameTransport::open(&cx, &mut client).expect("open native stream");
+        assert_eq!(tx.stream, first_client_bidi_stream());
+        let mut rx = NativeQuicFrameTransport::for_stream(tx.stream);
+        let frame = Frame::new(
+            ProtocolVersion::CURRENT,
+            FrameType::Handshake,
+            b"admitted".to_vec(),
+        )
+        .expect("handshake frame");
+        tx.send(&cx, &mut client, &frame).expect("queue initial frame");
+        let mut packet_number = 0;
+        pump_native_until_idle(
+            &cx,
+            &mut client,
+            &mut server,
+            &mut packet_number,
+            DEFAULT_MAX_PACKET_BYTES,
+            2_000,
+        )
+        .expect("deliver initial native frame");
+        assert_eq!(
+            rx.try_recv(&cx, &mut server)
+                .expect("read established native stream")
+                .expect("initial frame was delivered")
+                .payload(),
+            b"admitted"
+        );
+
+        let queued = client.pending_stream_data_bytes();
+        assert!(matches!(
+            tx.send(&cancelled, &mut client, &frame),
+            Err(QuicTransportError::Cancelled)
+        ));
+        assert_eq!(client.pending_stream_data_bytes(), queued);
+        assert!(matches!(
+            rx.try_recv(&cancelled, &mut server),
+            Err(QuicTransportError::Cancelled)
+        ));
+        assert!(rx.try_recv(&cx, &mut server).expect("no extra frame").is_none());
+    }
+
+    #[test]
+    fn quic_symbol_adapters_preserve_cancellation_without_queuing_datagrams() {
+        let (cx, mut client, _server) = established_pair();
+        let cancelled = cancelled_test_cx();
+        let symbol = Symbol::new(
+            SymbolId::new(ObjectId::new(0x5155_4943, 6), 0, 0),
+            b"symbol".to_vec(),
+            SymbolKind::Source,
+        );
+        let queued = client.inner().pending_outbound_datagram_count();
+        let error = send_symbol(&cancelled, &mut client, &symbol, 7, 0, None)
+            .expect_err("cancelled symbol must not be admitted");
+        assert!(matches!(
+            QuicTransportError::from(error),
+            QuicTransportError::Cancelled
+        ));
+        assert_eq!(client.inner().pending_outbound_datagram_count(), queued);
+        send_symbol(&cx, &mut client, &symbol, 7, 0, None)
+            .expect("the active context can admit the same symbol");
+        assert_eq!(client.inner().pending_outbound_datagram_count(), queued + 1);
+
+        let mut native = client.inner().clone();
+        let queued = native.pending_outbound_datagram_count();
+        assert!(matches!(
+            send_native_symbol(&cancelled, &mut native, &symbol, 7, 0, None),
+            Err(QuicTransportError::Cancelled)
+        ));
+        let bytes = native_symbol_datagram(&symbol, 7, 0, None).expect("valid native datagram");
+        assert!(matches!(
+            send_native_symbol_batch(&cancelled, &mut native, [bytes]),
+            Err(QuicTransportError::Cancelled)
+        ));
+        assert_eq!(native.pending_outbound_datagram_count(), queued);
+    }
+
+    #[test]
     fn quic_frame_transport_round_trips_canonical_atp_frames() {
         let (cx, mut client, mut server) = established_pair();
         let mut tx = QuicFrameTransport::open(&cx, &mut client).expect("open control stream");
