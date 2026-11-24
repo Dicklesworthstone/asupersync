@@ -172,6 +172,11 @@ fn owner_cancellation_preserves_pending_cleanup_until_real_deadline() {
                 assert!(matches!(poll(&mut future),
                         Poll::Ready(Err(elapsed)) if elapsed.deadline() == deadline));
             }
+            assert_eq!(
+                timer.pending_count(),
+                0,
+                "terminal publication must release the deadline even while the wrapper is retained"
+            );
             drop(future);
             assert_eq!(timer.pending_count(), 0);
             eprintln!(

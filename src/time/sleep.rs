@@ -679,6 +679,14 @@ impl Sleep {
         )
     }
 
+    /// A deadline race can finish through its other branch while this sleep
+    /// is still registered. Retire it before publishing that branch's result.
+    pub(super) fn disarm(&self) {
+        if self.was_polled() {
+            self.cancel_active_registration();
+        }
+    }
+
     fn cancel_active_registration(&self) {
         let (handle, driver, fallback_handles) = self.take_active_registration();
 

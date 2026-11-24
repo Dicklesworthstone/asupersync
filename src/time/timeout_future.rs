@@ -258,6 +258,7 @@ impl<F: Future + Unpin> TimeoutFuture<F> {
             Poll::Ready(output) => {
                 self.completed = true;
                 self.timed_out = false;
+                self.sleep.disarm();
                 return Poll::Ready(Ok(output));
             }
             Poll::Pending => {}
@@ -315,6 +316,7 @@ impl<F: Future> Future for TimeoutFuture<F> {
             Poll::Ready(output) => {
                 *this.completed = true;
                 *this.timed_out = false;
+                this.sleep.disarm();
                 return Poll::Ready(Ok(output));
             }
             Poll::Pending => {}
