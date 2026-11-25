@@ -251,8 +251,9 @@ fn earlier_deadline(first: Option<Time>, second: Option<Time>) -> Option<Time> {
 impl Server {
     /// Bind registered unary and server-streaming methods to native HTTP/2.
     ///
-    /// Drive the returned listener with `Http2Listener::run_produced`, not
-    /// `run`. Unary calls delegate to the existing registered-unary pipeline.
+    /// Drive the returned listener with [`Http2Listener::run_produced`] or
+    /// [`Http2Listener::run_produced_owned_in`] for service-region ownership.
+    /// Unary calls delegate to the existing registered-unary pipeline.
     /// Streaming calls invoke `ServiceHandler::call_server_streaming` only
     /// inside the H2 response producer's live request context.
     ///
@@ -303,7 +304,8 @@ impl Server {
     }
 
     /// [`Self::bind_registered_streaming_http2`] on a Unix-domain socket
-    /// listener; drive it with `Http2Listener::run_produced`. See
+    /// listener; drive it with [`Http2Listener::run_produced`] or
+    /// [`Http2Listener::run_produced_owned_in`]. See
     /// [`Server::bind_registered_http2_unix`] for the transport's terms.
     ///
     /// # Errors
@@ -354,6 +356,47 @@ impl Server {
             .await?
             .run_produced(runtime)
             .await
+    }
+
+    /// Bind and run registered unary/server-streaming RPCs owned by `cx`.
+    ///
+    /// Binding uses `cx`'s ambient I/O capability. Accepted connections belong
+    /// to its region, and each request owns its handler, producer, descendants
+    /// and finalizers. Successful terminal frames wait for that request subtree
+    /// to retire.
+    ///
+    /// Once listening, cancellation of either `cx` or the task polling this
+    /// future ends admission and drains the accepted connections. Use
+    /// [`Self::bind_registered_streaming_http2`] and
+    /// [`Http2Listener::run_produced_owned_in`] separately to retain access to
+    /// the listener's local address, shutdown signal or connection manager.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Interrupted` if `cx` is already cancelled before binding.
+    /// Otherwise retains configuration, bind and listener errors, including
+    /// an error when driven outside a runtime task.
+    pub async fn serve_streaming_http2_in<A>(
+        self: &Arc<Self>,
+        cx: &Cx,
+        addr: A,
+        host_policy: HostPolicy,
+        streaming: ServerStreamingConfig,
+    ) -> io::Result<ShutdownStats>
+    where
+        A: ToSocketAddrs + Send + 'static,
+    {
+        cx.checkpoint()
+            .map_err(|error| io::Error::new(io::ErrorKind::Interrupted, error))?;
+        if crate::runtime::Runtime::current_handle().is_none() {
+            return Err(io::Error::other(
+                "Server::serve_streaming_http2_in must run inside a runtime task",
+            ));
+        }
+        let listener = cx
+            .with_ambient(self.bind_registered_streaming_http2(addr, host_policy, streaming))
+            .await?;
+        listener.run_produced_owned_in(cx).await
     }
 
     pub(in crate::grpc) fn validate_registered_streaming(

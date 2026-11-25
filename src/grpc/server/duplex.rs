@@ -294,8 +294,9 @@ type DuplexFuture = Pin<Box<dyn Future<Output = Http2ProducedResponse> + Send + 
 impl Server {
     /// Bind all four registered RPC kinds with live input and bounded output.
     ///
-    /// Drive the returned listener with `run_streaming_produced`. A response
-    /// stream can own its request stream and produce messages before request
+    /// Drive the returned listener with [`Http2Listener::run_streaming_produced`]
+    /// or [`Http2Listener::run_streaming_produced_in`] for service-region ownership.
+    /// A response stream can own its request stream and produce messages before request
     /// EOF. HTTP/2 flow control bounds both directions independently. The same
     /// actual request child owns the handler, input, producer and descendants
     /// until response completion and region drain.
@@ -330,7 +331,8 @@ impl Server {
     }
 
     /// [`Self::bind_registered_duplex_http2`] on a Unix-domain socket
-    /// listener; drive it with `Http2Listener::run_streaming_produced`. See
+    /// listener; drive it with [`Http2Listener::run_streaming_produced`] or
+    /// [`Http2Listener::run_streaming_produced_in`]. See
     /// [`Server::bind_registered_http2_unix`] for the transport's terms.
     ///
     /// # Errors
@@ -410,6 +412,47 @@ impl Server {
             .await?
             .run_streaming_produced(runtime)
             .await
+    }
+
+    /// Bind and run all registered RPC shapes with connections owned by `cx`.
+    ///
+    /// Binding uses `cx`'s ambient I/O capability. Connections belong to its
+    /// region; each request owns its live input, handler, response producer,
+    /// descendants and finalizers. Successful terminal frames wait for that
+    /// request subtree to retire.
+    ///
+    /// Once listening, cancellation of either `cx` or the task polling this
+    /// future ends admission and drains the accepted connections. Use
+    /// [`Self::bind_registered_duplex_http2`] and
+    /// [`Http2Listener::run_streaming_produced_in`] separately to retain access
+    /// to the listener's local address, shutdown signal or connection manager.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Interrupted` if `cx` is already cancelled before binding.
+    /// Otherwise retains configuration, bind and listener errors, including
+    /// an error when driven outside a runtime task.
+    pub async fn serve_duplex_http2_in<A>(
+        self: &Arc<Self>,
+        cx: &Cx,
+        addr: A,
+        host_policy: HostPolicy,
+        config: ServerDuplexConfig,
+    ) -> io::Result<ShutdownStats>
+    where
+        A: ToSocketAddrs + Send + 'static,
+    {
+        cx.checkpoint()
+            .map_err(|error| io::Error::new(io::ErrorKind::Interrupted, error))?;
+        if crate::runtime::Runtime::current_handle().is_none() {
+            return Err(io::Error::other(
+                "Server::serve_duplex_http2_in must run inside a runtime task",
+            ));
+        }
+        let listener = cx
+            .with_ambient(self.bind_registered_duplex_http2(addr, host_policy, config))
+            .await?;
+        listener.run_streaming_produced_in(cx).await
     }
 
     fn resolve_duplex_method(

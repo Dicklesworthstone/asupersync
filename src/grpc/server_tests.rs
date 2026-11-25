@@ -57,6 +57,145 @@ mod tests {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    mod owned_streaming_setup {
+        use super::*;
+        use crate::cx::cap::CapSet;
+        use crate::runtime::{Runtime, RuntimeBuilder};
+        use std::future::Future;
+        use std::io;
+        use std::net::{SocketAddr, ToSocketAddrs};
+        use std::num::NonZeroUsize;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::{Context, Poll, Waker};
+
+        #[derive(Clone, Copy, Debug)]
+        enum Mode {
+            Streaming,
+            #[cfg(feature = "http2-streaming")]
+            Duplex,
+        }
+
+        #[derive(Clone, Copy, Debug)]
+        enum Refusal {
+            Cancelled,
+            NoIo,
+            MissingRuntime,
+        }
+
+        struct ResolveProbe(Arc<AtomicUsize>);
+
+        impl ToSocketAddrs for ResolveProbe {
+            type Iter = std::iter::Empty<SocketAddr>;
+
+            fn to_socket_addrs(&self) -> io::Result<Self::Iter> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Err(io::Error::other("unexpected address resolution"))
+            }
+        }
+
+        async fn invoke(
+            mode: Mode,
+            server: &Arc<Server>,
+            owner: &Cx,
+            address: ResolveProbe,
+        ) -> io::Result<ShutdownStats> {
+            match mode {
+                Mode::Streaming => {
+                    server
+                        .serve_streaming_http2_in(
+                            owner,
+                            address,
+                            HostPolicy::allow_all(),
+                            ServerStreamingConfig {
+                                frame_capacity: NonZeroUsize::MIN,
+                                max_frame_bytes: NonZeroUsize::new(1024).unwrap(),
+                                max_trailer_bytes: 1024,
+                                terminal_timeout: Duration::from_secs(1),
+                            },
+                        )
+                        .await
+                }
+                #[cfg(feature = "http2-streaming")]
+                Mode::Duplex => {
+                    server
+                        .serve_duplex_http2_in(
+                            owner,
+                            address,
+                            HostPolicy::allow_all(),
+                            ServerDuplexConfig::default(),
+                        )
+                        .await
+                }
+            }
+        }
+
+        #[test]
+        fn owned_streaming_setup_refuses_before_resolution() {
+            let modes = [
+                Mode::Streaming,
+                #[cfg(feature = "http2-streaming")]
+                Mode::Duplex,
+            ];
+            for mode in modes {
+                for refusal in [Refusal::Cancelled, Refusal::NoIo, Refusal::MissingRuntime] {
+                    let server = Arc::new(Server::builder().add_service(TestService).build());
+                    let calls = Arc::new(AtomicUsize::new(0));
+                    let owner = Cx::for_testing();
+                    let owner = match refusal {
+                        Refusal::Cancelled => {
+                            owner.set_cancel_requested(true);
+                            owner
+                        }
+                        Refusal::NoIo => {
+                            let _restricted = owner
+                                .restrict::<CapSet<true, true, true, false, true>>()
+                                .set_current_restricted();
+                            Cx::current().unwrap()
+                        }
+                        Refusal::MissingRuntime => owner,
+                    };
+                    let address = ResolveProbe(Arc::clone(&calls));
+                    let error = if matches!(refusal, Refusal::MissingRuntime) {
+                        assert!(Runtime::current_handle().is_none());
+                        let mut future = std::pin::pin!(invoke(mode, &server, &owner, address));
+                        let mut task = Context::from_waker(Waker::noop());
+                        let Poll::Ready(Err(error)) = future.as_mut().poll(&mut task) else {
+                            panic!("missing runtime must refuse before resolution");
+                        };
+                        error
+                    } else {
+                        let runtime = RuntimeBuilder::current_thread().build().unwrap();
+                        runtime.block_on(async {
+                            let coordinator = Cx::current().unwrap();
+                            assert!(coordinator.capabilities().io);
+                            let result = invoke(mode, &server, &owner, address).await;
+                            let restored = Cx::current().unwrap();
+                            assert_eq!(restored.task_id(), coordinator.task_id());
+                            assert!(restored.capabilities().io);
+                            result.expect_err("invalid owner must refuse setup")
+                        })
+                    };
+                    assert_eq!(calls.load(Ordering::SeqCst), 0, "{mode:?}/{refusal:?}");
+                    match refusal {
+                        Refusal::Cancelled => {
+                            assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+                            assert!(error.get_ref().unwrap().is::<crate::error::Error>());
+                        }
+                        Refusal::NoIo => {
+                            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+                            assert!(error.get_ref().unwrap().is::<crate::cx::IoCapabilityDenied>());
+                        }
+                        Refusal::MissingRuntime => {
+                            assert_eq!(error.kind(), io::ErrorKind::Other);
+                            assert!(error.to_string().contains("must run inside a runtime task"));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     mod scoped_unary_dispatch {
         use super::*;
         use crate::channel::oneshot;
