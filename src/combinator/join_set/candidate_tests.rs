@@ -172,6 +172,7 @@ fn nonblocking_readiness_respects_retirement_before_exposing_a_value() {
     let mut set = JoinSet::<u32, &'static str, _>::in_cx(&cx);
     let barrier = RetirementBarrier::pending();
     let admitted = Arc::new(AdmittedTaskSlot::new().with_retirement_barrier(Arc::clone(&barrier)));
+    let pending_cancellation = admitted.pending_cancel_reason();
     let (send, receive) = oneshot::channel();
     let handle = TaskHandle::new_pending(TaskId::new_for_test(1, 0), receive, admitted);
     set.insert_member(handle);
@@ -181,6 +182,24 @@ fn nonblocking_readiness_respects_retirement_before_exposing_a_value() {
         "publication is not retirement"
     );
     assert!(set.ready.candidates.lock().is_empty());
+    assert_eq!(set.summary().completed(), 0);
+    let observer = Cx::detached_cancel_context();
+    let reason = CancelReason::shutdown();
+    observer.set_cancel_reason(reason.clone());
+    let mut waiting = Box::pin(set.join_next_cancellable(&observer));
+    assert!(matches!(
+        waiting
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop())),
+        Poll::Ready(Err(observed)) if observed == reason
+    ));
+    drop(waiting);
+    assert!(!barrier.is_open(), "interruption does not certify retirement");
+    assert!(
+        pending_cancellation.read().is_none(),
+        "already-published work must not receive another cancellation"
+    );
+    assert_eq!(set.len(), 1, "published value remains owned");
     assert_eq!(set.summary().completed(), 0);
     barrier.open_and_wake();
     assert!(set.ready.candidates.lock().contains(&0));

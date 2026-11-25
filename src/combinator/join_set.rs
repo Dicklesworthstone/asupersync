@@ -29,7 +29,9 @@
 //! current region, [`JoinSet::new`] for an explicit scope, [`JoinSet::spawn`]
 //! and [`JoinSet::spawn_all`] for member admission, [`JoinSet::spawn_local`]
 //! for thread-pinned members, [`JoinSet::join_next`]
-//! for completion-order collection, [`JoinSet::join_all`] for spawn-order
+//! for completion-order collection, [`JoinSet::join_next_cancellable`] to
+//! interrupt observation while retaining unfinished members,
+//! [`JoinSet::join_all`] for spawn-order
 //! collection, [`JoinSet::cancel_all`] for explicit drain after cancellation,
 //! [`JoinSet::summary`] for severity aggregation, structured
 //! `join_set.spawn` trace fields that record the set's region id (`join_set_id`),
@@ -423,34 +425,41 @@ where
         // Only this borrowing wait owns the executor's subscription. Member
         // registrations remain installed when the wait completes or is dropped.
         let mut collector = CollectorWait::new(Arc::clone(&self.ready));
-        std::future::poll_fn(|task_cx| {
-            if self.members.is_empty() {
-                return Poll::Ready(None);
-            }
-            collector.refresh(task_cx.waker());
+        std::future::poll_fn(|task_cx| self.poll_next_outcome(task_cx, &mut collector)).await
+    }
 
-            // Poll each candidate, in spawn order, through its handle's own
-            // long-lived receiver with the member's own waker, so every pending
-            // registration SURVIVES this poll (br-asupersync-tncxj9). Polling a
-            // temporary `handle.join(cx)` future per member instead registered a
-            // waiter and then retired it again as that future dropped, so the
-            // scan ended with no waker registered on any member and nothing ever
-            // re-polled this set. A member leaves the candidates before its poll,
-            // and its waker puts it back when its result is published.
-            let mut from = 0;
-            while let Some(member_index) = self.ready.next_candidate(from) {
-                if let Some(outcome) = self.poll_candidate(member_index) {
-                    return Poll::Ready(Some(outcome));
-                }
-                let Some(next) = member_index.checked_add(1) else {
-                    break;
-                };
-                from = next;
-            }
+    /// Shared completion-order scan. The caller owns the collector lifetime,
+    /// including whether its executor-waker owner survives a completing poll.
+    fn poll_next_outcome(
+        &mut self,
+        task_cx: &mut Context<'_>,
+        collector: &mut CollectorWait,
+    ) -> Poll<Option<Outcome<T, E>>> {
+        if self.members.is_empty() {
+            return Poll::Ready(None);
+        }
+        collector.refresh(task_cx.waker());
 
-            Poll::Pending
-        })
-        .await
+        // Poll each candidate, in spawn order, through its handle's own
+        // long-lived receiver with the member's own waker, so every pending
+        // registration SURVIVES this poll (br-asupersync-tncxj9). Polling a
+        // temporary `handle.join(cx)` future per member instead registered a
+        // waiter and then retired it again as that future dropped, so the
+        // scan ended with no waker registered on any member and nothing ever
+        // re-polled this set. A member leaves the candidates before its poll,
+        // and its waker puts it back when its result is published.
+        let mut from = 0;
+        while let Some(member_index) = self.ready.next_candidate(from) {
+            if let Some(outcome) = self.poll_candidate(member_index) {
+                return Poll::Ready(Some(outcome));
+            }
+            let Some(next) = member_index.checked_add(1) else {
+                break;
+            };
+            from = next;
+        }
+
+        Poll::Pending
     }
 
     /// Requests cancellation for every member and drains all terminal outcomes

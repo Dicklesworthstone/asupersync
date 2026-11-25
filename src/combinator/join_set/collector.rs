@@ -79,20 +79,7 @@ where
         // On drop or unwind, request the remaining cancellations before user
         // values in the collected prefix are destroyed (v8rp1h L6).
         let mut members = self;
-        let mut first_panic = None;
-        for member in members.members.values() {
-            if !member.handle.terminal_published()
-                && let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    member.handle.abort_with_reason(reason.clone());
-                }))
-                && first_panic.is_none()
-            {
-                first_panic = Some(payload);
-            }
-        }
-        if let Some(payload) = first_panic {
-            std::panic::resume_unwind(payload);
-        }
+        members.cancel_unfinished_for_owner(&reason);
         poll_fn(|task| {
             for _ in 0..Self::SELECTION_CANDIDATES_PER_POLL {
                 let Some((&index, _)) = members.members.first_key_value() else {
@@ -177,18 +164,19 @@ impl CollectorWait {
         drop(retired_slot);
         drop(retired_owner);
     }
-}
 
-impl Drop for CollectorWait {
-    fn drop(&mut self) {
-        let Some(registered) = self.registered.take() else {
+    /// Retire the subscription while retaining its final executor-waker owner.
+    /// A completing poll must publish its result before a foreign destructor
+    /// can run; the owner is released when this guard itself is dropped.
+    pub(super) fn clear(&mut self) {
+        let Some(registered) = self.registered.as_ref() else {
             return;
         };
         let retired = {
             let mut slot = self.ready.waiter.lock();
             if slot
                 .as_ref()
-                .is_some_and(|current| Arc::ptr_eq(current, &registered))
+                .is_some_and(|current| Arc::ptr_eq(current, registered))
             {
                 slot.take()
             } else {
@@ -198,7 +186,12 @@ impl Drop for CollectorWait {
         // The local owner also prevents the removal above from invoking an
         // executor destructor under the lock. Never remove a newer owner's slot.
         drop(retired);
-        drop(registered);
+    }
+}
+
+impl Drop for CollectorWait {
+    fn drop(&mut self) {
+        self.clear();
     }
 }
 

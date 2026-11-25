@@ -130,16 +130,86 @@ where
         }
     }
 
-    fn cancel_unfinished_for_owner(&self, reason: &CancelReason) {
+    /// Wait for one member or interrupt observation on caller cancellation.
+    ///
+    /// `Ok(Some(outcome))` consumes one retired member, in the same completion
+    /// order as [`Self::join_next`]. `Ok(None)` means the set is empty. A ready
+    /// member or empty set takes precedence over caller cancellation.
+    ///
+    /// `Err(reason)` acknowledges an unmasked cancellation of `cx`, requests
+    /// that cancellation for every unfinished member, and returns without
+    /// waiting for their cleanup. No member or outcome is consumed, and the
+    /// set's length and summary are unchanged. The same set can subsequently
+    /// be collected with any join API; published results behind a pending
+    /// retirement barrier are retained without requesting their cancellation.
+    ///
+    /// This is an interruption of observation, not a group-drain receipt.
+    /// Members remain owned by their original region. Non-cooperative members
+    /// and already-running blocking work can still delay actual region close.
+    /// Use [`Self::join_next_cancel_on_owner`] when the wait itself must keep
+    /// waiting for an actual member result after forwarding cancellation.
+    ///
+    /// The wait owns its cancellation and collector registrations. It wakes
+    /// even when no member completes, honors cancellation masks, and applies
+    /// [`Cx::checkpoint`] budget and attribution semantics. Dropping the
+    /// borrowing future retires only its own registrations: it does not
+    /// cancel members or discard results. Cancellation already forwarded is
+    /// never undone. No runtime capability is required on the observing `cx`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the caller's cancellation reason, separately from an actual
+    /// member's [`Outcome::Cancelled`]. An interrupted wait does not update
+    /// [`Self::summary`], because it has observed no member completion.
+    pub fn join_next_cancellable<'a, Caps>(
+        &'a mut self,
+        cx: &'a Cx<Caps>,
+    ) -> impl Future<Output = Result<Option<Outcome<T, E>>, CancelReason>> + 'a {
+        let mut cancellation = crate::channel::OwnedCancelRegistration::new(cx.clone());
+        let mut collector = super::CollectorWait::new(std::sync::Arc::clone(&self.ready));
+        let mut completed = false;
+        // Return the poll_fn itself: both registration owners must survive the
+        // completing poll, so a foreign Waker destructor cannot erase a value
+        // that the set already removed. Their slots are still cleared eagerly.
+        poll_fn(move |task| {
+            assert!(!completed, "cancellable JoinSet wait polled after completion");
+            let result = if let Poll::Ready(outcome) = self.poll_next_outcome(task, &mut collector) {
+                Ok(outcome)
+            } else {
+                cancellation.refresh(task.waker());
+                // Always checkpoint after registration: legacy fast_cancel
+                // publication and exhausted budgets also need materialization.
+                let Err(error) = cancellation.cx().checkpoint() else {
+                    return Poll::Pending;
+                };
+                let reason = error
+                    .cancel_reason()
+                    .cloned()
+                    .or_else(|| cancellation.cx().cancel_reason())
+                    .unwrap_or_else(|| CancelReason::user("join set caller cancelled"));
+                // Registration callbacks can make a member ready. Preserve
+                // retired-result precedence on this same completing poll.
+                if let Poll::Ready(outcome) = self.poll_next_outcome(task, &mut collector) {
+                    Ok(outcome)
+                } else {
+                    self.cancel_unfinished_for_owner(&reason);
+                    Err(reason)
+                }
+            };
+            completed = true;
+            collector.clear();
+            cancellation.clear();
+            Poll::Ready(result)
+        })
+    }
+
+    pub(super) fn cancel_unfinished_for_owner(&self, reason: &CancelReason) {
         let mut first_panic = None;
         for member in self.members.values() {
-            if !member.handle.terminal_published()
-                && let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if !member.handle.terminal_published() {
+                contain_cancellation_panic(&mut first_panic, || {
                     member.handle.abort_with_reason(reason.clone());
-                }))
-                && first_panic.is_none()
-            {
-                first_panic = Some(payload);
+                });
             }
         }
         // A hostile waker must not strand the unvisited suffix. Every request
@@ -148,6 +218,22 @@ where
             && let Some(payload) = first_panic
         {
             std::panic::resume_unwind(payload);
+        }
+    }
+}
+
+fn contain_cancellation_panic(
+    first_panic: &mut Option<Box<dyn std::any::Any + Send>>,
+    request: impl FnOnce(),
+) {
+    if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(request)) {
+        if first_panic.is_none() && !std::thread::panicking() {
+            *first_panic = Some(payload);
+        } else {
+            // A secondary panic payload's destructor is arbitrary user code
+            // too; it must not skip the remaining cancellation requests or
+            // trigger a double panic during an existing unwind.
+            std::mem::forget(payload);
         }
     }
 }
@@ -442,6 +528,168 @@ mod tests {
                     assert!(outcomes.iter().all(|outcome| matches!(outcome,
                         Outcome::Cancelled(reason) if reason.kind == CancelKind::User)));
                     assert_eq!(cleaned.load(Ordering::SeqCst), 2);
+                });
+            }
+        });
+    }
+
+    struct CancellationPanicPayload(Arc<AtomicUsize>);
+
+    impl Drop for CancellationPanicPayload {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            panic!("secondary cancellation payload destructor");
+        }
+    }
+
+    #[test]
+    fn cancellation_fanout_survives_secondary_panic_payload_destructors() {
+        let attempts = AtomicUsize::new(0);
+        let payload_drops = Arc::new(AtomicUsize::new(0));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut first_panic = None;
+            for index in 0..3 {
+                contain_cancellation_panic(&mut first_panic, || {
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                    match index {
+                        0 => panic!("first cancellation request panic"),
+                        1 => std::panic::panic_any(CancellationPanicPayload(Arc::clone(
+                            &payload_drops,
+                        ))),
+                        _ => {}
+                    }
+                });
+            }
+            if let Some(payload) = first_panic {
+                std::panic::resume_unwind(payload);
+            }
+        }));
+        let payload = result.expect_err("the first cancellation panic is retained");
+        assert_eq!(
+            payload.downcast_ref::<&str>(),
+            Some(&"first cancellation request panic")
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 3, "the suffix is visited");
+        assert_eq!(
+            payload_drops.load(Ordering::SeqCst),
+            0,
+            "a secondary payload destructor must not interrupt the fan-out"
+        );
+    }
+
+    #[test]
+    fn cancellable_next_releases_observer_before_cleanup_without_losing_members() {
+        bounded(|| {
+            for workers in [1, 2] {
+                run(workers, |cx| async move {
+                    let observer = Cx::detached_cancel_context();
+                    let reason = CancelReason::shutdown();
+                    let mut set = JoinSet::<usize, (), _>::in_cx(&cx);
+                    let cleaned = Arc::new(AtomicUsize::new(0));
+                    let mut children = Vec::new();
+                    let mut releases = Vec::new();
+                    for index in 0..3 {
+                        let (started, mut parked) = oneshot::channel();
+                        let (release, mut cleanup) = oneshot::channel();
+                        let cleanup_cx = cx.clone();
+                        let cleaned = Arc::clone(&cleaned);
+                        set.spawn(&cx, move |child| async move {
+                            park(&child, started).await;
+                            cleanup.recv(&cleanup_cx).await.unwrap();
+                            cleaned.fetch_add(1, Ordering::SeqCst);
+                            Ok(index)
+                        })
+                        .unwrap();
+                        children.push(parked.recv(&cx).await.unwrap());
+                        releases.push(release);
+                    }
+                    let (parked_tx, parked_rx) = mpsc::channel();
+                    let cancel_cx = observer.clone();
+                    let canceller = std::thread::spawn(move || {
+                        parked_rx
+                            .recv_timeout(Duration::from_secs(5))
+                            .expect("collector first reached Pending");
+                        cancel_cx.set_cancel_reason(CancelReason::shutdown());
+                    });
+                    let interrupted = {
+                        let mut waiting = pin!(set.join_next_cancellable(&observer));
+                        let mut parked_tx = Some(parked_tx);
+                        poll_fn(|task| match waiting.as_mut().poll(task) {
+                            Poll::Pending => {
+                                if let Some(parked_tx) = parked_tx.take() {
+                                    parked_tx.send(()).unwrap();
+                                }
+                                Poll::Pending
+                            }
+                            Poll::Ready(result) => Poll::Ready(result),
+                        })
+                        .await
+                    };
+                    canceller.join().unwrap();
+                    assert!(matches!(interrupted, Err(observed) if observed == reason));
+                    assert!(observer.inner.read().cancel_acknowledged);
+                    assert_eq!(observer.inner.read().cancel_waker_registrations.len(), 0);
+                    assert_eq!(set.len(), 3, "interruption is not member completion");
+                    assert_eq!(set.summary().completed(), 0);
+                    assert_eq!(set.summary().worst(), Severity::Ok);
+                    assert_eq!(cleaned.load(Ordering::SeqCst), 0);
+                    let deadline = Instant::now() + Duration::from_secs(5);
+                    while children.iter().any(|child| !child.is_cancel_requested()) {
+                        assert!(
+                            Instant::now() < deadline,
+                            "all members receive cancellation"
+                        );
+                        yield_now().await;
+                    }
+                    assert!(
+                        set.try_join_next().is_none(),
+                        "cleanup still owns every member"
+                    );
+                    for release in releases {
+                        release.send_blocking(()).unwrap();
+                    }
+                    for _ in 0..3 {
+                        assert!(matches!(set.join_next(&cx).await,
+                            Some(Outcome::Cancelled(observed)) if observed == reason));
+                    }
+                    assert!(set.is_empty());
+                    assert_eq!(set.summary().completed(), 3);
+                    assert_eq!(set.summary().worst(), Severity::Cancelled);
+                    assert_eq!(cleaned.load(Ordering::SeqCst), 3);
+                });
+            }
+        });
+    }
+
+    #[test]
+    fn cancellable_next_ready_values_and_empty_set_outrank_cancellation() {
+        bounded(|| {
+            for workers in [1, 2] {
+                run(workers, |cx| async move {
+                    let observer = Cx::detached_cancel_context();
+                    let mut set = JoinSet::<u8, &'static str, _>::in_cx(&cx);
+                    set.spawn(&cx, |_| async { Ok(7) }).unwrap();
+                    set.spawn(&cx, |_| async { Err("retained application error") })
+                        .unwrap();
+                    while set
+                        .members
+                        .values()
+                        .any(|member| !member.handle.is_finished())
+                    {
+                        yield_now().await;
+                    }
+                    observer.set_cancel_reason(CancelReason::shutdown());
+                    assert!(matches!(set.join_next_cancellable(&observer).await,
+                        Ok(Some(Outcome::Ok(7)))));
+                    assert!(matches!(set.join_next_cancellable(&observer).await,
+                        Ok(Some(Outcome::Err("retained application error")))));
+                    assert!(matches!(set.join_next_cancellable(&observer).await, Ok(None)));
+                    assert_eq!(set.summary().completed(), 2);
+                    assert_eq!(
+                        set.summary().worst(),
+                        Outcome::<u8, &str>::Err("application error").severity()
+                    );
+                    assert!(observer.inner.read().cancel_waker_registrations.is_empty());
                 });
             }
         });

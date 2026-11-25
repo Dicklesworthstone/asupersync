@@ -406,3 +406,183 @@ fn register_before_scan_ordering_in_next_outcome_wakes_waiter() {
         Poll::Ready(Some(Outcome::Ok(42)))
     ));
 }
+
+#[test]
+fn cancellable_next_drop_retires_only_its_borrowing_registrations() {
+    let cx = Cx::for_testing();
+    let observer = Cx::detached_cancel_context();
+    let mut set = JoinSet::<u32, &'static str, _>::in_cx(&cx);
+    let (send, handle) = member(1);
+    set.insert_member(handle);
+    let ready = Arc::clone(&set.ready);
+    let (count, waker) = counter();
+    let mut waiting = Box::pin(set.join_next_cancellable(&observer));
+    assert!(
+        waiting
+            .as_mut()
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending()
+    );
+    assert_eq!(observer.inner.read().cancel_waker_registrations.len(), 1);
+    drop(waiting);
+    assert!(ready.waiter.lock().is_none());
+    assert!(observer.inner.read().cancel_waker_registrations.is_empty());
+    assert_eq!(Arc::strong_count(&count), 2);
+    assert_eq!(set.len(), 1);
+    assert_eq!(set.summary().completed(), 0);
+    observer.cancel_with(crate::types::CancelKind::User, Some("observer left"));
+    send.send(&cx, Ok(Ok(31))).unwrap();
+    assert_eq!(count.0.load(Ordering::SeqCst), 0);
+    assert!(matches!(set.try_join_next(), Some(Outcome::Ok(31))));
+}
+
+#[test]
+fn cancellable_next_honors_mask_and_unmask_wakes_its_owned_waiter() {
+    let cx = Cx::for_testing();
+    let observer = Cx::for_testing();
+    let reason = CancelReason::user("masked observer");
+    let mut set = JoinSet::<u32, &'static str, _>::in_cx(&cx);
+    let (send, handle) = member(1);
+    set.insert_member(handle);
+    let ready = Arc::clone(&set.ready);
+    let (count, waker) = counter();
+    let mut task = Context::from_waker(&waker);
+    let mut waiting = Box::pin(set.join_next_cancellable(&observer));
+    observer.set_cancel_reason(reason.clone());
+    observer.masked(|| {
+        assert!(waiting.as_mut().poll(&mut task).is_pending());
+        assert!(!observer.inner.read().cancel_acknowledged);
+        assert_eq!(observer.inner.read().cancel_waker_registrations.len(), 1);
+        count.0.store(0, Ordering::SeqCst);
+    });
+    assert!(count.0.load(Ordering::SeqCst) > 0);
+    assert!(matches!(
+        waiting.as_mut().poll(&mut task),
+        Poll::Ready(Err(observed)) if observed == reason
+    ));
+    assert!(observer.inner.read().cancel_acknowledged);
+    assert!(observer.inner.read().cancel_waker_registrations.is_empty());
+    assert!(ready.waiter.lock().is_none());
+    drop(waiting);
+    assert_eq!(set.len(), 1);
+    assert_eq!(set.summary().completed(), 0);
+    send.send(&cx, Ok(Ok(37))).unwrap();
+    assert!(matches!(set.try_join_next(), Some(Outcome::Ok(37))));
+}
+
+#[test]
+fn cancellable_next_materializes_budget_exhaustion_without_consuming_a_member() {
+    use crate::types::{Budget, CancelKind, Time};
+
+    for (budget, kind) in [
+        (Budget::INFINITE.with_deadline(Time::ZERO), CancelKind::Deadline),
+        (Budget::INFINITE.with_poll_quota(0), CancelKind::PollQuota),
+        (Budget::INFINITE.with_cost_quota(0), CancelKind::CostBudget),
+    ] {
+        let cx = Cx::for_testing();
+        let observer = Cx::for_testing_with_budget(budget);
+        let mut set = JoinSet::<u32, &'static str, _>::in_cx(&cx);
+        let (send, handle) = member(1);
+        set.insert_member(handle);
+        assert!(!observer.is_cancel_requested());
+        let mut waiting = Box::pin(set.join_next_cancellable(&observer));
+        let Poll::Ready(Err(reason)) = waiting
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+        else {
+            panic!("pending collection must materialize an exhausted budget");
+        };
+        assert_eq!(reason.kind, kind);
+        assert_eq!(reason.origin_region, observer.region_id());
+        assert_eq!(reason.origin_task, Some(observer.task_id()));
+        assert_eq!(observer.cancel_reason(), Some(reason));
+        assert!(observer.inner.read().cancel_acknowledged);
+        assert!(observer.inner.read().cancel_waker_registrations.is_empty());
+        drop(waiting);
+        assert_eq!(set.len(), 1);
+        assert_eq!(set.summary().completed(), 0);
+        send.send(&cx, Ok(Ok(41))).unwrap();
+        assert!(matches!(set.try_join_next(), Some(Outcome::Ok(41))));
+    }
+}
+
+#[test]
+fn cancellable_next_materializes_compatibility_fast_cancel() {
+    let cx = Cx::for_testing();
+    let observer = Cx::for_testing();
+    observer.inner.write().fast_cancel = Arc::new(AtomicBool::new(true));
+    assert!(!observer.is_cancel_requested());
+    let mut set = JoinSet::<u32, &'static str, _>::in_cx(&cx);
+    let (send, handle) = member(1);
+    set.insert_member(handle);
+    let mut waiting = Box::pin(set.join_next_cancellable(&observer));
+    assert!(matches!(
+        waiting
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop())),
+        Poll::Ready(Err(reason)) if reason == CancelReason::user("join set caller cancelled")
+    ));
+    assert!(observer.is_cancel_requested());
+    assert!(observer.inner.read().cancel_acknowledged);
+    assert!(observer.inner.read().cancel_waker_registrations.is_empty());
+    drop(waiting);
+    assert_eq!(set.len(), 1);
+    assert_eq!(set.summary().completed(), 0);
+    send.send(&cx, Ok(Ok(43))).unwrap();
+    assert!(matches!(set.try_join_next(), Some(Outcome::Ok(43))));
+}
+
+struct CancellableNextRetirementPanic(Arc<AtomicUsize>);
+
+// This probe exercises final-owner destruction, not notification.
+#[allow(clippy::manual_noop_waker)]
+impl Wake for CancellableNextRetirementPanic {
+    fn wake(self: Arc<Self>) {}
+}
+
+impl Drop for CancellableNextRetirementPanic {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        assert!(
+            std::thread::panicking(),
+            "cancellable next final waker retirement"
+        );
+    }
+}
+
+#[test]
+fn cancellable_next_delivers_result_before_final_waker_destruction() {
+    let cx = Cx::for_testing();
+    let observer = Cx::detached_cancel_context();
+    let mut set = JoinSet::<u32, &'static str, _>::in_cx(&cx);
+    let (send, handle) = member(1);
+    set.insert_member(handle);
+    let ready = Arc::clone(&set.ready);
+    let retired = Arc::new(AtomicUsize::new(0));
+    let mut waiting = Box::pin(set.join_next_cancellable(&observer));
+    {
+        let waker = Waker::from(Arc::new(CancellableNextRetirementPanic(Arc::clone(
+            &retired,
+        ))));
+        assert!(
+            waiting
+                .as_mut()
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
+    }
+    send.send(&cx, Ok(Ok(47))).unwrap();
+    let result = waiting
+        .as_mut()
+        .poll(&mut Context::from_waker(Waker::noop()));
+    assert!(matches!(&result, Poll::Ready(Ok(Some(Outcome::Ok(47))))));
+    assert_eq!(retired.load(Ordering::SeqCst), 0);
+    assert!(ready.waiter.lock().is_none());
+    assert!(observer.inner.read().cancel_waker_registrations.is_empty());
+    let dropped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(waiting)));
+    assert!(dropped.is_err(), "the planted final-owner panic must execute");
+    assert_eq!(retired.load(Ordering::SeqCst), 1);
+    assert!(matches!(result, Poll::Ready(Ok(Some(Outcome::Ok(47))))));
+    assert!(set.is_empty());
+    assert_eq!(set.summary().completed(), 1);
+}

@@ -112,6 +112,13 @@ artifacts.
 
 ### Added
 
+- **Cancellable observation of an owned task set.**
+  `JoinSet::join_next_cancellable` returns a caller's cancellation separately
+  from actual member outcomes, while retaining every unfinished member and
+  result for later collection. It forwards cancellation to unfinished tasks,
+  honors masks and budgets, and preserves ready-result and retirement-barrier
+  semantics. Interruption does not certify cleanup; existing join and drain
+  APIs retain their established behavior.
 - **Configured DNS for native HTTP/2 clients.**
   `Http2Client::dns_resolver` shares a caller-selected resolver and its cache
   across clones for buffered requests, streaming bodies, and CONNECT setup.
