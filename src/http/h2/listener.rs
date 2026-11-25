@@ -6355,6 +6355,52 @@ impl<F> Http2Listener<F> {
         .await
     }
 
+    /// Run deferred response producers with connections owned by `cx`.
+    ///
+    /// This is the capability-owned counterpart of
+    /// [`Self::run_produced_owned`]. Each accepted connection is spawned in
+    /// `cx`'s region, and each request has its own child region for the handler,
+    /// producer, descendants and finalizers. Successful terminal frames remain
+    /// withheld until the request subtree has retired.
+    ///
+    /// Cancellation of either `cx` or the task polling this call ends
+    /// admission and drains the accepted connections. Closing the service
+    /// region therefore owns its streaming responses as well as its listener;
+    /// a non-cooperative descendant can delay that region's quiescence.
+    /// TLS, flow control, bounded body queues and shutdown statistics use the
+    /// same connection driver as [`Self::run_produced_owned`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the configuration, accept and connection-admission errors of
+    /// [`Self::run_produced_owned`], or an error outside a runtime task.
+    pub async fn run_produced_owned_in<Fut>(self, cx: &Cx) -> io::Result<ShutdownStats>
+    where
+        F: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Http2ProducedResponse> + Send + 'static,
+    {
+        let Some(runtime) = crate::runtime::Runtime::current_handle() else {
+            return Err(io::Error::other(
+                "Http2Listener::run_produced_owned_in must run inside a runtime task",
+            ));
+        };
+        let spawner = cx.clone();
+        self.run_mapped_with(
+            Some(cx.clone()),
+            runtime,
+            move |connection| {
+                spawner
+                    .spawn(move |_connection_cx| connection)
+                    .map(H2ConnectionTask::Owned)
+            },
+            true,
+            #[cfg(feature = "http2-streaming")]
+            None,
+            |handler, request| async move { handler(request).await.into_driver_response() },
+        )
+        .await
+    }
+
     async fn run_mapped<M, MFut>(
         self,
         runtime: &RuntimeHandle,

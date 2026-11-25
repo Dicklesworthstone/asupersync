@@ -9,7 +9,7 @@ use asupersync::channel::oneshot;
 use asupersync::http::h1::listener::{Http1Listener, Http1ListenerConfig};
 use asupersync::http::h1::server::{HostPolicy, Http1Config};
 use asupersync::http::h1::types::{Request, Response};
-use asupersync::http::h2::listener::{Http2Listener, Http2ListenerConfig};
+use asupersync::http::h2::listener::{Http2Listener, Http2ListenerConfig, Http2ProducedResponse};
 use asupersync::io::{AsyncReadExt, AsyncWriteExt};
 use asupersync::net::TcpStream;
 use asupersync::runtime::{Runtime, RuntimeBuilder, RuntimeHandle, TaskHandle};
@@ -30,6 +30,7 @@ const WATCHDOG: Duration = Duration::from_secs(10);
 enum Protocol {
     Http1,
     Http2,
+    Http2Produced,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -82,6 +83,30 @@ async fn bind(protocol: Protocol, runtime: RuntimeHandle, owner: Option<Cx>) -> 
                     match owner {
                         Some(owner) => listener.run_in(&owner).await,
                         None => listener.run(&runtime).await,
+                    }
+                }),
+            }
+        }
+        Protocol::Http2Produced => {
+            let config = Http2ListenerConfig::default()
+                .host_policy(HostPolicy::allow_all())
+                .drain_timeout(Duration::from_secs(2))
+                .hard_drain_timeout(Duration::from_secs(4));
+            let listener = Http2Listener::bind_produced_with_config(
+                "127.0.0.1:0",
+                |request| async move { Http2ProducedResponse::buffered(answer(request).await) },
+                config,
+            )
+            .await
+            .unwrap();
+            BoundListener {
+                address: listener.local_addr().unwrap(),
+                manager: listener.connection_manager().clone(),
+                requests: listener.in_flight_requests(),
+                run: Box::pin(async move {
+                    match owner {
+                        Some(owner) => listener.run_produced_owned_in(&owner).await,
+                        None => listener.run_produced_owned(&runtime).await,
                     }
                 }),
             }
@@ -274,7 +299,7 @@ fn exercise(protocol: Protocol, trigger: Trigger, workers: usize) {
 
 #[test]
 fn root_owned_listeners_stop_when_their_parked_coordinator_is_cancelled() {
-    for protocol in [Protocol::Http1, Protocol::Http2] {
+    for protocol in [Protocol::Http1, Protocol::Http2, Protocol::Http2Produced] {
         for workers in [1, 2] {
             exercise(protocol, Trigger::RootCoordinator, workers);
         }
@@ -283,7 +308,7 @@ fn root_owned_listeners_stop_when_their_parked_coordinator_is_cancelled() {
 
 #[test]
 fn region_owned_listeners_wake_for_a_distinct_explicit_owner_cancellation() {
-    for protocol in [Protocol::Http1, Protocol::Http2] {
+    for protocol in [Protocol::Http1, Protocol::Http2, Protocol::Http2Produced] {
         for workers in [1, 2] {
             exercise(protocol, Trigger::ExplicitOwner, workers);
         }
@@ -292,7 +317,7 @@ fn region_owned_listeners_wake_for_a_distinct_explicit_owner_cancellation() {
 
 #[test]
 fn region_owned_listeners_stop_when_only_their_coordinator_is_cancelled() {
-    for protocol in [Protocol::Http1, Protocol::Http2] {
+    for protocol in [Protocol::Http1, Protocol::Http2, Protocol::Http2Produced] {
         for workers in [1, 2] {
             exercise(protocol, Trigger::OwnedCoordinator, workers);
         }
