@@ -354,7 +354,7 @@ impl Http2RequestBuilder {
         let mut conn = {
             let setup = owner.with_ambient(async {
                 self.client.validate_native_target(&owner, &request.url)?;
-                let transport = self.client.connect_transport(&request.url).await?;
+                let transport = self.client.connect_transport(&owner, &request.url).await?;
                 Http2Conn::start(
                     transport,
                     MIN_RECEIVE_WINDOW as usize,

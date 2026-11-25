@@ -1573,3 +1573,486 @@ mod streaming {
         }
     }
 }
+
+
+// Native configured-DNS coverage for every HTTP/2 transport-owning entry point.
+mod configured_dns {
+    use super::*;
+    use asupersync::net::dns::{Resolver, ResolverConfig};
+    use asupersync::runtime::BlockingAdmissionPolicy;
+    use asupersync::sync::Notify;
+    use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
+
+    const HOST: &str = "h2-resolver.test";
+
+    struct DnsPeer {
+        address: SocketAddr,
+        queries: Arc<AtomicUsize>,
+        observed: Arc<Notify>,
+        stop: Arc<AtomicBool>,
+        worker: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl DnsPeer {
+        fn new(answer: bool) -> Self {
+            let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+            let address = socket.local_addr().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_millis(50)))
+                .unwrap();
+            socket
+                .set_write_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            let queries = Arc::new(AtomicUsize::new(0));
+            let observed = Arc::new(Notify::new());
+            let stop = Arc::new(AtomicBool::new(false));
+            let worker_queries = Arc::clone(&queries);
+            let worker_observed = Arc::clone(&observed);
+            let worker_stop = Arc::clone(&stop);
+            let worker = std::thread::spawn(move || {
+                let mut bytes = [0u8; 2048];
+                while !worker_stop.load(Ordering::Acquire) {
+                    match socket.recv_from(&mut bytes) {
+                        Ok((length, remote)) => {
+                            worker_queries.fetch_add(1, Ordering::SeqCst);
+                            let _ = worker_observed.notify_one();
+                            if answer {
+                                let response = response(&bytes[..length]).unwrap();
+                                socket.send_to(&response, remote).unwrap();
+                            }
+                        }
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                            ) => {}
+                        Err(error) => panic!("local DNS fixture failed: {error}"),
+                    }
+                }
+            });
+            Self {
+                address,
+                queries,
+                observed,
+                stop,
+                worker: Some(worker),
+            }
+        }
+
+        fn resolver(&self) -> Resolver {
+            Resolver::with_config(ResolverConfig {
+                nameservers: vec![self.address],
+                timeout: Duration::from_secs(10),
+                retries: 0,
+                ..ResolverConfig::default()
+            })
+        }
+    }
+
+    impl Drop for DnsPeer {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Release);
+            if let Some(worker) = self.worker.take() {
+                let panicked = worker.join().is_err();
+                assert!(
+                    !panicked || std::thread::panicking(),
+                    "local DNS fixture panicked"
+                );
+            }
+        }
+    }
+
+    /// Answer A with loopback and AAAA with NODATA, retaining the exact question.
+    fn response(query: &[u8]) -> Option<Vec<u8>> {
+        let mut end = 12;
+        loop {
+            let length = usize::from(*query.get(end)?);
+            end += 1;
+            if length == 0 {
+                break;
+            }
+            end += length;
+        }
+        let question = query.get(12..end + 4)?;
+        let is_a = u16::from_be_bytes([query[end], query[end + 1]]) == 1;
+        let mut response = Vec::new();
+        response.extend_from_slice(&query[..2]);
+        response.extend_from_slice(&0x8180u16.to_be_bytes());
+        response.extend_from_slice(&1u16.to_be_bytes());
+        response.extend_from_slice(&u16::from(is_a).to_be_bytes());
+        response.extend_from_slice(&[0, 0, 0, 0]);
+        response.extend_from_slice(question);
+        if is_a {
+            response.extend_from_slice(&0xc00cu16.to_be_bytes());
+            response.extend_from_slice(&1u16.to_be_bytes());
+            response.extend_from_slice(&1u16.to_be_bytes());
+            response.extend_from_slice(&60u32.to_be_bytes());
+            response.extend_from_slice(&4u16.to_be_bytes());
+            response.extend_from_slice(&Ipv4Addr::LOCALHOST.octets());
+        }
+        Some(response)
+    }
+
+    fn forbidden_runtime(workers: usize) -> Runtime {
+        let builder = if workers == 1 {
+            RuntimeBuilder::current_thread()
+        } else {
+            RuntimeBuilder::multi_thread().worker_threads(workers)
+        };
+        builder
+            .with_reactor(asupersync::runtime::reactor::create_reactor().unwrap())
+            .blocking_threads(0, 1)
+            .blocking_admission_policy(BlockingAdmissionPolicy::Forbidden)
+            .build()
+            .unwrap()
+    }
+
+    fn no_blocking_work(runtime: &Runtime) {
+        let pool = runtime.blocking_handle().expect("configured forbidden pool");
+        assert_eq!((pool.active_threads(), pool.pending_count()), (0, 0));
+        quiescent(runtime);
+    }
+
+    #[test]
+    fn custom_resolver_preserves_authority_and_cache_without_blocking_work() {
+        for workers in [1, 2] {
+            let dns = DnsPeer::new(true);
+            let resolver = dns.resolver();
+            let runtime = forbidden_runtime(workers);
+            runtime.block_on(async {
+                let listener = Http2Listener::bind_with_config(
+                    "127.0.0.1:0",
+                    |request: Request| async move {
+                        let body = format!(
+                            "{} {}",
+                            request.uri,
+                            request.header_value("host").expect("HTTP/2 authority")
+                        );
+                        Response::new(200, "OK", body.into_bytes())
+                    },
+                    config(),
+                )
+                .await
+                .unwrap();
+                let address = listener.local_addr().unwrap();
+                let shutdown = listener.shutdown_signal();
+                let handle = runtime.handle();
+                let server = handle
+                    .clone()
+                    .try_spawn(async move { listener.run(&handle).await })
+                    .unwrap();
+                let caller = runtime.request_cx_with_budget(Budget::INFINITE);
+                assert_ne!(caller.task_id(), Cx::current().unwrap().task_id());
+                let client = Http2Client::new()
+                    .dns_resolver(resolver.clone())
+                    .timeout(Duration::from_secs(5));
+                let url = format!("http://{HOST}:{}/resolved", address.port());
+                let expected = format!("/resolved {HOST}:{}", address.port());
+
+                // Reuse is disabled: both requests need fresh TCP connections.
+                // The second client clone must use the shared resolver cache.
+                for selected in [client.clone(), client.clone()] {
+                    let response = selected.get(&url).send(&caller).await.unwrap();
+                    assert_eq!(response.status, 200);
+                    assert_eq!(response.text().unwrap(), expected);
+                    assert_eq!(dns.queries.load(Ordering::SeqCst), 2);
+                }
+                assert!(resolver.cache_stats().hits >= 1);
+
+                // A literal and a supplied socket must never consult DNS.
+                let literal = client
+                    .get(format!("http://{address}/literal"))
+                    .send(&caller)
+                    .await
+                    .unwrap();
+                assert_eq!(literal.text().unwrap(), format!("/literal {address}"));
+                let transport = asupersync::net::TcpStream::connect(address).await.unwrap();
+                let supplied = client
+                    .get(format!("http://supplied.test:{}/supplied", address.port()))
+                    .send_on(&caller, transport)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    supplied.text().unwrap(),
+                    format!("/supplied supplied.test:{}", address.port())
+                );
+                assert_eq!(dns.queries.load(Ordering::SeqCst), 2);
+
+                #[cfg(feature = "http2-streaming")]
+                {
+                    use asupersync::bytes::Buf;
+                    use asupersync::http::body::Body;
+                    use std::pin::Pin;
+
+                    let mut streamed = client.get(&url).send_streaming(&caller).await.unwrap();
+                    let mut body = Vec::new();
+                    while let Some(frame) =
+                        poll_fn(|task| Pin::new(&mut streamed.body).poll_frame(task)).await
+                    {
+                        let mut data = frame.unwrap().into_data().expect("response DATA");
+                        let length = data.remaining();
+                        body.extend_from_slice(&data.copy_to_bytes(length));
+                    }
+                    assert_eq!(streamed.status, 200);
+                    assert_eq!(body, expected.as_bytes());
+                    assert_eq!(dns.queries.load(Ordering::SeqCst), 2);
+                }
+
+                // Prove the positive did not use system NSS or an open pool.
+                let control = Http2Client::new()
+                    .timeout(Duration::from_secs(5))
+                    .get(&url)
+                    .send(&caller)
+                    .await
+                    .expect_err("system DNS is forbidden by this runtime");
+                assert!(control.to_string().contains("forbidden"), "{control}");
+                assert_eq!(dns.queries.load(Ordering::SeqCst), 2);
+                assert!(shutdown.begin_drain(Duration::from_secs(2)));
+                server.await.unwrap();
+            });
+            no_blocking_work(&runtime);
+        }
+    }
+
+    #[test]
+    fn configured_lookup_failure_preserves_dns_error_without_system_fallback() {
+        for workers in [1, 2] {
+            let dns = DnsPeer::new(true);
+            let runtime = forbidden_runtime(workers);
+            runtime.block_on(async {
+                let caller = runtime.request_cx_with_budget(Budget::INFINITE);
+                let error = Http2Client::new()
+                    .dns_resolver(dns.resolver())
+                    .get("http://missing.invalid/")
+                    .send(&caller)
+                    .await
+                    .expect_err("special-use invalid names cannot be resolved");
+                let Http2ClientError::Io(error) = error else {
+                    panic!("expected preserved DNS failure: {error:?}");
+                };
+                assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+                assert!(matches!(
+                    error
+                        .get_ref()
+                        .and_then(|source| source.downcast_ref::<asupersync::net::dns::DnsError>()),
+                    Some(asupersync::net::dns::DnsError::NoRecords(host))
+                        if host == "missing.invalid"
+                ));
+                assert_eq!(dns.queries.load(Ordering::SeqCst), 0);
+                assert!(Cx::current().unwrap().checkpoint().is_ok());
+            });
+            no_blocking_work(&runtime);
+        }
+    }
+
+    #[test]
+    fn dns_entropy_callback_cancellation_keeps_the_exact_owner_reason() {
+        use asupersync::util::EntropySource;
+        use std::task::Poll;
+
+        #[derive(Debug, Clone)]
+        struct CancellingEntropy {
+            owner: Cx,
+            reason: CancelReason,
+            calls: Arc<AtomicUsize>,
+        }
+
+        impl EntropySource for CancellingEntropy {
+            fn fill_bytes(&self, bytes: &mut [u8]) {
+                assert_eq!(
+                    Cx::current().expect("DNS owner is installed").task_id(),
+                    self.owner.task_id()
+                );
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.owner.cancel_with_reason(self.reason.clone());
+                bytes.fill(0xA5);
+            }
+
+            fn next_u64(&self) -> u64 {
+                let mut bytes = [0; 8];
+                self.fill_bytes(&mut bytes);
+                u64::from_be_bytes(bytes)
+            }
+
+            fn fork(&self, _: asupersync::types::TaskId) -> Arc<dyn EntropySource> {
+                Arc::new(self.clone())
+            }
+
+            fn source_id(&self) -> &'static str {
+                "http2-dns-cancelling-entropy"
+            }
+        }
+
+        for workers in [1, 2] {
+            let dns = DnsPeer::new(true);
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let address = listener.local_addr().unwrap();
+            let runtime = forbidden_runtime(workers);
+            let owner = runtime.request_cx_with_budget(Budget::INFINITE);
+            let reason = CancelReason::deadline()
+                .with_message("DNS callback cancelled request")
+                .with_cause(CancelReason::user("explicit owner was cancelled"));
+            let calls = Arc::new(AtomicUsize::new(0));
+            let resolver = dns.resolver().with_entropy(Arc::new(CancellingEntropy {
+                owner: owner.clone(),
+                reason: reason.clone(),
+                calls: Arc::clone(&calls),
+            }));
+            runtime.block_on(async {
+                let mut request = Box::pin(
+                    Http2Client::new()
+                        .dns_resolver(resolver)
+                        .get(format!("http://{HOST}:{}/cancel-in-poll", address.port()))
+                        .send(&owner),
+                );
+                // The callback runs after RequestControl's entry check. DNS
+                // returns Cancelled in this same poll, before opening a socket;
+                // classifying that result as generic Io(Interrupted) loses the
+                // exact public cancellation result despite a cancelled owner.
+                poll_fn(|task| {
+                    match request.as_mut().poll(task) {
+                        Poll::Ready(Err(Http2ClientError::Cancelled(actual))) => {
+                            assert_eq!(actual, reason);
+                        }
+                        other => panic!("same-poll DNS cancellation lost its reason: {other:?}"),
+                    }
+                    Poll::Ready(())
+                })
+                .await;
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+                assert_eq!(dns.queries.load(Ordering::SeqCst), 0);
+                assert_eq!(
+                    listener.accept().unwrap_err().kind(),
+                    std::io::ErrorKind::WouldBlock
+                );
+                assert!(Cx::current().unwrap().checkpoint().is_ok());
+            });
+            no_blocking_work(&runtime);
+        }
+    }
+
+    #[test]
+    fn parked_dns_observes_explicit_cancellation_and_total_request_deadline() {
+        for workers in [1, 2] {
+            for cancel in [false, true] {
+                let dns = DnsPeer::new(false);
+                let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                listener.set_nonblocking(true).unwrap();
+                let address = listener.local_addr().unwrap();
+                let runtime = forbidden_runtime(workers);
+                let caller = runtime.request_cx_with_budget(Budget::INFINITE);
+                let reason = CancelReason::user("cancel during configured DNS");
+                runtime.block_on(async {
+                    let client = Http2Client::new()
+                        .dns_resolver(dns.resolver())
+                        .timeout(Duration::from_secs(5));
+                    let mut request = Box::pin(
+                        client
+                            .get(format!("http://{HOST}:{}/waiting", address.port()))
+                            .timeout(if cancel {
+                                Duration::from_secs(5)
+                            } else {
+                                Duration::from_secs(1)
+                            })
+                            .send(&caller),
+                    );
+                    let mut observed = Box::pin(dns.observed.notified());
+                    poll_fn(|task| {
+                        assert!(
+                            request.as_mut().poll(task).is_pending(),
+                            "request must be parked after sending a real DNS query"
+                        );
+                        observed.as_mut().poll(task)
+                    })
+                    .await;
+                    assert!(dns.queries.load(Ordering::SeqCst) > 0);
+                    if cancel {
+                        caller.cancel_with_reason(reason.clone());
+                    }
+                    match request.await {
+                        Err(Http2ClientError::Cancelled(actual)) if cancel => {
+                            assert_eq!(actual, reason);
+                        }
+                        Err(Http2ClientError::DeadlineExceeded) if !cancel => {}
+                        other => panic!("wrong parked DNS result: {other:?}"),
+                    }
+                    assert!(Cx::current().unwrap().checkpoint().is_ok());
+                    assert_eq!(
+                        listener.accept().unwrap_err().kind(),
+                        std::io::ErrorKind::WouldBlock,
+                        "a cancelled or expired DNS request must never dial"
+                    );
+                });
+                no_blocking_work(&runtime);
+            }
+        }
+    }
+
+    #[cfg(feature = "http2-streaming")]
+    #[test]
+    fn configured_resolver_dials_proxy_without_resolving_connect_destination() {
+        use asupersync::http::h2::client::Http2TunnelConfig;
+        use std::num::NonZeroU64;
+
+        const DESTINATION: &str = "destination.invalid:443";
+        for workers in [1, 2] {
+            let dns = DnsPeer::new(true);
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let peer = std::thread::spawn(move || {
+                let mut peer = Peer::accept(listener, 65_535);
+                let id = loop {
+                    if let Some(ReceivedFrame::Headers {
+                        stream_id,
+                        headers,
+                        end_stream,
+                    }) = peer.receive()
+                    {
+                        assert!(!end_stream);
+                        let pseudo: Vec<_> = headers
+                            .iter()
+                            .filter(|header| header.name.starts_with(':'))
+                            .map(|header| (header.name.as_str(), header.value.as_str()))
+                            .collect();
+                        assert_eq!(
+                            pseudo,
+                            vec![(":method", "CONNECT"), (":authority", DESTINATION)]
+                        );
+                        break stream_id;
+                    }
+                };
+                peer.connection
+                    .send_headers(id, vec![Header::new(":status", "200")], false)
+                    .unwrap();
+                peer.flush();
+                peer.eof();
+            });
+            let runtime = forbidden_runtime(workers);
+            runtime.block_on(async {
+                let caller = runtime.request_cx_with_budget(Budget::INFINITE);
+                let tunnel = Http2Client::new()
+                    .dns_resolver(dns.resolver())
+                    .timeout(Duration::from_secs(5))
+                    .request(
+                        Method::Connect,
+                        format!("http://{HOST}:{}/", address.port()),
+                    )
+                    .connect_proxy_tunnel(
+                        &caller,
+                        DESTINATION,
+                        Http2TunnelConfig::new(
+                            NonZeroU64::new(1024).unwrap(),
+                            NonZeroU64::new(1024).unwrap(),
+                        ),
+                    )
+                    .await
+                    .expect("only the configured proxy hostname is resolved");
+                assert_eq!(dns.queries.load(Ordering::SeqCst), 2);
+                drop(tunnel);
+            });
+            peer.join().unwrap();
+            no_blocking_work(&runtime);
+        }
+    }
+}

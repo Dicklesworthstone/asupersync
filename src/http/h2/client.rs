@@ -195,6 +195,8 @@ pub struct Http2Client {
     max_request_body: usize,
     max_response_body: usize,
     max_overhead_frames: usize,
+    /// Caller-selected DNS policy and cache, shared by ordinary clones.
+    dns_resolver: Option<Arc<crate::net::dns::Resolver>>,
     #[cfg(feature = "tls")]
     tls_connector: Option<crate::tls::TlsConnector>,
     /// Idle connections kept for reuse ([`Self::reuse_connections`]).
@@ -210,6 +212,7 @@ impl fmt::Debug for Http2Client {
             .field("max_request_body", &self.max_request_body)
             .field("max_response_body", &self.max_response_body)
             .field("max_overhead_frames", &self.max_overhead_frames)
+            .field("custom_dns_resolver", &self.dns_resolver.is_some())
             .field(
                 "max_concurrent_requests",
                 &self.admission.as_ref().map(|gate| gate.max_permits()),
@@ -225,6 +228,7 @@ impl Default for Http2Client {
             max_request_body: DEFAULT_BODY_LIMIT,
             max_response_body: DEFAULT_BODY_LIMIT,
             max_overhead_frames: DEFAULT_MAX_OVERHEAD_FRAMES,
+            dns_resolver: None,
             #[cfg(feature = "tls")]
             tls_connector: None,
             pool: None,
@@ -245,6 +249,35 @@ impl Http2Client {
     #[must_use]
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// Select DNS servers, caching, and lookup policy for native hostname calls.
+    ///
+    /// Resolution remains lazy and shares the request's original deadline and
+    /// cancellation guards. It runs under the explicit request owner's `Cx`.
+    /// With explicit nameservers, native I/O and timer authority, and a
+    /// [`BlockingAdmissionPolicy::Forbidden`](crate::runtime::BlockingAdmissionPolicy::Forbidden)
+    /// blocking pool, the resolver uses native reactor I/O without a lookup
+    /// thread. Other configurations retain
+    /// [`Resolver::lookup_ip`](crate::net::dns::Resolver::lookup_ip) semantics;
+    /// a failed configured lookup never falls back to the system resolver.
+    ///
+    /// Clones share this resolver's cache. Resolved addresses still use Happy
+    /// Eyeballs dialing; the resolver's connection-policy settings do not
+    /// replace the HTTP client's connection race. Literal IPs skip DNS. HTTP
+    /// authority and TLS server identity always remain those of the URL.
+    /// Buffered requests, streaming requests, and CONNECT setup all use this
+    /// policy; caller-supplied transport methods do not resolve or dial.
+    /// For proxy CONNECT, the URL names the proxy and only that host is resolved.
+    ///
+    /// Selecting a resolver gives this client a new empty idle pool with the
+    /// same limits, so a clone cannot reuse sockets routed by the previous DNS
+    /// policy. Existing clones, active requests, and their pools are unchanged.
+    #[must_use]
+    pub fn dns_resolver(mut self, resolver: crate::net::dns::Resolver) -> Self {
+        self.dns_resolver = Some(Arc::new(resolver));
+        self.isolate_idle_pool();
         self
     }
 
@@ -318,6 +351,11 @@ impl Http2Client {
     #[must_use]
     pub fn tls_connector(mut self, connector: crate::tls::TlsConnector) -> Self {
         self.tls_connector = Some(connector);
+        self.isolate_idle_pool();
+        self
+    }
+
+    fn isolate_idle_pool(&mut self) {
         if let Some(pool) = &self.pool {
             self.pool = Some(Arc::new(ConnectionPool {
                 max_idle: pool.max_idle,
@@ -325,14 +363,13 @@ impl Http2Client {
                 idle: Mutex::new(HashMap::new()),
             }));
         }
-        self
     }
 
     /// Keep up to `max_idle` connections per origin (scheme, host and port)
     /// open after [`Http2RequestBuilder::send`] completes a request, so later
     /// requests from this client, or a clone of it, reuse them instead of
     /// dialing (and TLS-handshaking) again. A clone later given its own
-    /// `tls_connector` stops sharing. `0`, the default, keeps the
+    /// `tls_connector` or `dns_resolver` stops sharing. `0`, the default, keeps the
     /// original behavior: each request owns a fresh connection.
     ///
     /// A pooled connection carries one request at a time; concurrent requests
@@ -369,7 +406,8 @@ impl Http2Client {
     ///
     /// Either limit being zero disables reuse. These limits do not constrain
     /// active requests or connections retained by unfinished response bodies.
-    /// Changing the TLS connector creates a separate pool with the same limits.
+    /// Changing the TLS connector or DNS resolver creates a separate pool with
+    /// the same limits.
     /// The existing [`Self::reuse_connections`] method retains its original
     /// per-origin-only behavior.
     #[must_use]
@@ -439,10 +477,16 @@ impl Http2Client {
         Ok(())
     }
 
-    async fn connect_transport(&self, url: &ParsedUrl) -> Result<Http2ClientIo, Http2ClientError> {
+    async fn connect_transport(
+        &self,
+        cx: &Cx,
+        url: &ParsedUrl,
+    ) -> Result<Http2ClientIo, Http2ClientError> {
         let host = url.host.trim_matches(['[', ']']);
         let tcp = if let Ok(ip) = host.parse::<IpAddr>() {
             TcpStream::connect(SocketAddr::new(ip, url.port)).await?
+        } else if let Some(resolver) = &self.dns_resolver {
+            connect_with_dns_resolver(cx, resolver, host, url.port).await?
         } else {
             crate::net::happy_eyeballs::connect_resolved((host.to_owned(), url.port), None).await?
         };
@@ -559,7 +603,7 @@ impl Http2RequestBuilder {
                     }
                 }
             }
-            let transport = self.client.connect_transport(&request.url).await?;
+            let transport = self.client.connect_transport(cx, &request.url).await?;
             let mut conn =
                 Http2Conn::start(transport, limit, self.client.max_overhead_frames).await?;
             let (response, closed) = conn
@@ -812,6 +856,65 @@ fn require_native_io(cx: &Cx) -> Result<(), Http2ClientError> {
         return Err(Http2ClientError::MissingIoCapability);
     }
     Ok(())
+}
+
+/// Keep the native DNS state machine out of every buffered/streaming/tunnel
+/// future's concrete type, as the shared gRPC resolver path does. The enclosing
+/// RequestControl owns the total timeout; DNS must not grant a fresh dial budget.
+fn connect_with_dns_resolver<'a>(
+    cx: &'a Cx,
+    resolver: &'a crate::net::dns::Resolver,
+    host: &'a str,
+    port: u16,
+) -> Pin<Box<dyn Future<Output = Result<TcpStream, Http2ClientError>> + Send + 'a>> {
+    Box::pin(async move {
+        let operation = cx.with_ambient(async move {
+            let lookup = resolver.lookup_ip(host).await.map_err(|error| {
+                use crate::net::dns::DnsError;
+                let kind = match &error {
+                    DnsError::Timeout => io::ErrorKind::TimedOut,
+                    DnsError::Cancelled => {
+                        return Http2ClientError::Cancelled(
+                            cx.cancel_reason().unwrap_or_else(|| {
+                                CancelReason::user("HTTP/2 DNS lookup cancelled")
+                            }),
+                        );
+                    }
+                    DnsError::InvalidHost(_) => io::ErrorKind::InvalidInput,
+                    DnsError::NoRecords(_) => io::ErrorKind::NotFound,
+                    _ => io::ErrorKind::Other,
+                };
+                Http2ClientError::Io(io::Error::new(kind, error))
+            })?;
+            let addresses: Vec<_> = lookup
+                .addresses()
+                .iter()
+                .map(|address| SocketAddr::new(*address, port))
+                .collect();
+            if addresses.is_empty() {
+                return Err(Http2ClientError::Io(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "HTTP/2 hostname resolved to no addresses",
+                )));
+            }
+            let config = crate::net::happy_eyeballs::HappyEyeballsConfig {
+                connect_timeout: Duration::MAX,
+                overall_timeout: Duration::MAX,
+                ..Default::default()
+            };
+            crate::net::happy_eyeballs::connect(&addresses, &config)
+                .await
+                .map_err(Http2ClientError::Io)
+        });
+        let mut operation = std::pin::pin!(operation);
+        poll_fn(|task| {
+            // Check the polling task before entering the owner's context, so
+            // moving the future cannot manufacture native I/O authority.
+            require_native_io(cx)?;
+            operation.as_mut().poll(task)
+        })
+        .await
+    })
 }
 
 struct Cancellation {
@@ -2055,7 +2158,7 @@ mod streaming {
                                 }
                             }
                         }
-                        let transport = self.client.connect_transport(&request.url).await?;
+                        let transport = self.client.connect_transport(&cx, &request.url).await?;
                         // Streaming does not need the buffered client's large
                         // initial receive window.
                         Http2Conn::start(

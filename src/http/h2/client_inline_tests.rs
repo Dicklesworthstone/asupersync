@@ -3,6 +3,61 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Wake};
 
+#[test]
+fn configured_resolver_clones_share_cache_but_new_policy_isolates_idle_pool() {
+    let base = Http2Client::new()
+        .reuse_connections_bounded(2, 7)
+        .max_concurrent_requests(NonZeroUsize::new(3).expect("nonzero admission"));
+    let original_pool = Arc::clone(base.pool.as_ref().expect("reuse is on"));
+    let configured = base.clone().dns_resolver(crate::net::dns::Resolver::new());
+    let configured_pool = configured.pool.as_ref().expect("reuse remains on");
+
+    assert!(base.dns_resolver.is_none());
+    assert!(!Arc::ptr_eq(&original_pool, configured_pool));
+    assert_eq!(configured_pool.max_idle, 2);
+    assert_eq!(configured_pool.max_idle_total, Some(7));
+    assert!(Arc::ptr_eq(
+        base.admission.as_ref().expect("base admission"),
+        configured.admission.as_ref().expect("shared admission"),
+    ));
+
+    let cloned = configured.clone();
+    assert!(Arc::ptr_eq(
+        configured.dns_resolver.as_ref().expect("resolver"),
+        cloned.dns_resolver.as_ref().expect("shared resolver cache"),
+    ));
+    assert!(Arc::ptr_eq(
+        configured_pool,
+        cloned.pool.as_ref().expect("shared idle pool"),
+    ));
+
+    let rerouted = cloned.dns_resolver(crate::net::dns::Resolver::new());
+    assert!(!Arc::ptr_eq(
+        configured.dns_resolver.as_ref().expect("original resolver"),
+        rerouted.dns_resolver.as_ref().expect("new resolver"),
+    ));
+    assert!(!Arc::ptr_eq(
+        configured_pool,
+        rerouted.pool.as_ref().expect("new idle pool"),
+    ));
+    assert!(Arc::ptr_eq(
+        &original_pool,
+        base.pool.as_ref().expect("original client is unchanged"),
+    ));
+    assert_eq!(rerouted.pool.as_ref().expect("new pool").max_idle, 2);
+    assert_eq!(
+        rerouted.pool.as_ref().expect("new pool").max_idle_total,
+        Some(7)
+    );
+    assert!(
+        Http2Client::new()
+            .dns_resolver(crate::net::dns::Resolver::new())
+            .pool
+            .is_none(),
+        "configuring DNS must not implicitly enable connection retention"
+    );
+}
+
 /// mu5yhv finding 1: clones share the pool, keyed by scheme, host and
 /// port only. A clone given another connector (another client identity
 /// or trust policy) took connections authenticated under the first one.

@@ -112,6 +112,15 @@ artifacts.
 
 ### Added
 
+- **Configured DNS for native HTTP/2 clients.**
+  `Http2Client::dns_resolver` shares a caller-selected resolver and its cache
+  across clones for buffered requests, streaming bodies, and CONNECT setup.
+  Lookups run under the explicit request owner and the original request
+  deadline; resolved addresses use the existing Happy Eyeballs connector.
+  Explicit nameservers can use native reactor DNS with blocking admission
+  forbidden. Selecting a different resolver isolates idle connection reuse,
+  while URL authority, TLS identity, IP literals, and supplied transports keep
+  their established semantics.
 - **Borrow caller-owned state in transaction callbacks across all three
   database backends.** `with_pg_transaction_with_state` and
   `with_mysql_transaction_with_state`, with their retry variants, lend SQL,
