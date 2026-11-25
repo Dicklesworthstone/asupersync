@@ -4,13 +4,15 @@
 //! raw H2 peer with finite socket/readiness bounds, not loopback RPC simulation.
 
 use super::*;
+use crate::channel::oneshot;
 use crate::grpc::server::Interceptor;
 use crate::grpc::service::{
     MethodDescriptor, NamedService, ServiceDescriptor, ServiceHandlerFuture, ServiceStreamingFuture,
 };
 use crate::grpc::streaming::Streaming;
 use crate::http::h2::{Header, HpackDecoder};
-use crate::runtime::RuntimeBuilder;
+use crate::runtime::spawn_mailbox::{RegionCommand, RegisterRegionFinalizer};
+use crate::runtime::{RuntimeBuilder, TaskHandle};
 use crate::server::shutdown::ShutdownSignal;
 use crate::time::VirtualClock;
 use crate::types::{RegionId, TaskId};
@@ -70,6 +72,7 @@ struct Probe {
 struct FixtureService {
     probe: Arc<Probe>,
     mode: Mode,
+    owned: Option<Arc<OwnedStreamProbe>>,
 }
 
 impl NamedService for FixtureService {
@@ -126,11 +129,15 @@ impl ServiceHandler for FixtureService {
             mode: self.mode,
             index: 0,
         };
+        let owned = self.owned.clone();
         Box::pin(async move {
             assert!(
                 !matches!(stream.mode, Mode::FuturePanic),
                 "private future panic"
             );
+            if let Some(owned) = &owned {
+                install_owned_stream_child(cx, owned).await;
+            }
             if matches!(stream.mode, Mode::FactoryError) {
                 return Err(Status::permission_denied("factory refused"));
             }
@@ -258,6 +265,161 @@ impl Interceptor for Deny {
     fn intercept_response(&self, _response: &mut Response<Bytes>) -> Result<(), Status> {
         Ok(())
     }
+}
+
+enum OwnedStreamEvent {
+    ChildParked(Cx),
+    CleanupParked,
+    Finalized,
+}
+
+struct OwnedStreamProbe {
+    cleanup: parking_lot::Mutex<Option<oneshot::Receiver<()>>>,
+    retained: parking_lot::Mutex<Option<TaskHandle<()>>>,
+    events: sync_mpsc::Sender<OwnedStreamEvent>,
+    owner_region: parking_lot::Mutex<Option<RegionId>>,
+    retired: AtomicUsize,
+    finalized: AtomicUsize,
+}
+
+struct OwnedStreamControl {
+    probe: Arc<OwnedStreamProbe>,
+    events: sync_mpsc::Receiver<OwnedStreamEvent>,
+    release: Option<oneshot::Sender<()>>,
+}
+
+impl OwnedStreamControl {
+    fn new() -> Self {
+        let (events, receive) = sync_mpsc::channel();
+        let (release, cleanup) = oneshot::channel();
+        Self {
+            probe: Arc::new(OwnedStreamProbe {
+                cleanup: parking_lot::Mutex::new(Some(cleanup)),
+                retained: parking_lot::Mutex::new(None),
+                events,
+                owner_region: parking_lot::Mutex::new(None),
+                retired: AtomicUsize::new(0),
+                finalized: AtomicUsize::new(0),
+            }),
+            events: receive,
+            release: Some(release),
+        }
+    }
+
+    fn next(&self) -> OwnedStreamEvent {
+        self.events
+            .recv_timeout(Duration::from_secs(2))
+            .expect("owned stream lifecycle made progress")
+    }
+
+    fn release_cleanup(&mut self) {
+        self.release
+            .take()
+            .expect("cleanup released once")
+            .send_blocking(())
+            .expect("held child still owns cleanup");
+    }
+
+    fn assert_finalized(&self) {
+        assert!(matches!(self.next(), OwnedStreamEvent::Finalized));
+        assert_eq!(self.probe.retired.load(Ordering::SeqCst), 1);
+        assert_eq!(self.probe.finalized.load(Ordering::SeqCst), 1);
+    }
+}
+
+impl Drop for OwnedStreamControl {
+    fn drop(&mut self) {
+        // An assertion failure in the peer must not strand masked cleanup.
+        if let Some(release) = self.release.take() {
+            let _ = release.send_blocking(());
+        }
+    }
+}
+
+struct OwnedStreamChildDrop(Arc<OwnedStreamProbe>);
+
+impl Drop for OwnedStreamChildDrop {
+    fn drop(&mut self) {
+        self.0.retired.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+async fn install_owned_stream_child(cx: &Cx, probe: &Arc<OwnedStreamProbe>) {
+    // Acknowledge registration before the handler can finish, using the same
+    // mailbox seam as cx/scoped_join_bounded_native_tests.rs.
+    let finalizer_probe = Arc::clone(probe);
+    let (registered, mut registration) = oneshot::channel();
+    let finalizer = RegisterRegionFinalizer::new(
+        cx.region_id(),
+        move || {
+            assert_eq!(
+                finalizer_probe.retired.load(Ordering::SeqCst),
+                1,
+                "request finalizer must follow actual child destruction"
+            );
+            finalizer_probe.finalized.fetch_add(1, Ordering::SeqCst);
+            let _ = finalizer_probe.events.send(OwnedStreamEvent::Finalized);
+        },
+        registered,
+    );
+    cx.spawn_gateway_handle()
+        .expect("admitted request retains its spawn gateway")
+        .enqueue_region_command(RegionCommand::RegisterFinalizer(finalizer))
+        .unwrap();
+    registration.recv_uninterruptible().await.unwrap().unwrap();
+
+    let mut cleanup = probe
+        .cleanup
+        .lock()
+        .take()
+        .expect("one held child for this streaming call");
+    let child_probe = Arc::clone(probe);
+    let (ready, mut readiness) = oneshot::channel();
+    let child = cx
+        .spawn(move |child| async move {
+            let _retired = OwnedStreamChildDrop(Arc::clone(&child_probe));
+            {
+                let mut ready = Some(ready);
+                let mut cancelled = std::pin::pin!(child.cancelled());
+                poll_fn(|task| {
+                    let progress = cancelled.as_mut().poll(task);
+                    if progress.is_pending()
+                        && let Some(ready) = ready.take()
+                    {
+                        let _ = child_probe
+                            .events
+                            .send(OwnedStreamEvent::ChildParked(child.clone()));
+                        let _ = ready.send_blocking(());
+                    }
+                    progress
+                })
+                .await;
+            }
+
+            // Acknowledge cancellation before spending the cleanup budget.
+            let _ = child.checkpoint();
+            let mut witnessed = false;
+            let mut cleanup = std::pin::pin!(cleanup.recv_uninterruptible());
+            poll_fn(|task| {
+                let progress = child.masked(|| cleanup.as_mut().poll(task));
+                if progress.is_pending() && !witnessed {
+                    witnessed = true;
+                    let _ = child_probe.events.send(OwnedStreamEvent::CleanupParked);
+                }
+                progress
+            })
+            .await
+            .expect("peer releases actual pending cleanup");
+        })
+        .expect("spawn owned request descendant");
+
+    // Keep the handle beyond the service future and stream destructor.
+    // Request-region close, not handle destruction, must retire the child.
+    *probe.retained.lock() = Some(child);
+    readiness
+        .recv_uninterruptible()
+        .await
+        .expect("child reached a cancellation-aware Pending poll");
 }
 
 struct StopOnDrop(ShutdownSignal);
@@ -451,6 +613,20 @@ impl Peer {
         panic!("response exceeded test frame budget");
     }
 
+    fn assert_nonterminal_ping(&mut self) {
+        self.send(6, 0, 0, b"credit!!");
+        for _ in 0..20_000 {
+            let (terminal, acknowledged) = self.step();
+            assert!(!terminal, "response completed before owned cleanup");
+            if acknowledged {
+                assert!(self.reply.trailers.is_empty());
+                assert_eq!(self.reply.reset, None);
+                return;
+            }
+        }
+        panic!("PING acknowledgment exceeded test frame budget");
+    }
+
     fn reset(&mut self) {
         self.send(3, 0, self.stream, &8u32.to_be_bytes());
     }
@@ -505,6 +681,23 @@ where
         + Send
         + 'static,
 {
+    wire_case_with_ownership(mode, window, path, timeout, interceptor, None, client)
+}
+
+fn wire_case_with_ownership<F>(
+    mode: Mode,
+    window: u32,
+    path: &'static str,
+    timeout: Option<&'static str>,
+    interceptor: Option<Arc<dyn Interceptor>>,
+    owned: Option<Arc<OwnedStreamProbe>>,
+    client: F,
+) -> Arc<Probe>
+where
+    F: FnOnce(&mut Peer, sync_mpsc::Receiver<Cx>, sync_mpsc::Receiver<()>, &Arc<Probe>)
+        + Send
+        + 'static,
+{
     let (started, starts) = sync_mpsc::channel();
     let (retired, retirements) = sync_mpsc::channel();
     let probe = Arc::new(Probe {
@@ -517,6 +710,7 @@ where
     let fixture = FixtureService {
         mode,
         probe: Arc::clone(&probe),
+        owned: owned.clone(),
     };
     let mut server = Server::builder().add_service(fixture).build();
     if let Some(interceptor) = interceptor {
@@ -530,6 +724,10 @@ where
     let handle = runtime.handle().clone();
     let peer_probe = Arc::clone(&probe);
     runtime.block_on(runtime.handle().spawn(async move {
+        let owner = Cx::current().expect("native serving task context");
+        if let Some(probe) = &owned {
+            *probe.owner_region.lock() = Some(owner.region_id());
+        }
         let listener = server
             .bind_registered_streaming_http2(
                 "127.0.0.1:0",
@@ -545,11 +743,150 @@ where
             let mut peer = Peer::new(addr, window, path, timeout);
             client(&mut peer, starts, retirements, &peer_probe);
         });
-        let served = listener.run_produced(&handle).await;
+        let served = if owned.is_some() {
+            listener.run_produced_owned_in(&owner).await
+        } else {
+            listener.run_produced(&handle).await
+        };
         peer.join().expect("native wire assertions");
         served.expect("native listener stopped");
     }));
     probe
+}
+
+#[test]
+fn native_owned_stream_waits_for_descendant_and_finalizer_before_trailers() {
+    for mode in [Mode::Values, Mode::Empty, Mode::Error] {
+        let mut control = OwnedStreamControl::new();
+        let owned = Arc::clone(&control.probe);
+        wire_case_with_ownership(
+            mode,
+            65_535,
+            "/test.Watch/Values",
+            None,
+            None,
+            Some(owned),
+            move |peer, starts, retirements, probe| {
+                let call = starts
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("application source was polled");
+                let child = match control.next() {
+                    OwnedStreamEvent::ChildParked(child) => child,
+                    _ => panic!("child must park before cleanup"),
+                };
+
+                assert_eq!(child.region_id(), call.region_id());
+                assert_ne!(child.task_id(), call.task_id());
+                assert_ne!(
+                    Some(call.region_id()),
+                    *control.probe.owner_region.lock(),
+                    "stream must execute in an admitted request region"
+                );
+                assert!(control.probe.retained.lock().is_some());
+
+                assert!(matches!(control.next(), OwnedStreamEvent::CleanupParked));
+                retirements
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("source retired while request cleanup remains held");
+                assert!(child.is_cancel_requested());
+                assert_eq!(control.probe.retired.load(Ordering::SeqCst), 0);
+                assert_eq!(control.probe.finalized.load(Ordering::SeqCst), 0);
+
+                peer.assert_nonterminal_ping();
+                control.release_cleanup();
+                control.assert_finalized();
+                peer.finish();
+
+                assert_eq!(peer.reply.reset, None, "{mode:?}");
+                match mode {
+                    Mode::Values => {
+                        assert_eq!(
+                            peer.reply.messages(),
+                            vec![vec![0x11; 3000], vec![0x22; 3000]]
+                        );
+                        assert_eq!(peer.reply.trailer("grpc-status"), Some("0"));
+                    }
+                    Mode::Empty => {
+                        assert!(peer.reply.body.is_empty());
+                        assert_eq!(peer.reply.trailer("grpc-status"), Some("0"));
+                    }
+                    Mode::Error => {
+                        assert_eq!(peer.reply.messages(), vec![vec![0x11; 3000]]);
+                        assert_eq!(peer.reply.trailer("grpc-status"), Some("3"));
+                    }
+                    _ => unreachable!(),
+                }
+                if !matches!(mode, Mode::Error) {
+                    assert_eq!(peer.reply.trailer("x-end"), Some("finished"));
+                    assert_eq!(peer.reply.trailer("x-proof-bin"), Some("AP8"));
+                }
+                assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
+                assert_eq!(probe.drops.load(Ordering::SeqCst), 1);
+            },
+        );
+    }
+}
+
+#[test]
+fn native_owned_rst_drains_child_without_cancelling_a_sibling_rpc() {
+    let mut control = OwnedStreamControl::new();
+    let owned = Arc::clone(&control.probe);
+    wire_case_with_ownership(
+        Mode::Never,
+        65_535,
+        "/test.Watch/Values",
+        None,
+        None,
+        Some(owned),
+        move |peer, starts, retirements, probe| {
+            let call = starts
+                .recv_timeout(Duration::from_secs(2))
+                .expect("stream reached Pending");
+            let child = match control.next() {
+                OwnedStreamEvent::ChildParked(child) => child,
+                _ => panic!("child must park before reset"),
+            };
+            assert_eq!(child.region_id(), call.region_id());
+            assert_ne!(child.task_id(), call.task_id());
+
+            // Consume stream 1's initial HPACK block before switching the
+            // peer to stream 3. The decoder is connection-scoped.
+            for _ in 0..20_000 {
+                if !peer.reply.initial.is_empty() {
+                    break;
+                }
+                assert!(!peer.step().0, "parked source must remain nonterminal");
+            }
+            assert!(
+                !peer.reply.initial.is_empty(),
+                "initial HEADERS exceeded test frame budget"
+            );
+            peer.reset();
+
+            assert!(matches!(control.next(), OwnedStreamEvent::CleanupParked));
+            retirements
+                .recv_timeout(Duration::from_secs(2))
+                .expect("RST retires the parked source");
+            assert!(call.is_cancel_requested());
+            assert!(child.is_cancel_requested());
+            assert_eq!(control.probe.retired.load(Ordering::SeqCst), 0);
+            assert_eq!(control.probe.finalized.load(Ordering::SeqCst), 0);
+
+            // A different request remains usable while the reset request
+            // retains its descendant and admission ownership.
+            peer.request(3, "/test.Watch/Echo", None);
+            peer.finish();
+            assert_eq!(peer.reply.reset, None);
+            assert_eq!(peer.reply.trailer("grpc-status"), Some("0"));
+            assert_eq!(peer.reply.messages(), vec![Vec::<u8>::new()]);
+            assert_eq!(control.probe.retired.load(Ordering::SeqCst), 0);
+
+            control.release_cleanup();
+            control.assert_finalized();
+            assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(probe.drops.load(Ordering::SeqCst), 1);
+        },
+    );
 }
 
 #[test]

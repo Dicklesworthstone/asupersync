@@ -1214,6 +1214,228 @@ mod request_ownership {
         }
     }
 
+    struct OwnedProducerProbe {
+        parked: std::sync::mpsc::Sender<(&'static str, Cx)>,
+        cancelled: AtomicUsize,
+        cleaned: AtomicUsize,
+        released: AtomicBool,
+        cleanup: Notify,
+    }
+
+    impl OwnedProducerProbe {
+        async fn park(&self, role: &'static str, cx: &Cx) {
+            let mut cancellation = std::pin::pin!(cx.cancelled());
+            let mut witnessed = false;
+            std::future::poll_fn(|task_cx| match cancellation.as_mut().poll(task_cx) {
+                Poll::Ready(_) => Poll::Ready(()),
+                Poll::Pending => {
+                    if !witnessed {
+                        // The actual cancellation waiter is registered.
+                        self.parked.send((role, cx.clone())).unwrap();
+                        witnessed = true;
+                    }
+                    Poll::Pending
+                }
+            })
+            .await;
+            let _ = cx.checkpoint();
+            self.cancelled.fetch_add(1, Ordering::Release);
+            self.cleanup
+                .wait_until(|| self.released.load(Ordering::Acquire))
+                .await;
+            self.cleaned.fetch_add(1, Ordering::Release);
+        }
+
+        fn release(&self) {
+            self.released.store(true, Ordering::Release);
+            self.cleanup.notify_waiters();
+        }
+    }
+
+    struct OwnedProducerCleanup {
+        manager: asupersync::server::connection::ConnectionManager,
+        probe: Arc<OwnedProducerProbe>,
+    }
+
+    impl Drop for OwnedProducerCleanup {
+        fn drop(&mut self) {
+            // Failure cleanup does not substitute for the ownership verdict.
+            let _ = self.manager.begin_force_close();
+            self.probe.release();
+        }
+    }
+
+    #[test]
+    fn h2_produced_listener_in_owns_requests_below_its_explicit_owner() {
+        use asupersync::cx::{ChildRegionCloseOutcome, ChildRegionSpec};
+
+        for workers in [1, 2] {
+            let runtime = RuntimeBuilder::new()
+                .worker_threads(workers)
+                .build()
+                .unwrap();
+            let owner = runtime.block_on(async {
+                Cx::current()
+                    .unwrap()
+                    .open_child_region(ChildRegionSpec::inherit())
+                    .await
+                    .unwrap()
+            });
+            let owner_cx = owner.cx().clone();
+            let owner_region = owner_cx.region_id();
+            let (parked, witnesses) = std::sync::mpsc::channel();
+            let probe = Arc::new(OwnedProducerProbe {
+                parked,
+                cancelled: AtomicUsize::new(0),
+                cleaned: AtomicUsize::new(0),
+                released: AtomicBool::new(false),
+                cleanup: Notify::new(),
+            });
+            let handler_probe = Arc::clone(&probe);
+            let listener = runtime
+                .block_on(Http2Listener::bind_produced_with_config(
+                    "127.0.0.1:0",
+                    move |_request| {
+                        let probe = Arc::clone(&handler_probe);
+                        async move {
+                            let handler_cx = Cx::current().expect("handler Cx");
+                            let handler_identity =
+                                (handler_cx.task_id(), handler_cx.region_id());
+                            Http2ProducedResponse::streaming(
+                                Response::new(200, "OK", Vec::new()),
+                                NonZeroUsize::MIN,
+                                NonZeroUsize::new(1024).unwrap(),
+                                move |producer_cx, sender| async move {
+                                    let ambient = Cx::current().expect("producer Cx");
+                                    let producer_identity =
+                                        (producer_cx.task_id(), producer_cx.region_id());
+                                    assert_eq!(handler_identity, producer_identity);
+                                    assert_eq!(
+                                        (ambient.task_id(), ambient.region_id()),
+                                        producer_identity
+                                    );
+                                    let child_probe = Arc::clone(&probe);
+                                    let _child = producer_cx
+                                        .spawn(move |child_cx| async move {
+                                            child_probe.park("child", &child_cx).await;
+                                        })
+                                        .unwrap();
+                                    probe.park("producer", &producer_cx).await;
+                                    Ok(sender)
+                                },
+                            )
+                        }
+                    },
+                    drain_config(Duration::from_secs(5), Duration::from_secs(10))
+                        .request_drain_grace(Duration::from_secs(30)),
+                ))
+                .unwrap();
+            let address = listener.local_addr().unwrap();
+            let manager = listener.connection_manager().clone();
+            let in_flight = listener.in_flight_requests();
+            let _cleanup = OwnedProducerCleanup {
+                manager: manager.clone(),
+                probe: Arc::clone(&probe),
+            };
+            let (coordinator_tx, coordinator_rx) = std::sync::mpsc::channel();
+
+            // Root owns the coordinator. The supplied child context must
+            // own connections and request subtrees independently of it.
+            let mut serving = runtime.block_on(async move {
+                Cx::current()
+                    .unwrap()
+                    .spawn(move |coordinator| {
+                        boxed_listener_run(async move {
+                            coordinator_tx.send(coordinator).unwrap();
+                            listener.run_produced_owned_in(&owner_cx).await
+                        })
+                    })
+                    .unwrap()
+            });
+            let coordinator = coordinator_rx
+                .recv_timeout(Duration::from_secs(3))
+                .expect("root coordinator starts");
+            assert_ne!(coordinator.region_id(), owner_region);
+
+            let mut peer = Peer::connect(address);
+            peer.request(1, "/owned-producer");
+            let mut producer = None;
+            let mut child = None;
+            for _ in 0..2 {
+                let (role, cx) = witnesses
+                    .recv_timeout(Duration::from_secs(3))
+                    .expect("producer and child have registered cancellation waits");
+                match role {
+                    "producer" => producer = Some(cx),
+                    "child" => child = Some(cx),
+                    other => panic!("unexpected witness {other}"),
+                }
+            }
+            let producer = producer.expect("producer witness");
+            let child = child.expect("child witness");
+            assert_ne!(producer.region_id(), owner_region);
+            assert_ne!(producer.region_id(), coordinator.region_id());
+            assert_eq!(producer.region_id(), child.region_id());
+            assert_ne!(producer.task_id(), child.task_id());
+            assert_eq!(manager.active_count(), 1);
+            assert_eq!(in_flight.load(Ordering::Acquire), 1);
+
+            let report = runtime
+                .block_on(owner.close_within(Duration::from_millis(100)))
+                .unwrap();
+            wait_for("both request tasks observe owner cancellation", || {
+                probe.cancelled.load(Ordering::Acquire) == 2
+            });
+            assert_eq!(probe.cleaned.load(Ordering::Acquire), 0);
+            assert_eq!(
+                report.outcome,
+                ChildRegionCloseOutcome::TimedOut,
+                "{report:?}"
+            );
+            assert!(
+                report.stragglers.contains(&producer.task_id()),
+                "producer must belong to the explicit owner's subtree: {report:?}"
+            );
+            assert!(
+                report.stragglers.contains(&child.task_id()),
+                "producer child must belong to the same subtree: {report:?}"
+            );
+            assert!(!report.stragglers.contains(&coordinator.task_id()));
+            assert!(!coordinator.is_cancel_requested());
+
+            probe.release();
+            let stats = runtime.block_on(async {
+                let cx = Cx::current().unwrap();
+                asupersync::time::timeout(
+                    cx.now(),
+                    Duration::from_secs(5),
+                    serving.join(&cx),
+                )
+                .await
+                .expect("listener returns after actual request cleanup")
+                .expect("uncancelled coordinator retains its result")
+                .expect("listener shutdown")
+            });
+            assert_eq!(probe.cleaned.load(Ordering::Acquire), 2);
+            assert!(serving.is_finished());
+            assert!(!coordinator.is_cancel_requested());
+            assert_eq!(manager.shutdown_signal().phase(), ShutdownPhase::Stopped);
+            assert!(manager.is_empty());
+            assert_eq!(in_flight.load(Ordering::Acquire), 0);
+            assert!(stats.drain_report.unwrap().reached_quiescence);
+            drop(peer);
+
+            assert_eq!(
+                runtime.drain_root_region(Duration::from_secs(5)),
+                asupersync::runtime::RootDrainOutcome::Quiescent
+            );
+            assert!(runtime.is_quiescent());
+            assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+            assert_eq!(runtime.draining_region_count(), 0);
+            assert!(runtime.shutdown_timeout(Duration::from_secs(5)));
+        }
+    }
+
     fn cancellation_retains_admission(
         workers: usize,
         trigger: &str,
