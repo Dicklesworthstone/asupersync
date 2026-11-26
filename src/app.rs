@@ -314,7 +314,12 @@ mod managed_execution {
 
     enum BindingKind<E> {
         Route(Arc<dyn Handler>),
-        Actor(ManagedRestartMode, Arc<ActorFactory<E>>),
+        Actor(ManagedRestartMode, Arc<ActorFactory<E>>, ManagedAppResources),
+        ResourceActor {
+            mode: ManagedRestartMode,
+            requirements: Vec<ManagedAppResourceRequirement>,
+            factory: Arc<ActorFactory<E>>,
+        },
         Worker(
             ManagedRestartMode,
             Arc<dyn ManagedChildFactory<E>>,
@@ -362,7 +367,8 @@ mod managed_execution {
         fn resource_requirements(&self) -> &[ManagedAppResourceRequirement] {
             match self {
                 Self::ResourceRoute { requirements, .. }
-                | Self::ResourceWorker { requirements, .. } => requirements,
+                | Self::ResourceWorker { requirements, .. }
+                | Self::ResourceActor { requirements, .. } => requirements,
                 Self::Route(_) | Self::Worker(..) | Self::Actor(..) => &[],
             }
         }
@@ -372,6 +378,7 @@ mod managed_execution {
                 Self::ResourceRoute { handler, .. } => {
                     Self::Route(Arc::new(ResourceRoute { handler, resources }))
                 }
+                Self::ResourceActor { mode, factory, .. } => Self::Actor(mode, factory, resources),
                 Self::ResourceWorker {
                     mode,
                     factory,
@@ -434,11 +441,54 @@ mod managed_execution {
             A: crate::actor::Actor,
             F: Fn(Cx, ManagedGeneration) -> A + Send + Sync + 'static,
         {
+            let (factory, receiver) =
+                super::actors::factory(move |cx, generation, _resources| factory(cx, generation));
+            (
+                Self {
+                    name: name.into(),
+                    kind: BindingKind::Actor(mode, factory, ManagedAppResources::default()),
+                },
+                receiver,
+            )
+        }
+
+        /// Bind a typed actor to its bounded mailbox and manifest-scoped resources.
+        ///
+        /// Supply one type requirement for every resource named by the actor
+        /// or its service. The complete resource view is checked before any
+        /// factory runs, using the same type, capability, feature and allowlist
+        /// rules as [`Self::worker_with_resources`]. The factory receives only
+        /// that physically restricted view; shared handles persist across
+        /// supervised generations without granting additional runtime authority.
+        ///
+        /// Mailbox capacity, generation publication, restart and cancellation
+        /// cleanup follow [`Self::actor`]. The actor declaration must explicitly
+        /// require `Spawn`. Resource initialization, shutdown and revocation
+        /// remain the caller's responsibility.
+        #[must_use]
+        pub fn actor_with_resources<A, F>(
+            name: impl Into<String>,
+            mode: ManagedRestartMode,
+            requirements: Vec<ManagedAppResourceRequirement>,
+            factory: F,
+        ) -> (
+            Self,
+            watch::Receiver<Option<super::ManagedAppActorGeneration<A::Message>>>,
+        )
+        where
+            E: Send + 'static,
+            A: crate::actor::Actor,
+            F: Fn(Cx, ManagedGeneration, ManagedAppResources) -> A + Send + Sync + 'static,
+        {
             let (factory, receiver) = super::actors::factory(factory);
             (
                 Self {
                     name: name.into(),
-                    kind: BindingKind::Actor(mode, factory),
+                    kind: BindingKind::ResourceActor {
+                        mode,
+                        requirements,
+                        factory,
+                    },
                 },
                 receiver,
             )
@@ -2219,28 +2269,26 @@ mod managed_execution {
                         })
                     })
                     .transpose()?;
+                let mut resource_names: BTreeSet<_> = child
+                    .required_capabilities
+                    .resources
+                    .iter()
+                    .cloned()
+                    .collect();
+                if let Some(inherited) = service_resources.get(&child.service) {
+                    resource_names.extend(inherited.iter().cloned());
+                }
                 let resource_view = if let Some(catalog) = &resource_catalog {
-                    let mut names: BTreeSet<_> = child
-                        .required_capabilities
-                        .resources
-                        .iter()
-                        .cloned()
-                        .collect();
-                    if let Some(inherited) = service_resources.get(&child.service) {
-                        names.extend(inherited.iter().cloned());
-                    }
                     catalog
                         .for_work(
                             &child.name,
-                            &names,
+                            &resource_names,
                             kind.resource_requirements(),
                             &child.required_capabilities.cx_capabilities,
                         )
                         .map_err(ManagedAppBindError::Resource)?
                 } else {
-                    if !child.required_capabilities.resources.is_empty()
-                        || !kind.resource_requirements().is_empty()
-                    {
+                    if !resource_names.is_empty() || !kind.resource_requirements().is_empty() {
                         return Err(ManagedAppBindError::Unsupported {
                             unit: child.name,
                             reason: "named resources require an explicit typed resource binding",
@@ -2261,7 +2309,9 @@ mod managed_execution {
                 let supplied_signal = match &kind {
                     BindingKind::Worker(_, _, signal) => signal.as_ref(),
                     BindingKind::Route(_) | BindingKind::Actor(..) => None,
-                    BindingKind::ResourceRoute { .. } | BindingKind::ResourceWorker { .. } => {
+                    BindingKind::ResourceRoute { .. }
+                    | BindingKind::ResourceWorker { .. }
+                    | BindingKind::ResourceActor { .. } => {
                         unreachable!("typed resource adapters have been bound")
                     }
                 };
@@ -2378,7 +2428,10 @@ mod managed_execution {
                         });
                         bind_worker(template, child.name, mode, &policy, factory);
                     }
-                    (AppSpecV1WorkUnitKind::Actor, BindingKind::Actor(mode, factory)) => {
+                    (
+                        AppSpecV1WorkUnitKind::Actor,
+                        BindingKind::Actor(mode, factory, resources),
+                    ) => {
                         if !policy
                             .required
                             .cx_capabilities
@@ -2403,7 +2456,9 @@ mod managed_execution {
                             child.name,
                             mode,
                             &policy,
-                            Arc::new(move |cx, generation| factory(cx, generation, capacity)),
+                            Arc::new(move |cx, generation| {
+                                factory(cx, generation, capacity, resources.clone())
+                            }),
                         );
                     }
                     _ => return Err(ManagedAppBindError::KindMismatch(child.name)),

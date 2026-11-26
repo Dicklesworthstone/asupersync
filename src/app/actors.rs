@@ -1,6 +1,7 @@
 //! Typed actor instances behind managed AppSpec generations.
 
 use super::managed_execution::ManagedAppWorkError;
+use super::resources::ManagedAppResources;
 use crate::actor::{Actor, ActorRef};
 use crate::channel::watch;
 use crate::cx::Cx;
@@ -46,7 +47,12 @@ impl<M: Send + 'static> fmt::Debug for ManagedAppActorGeneration<M> {
     }
 }
 
-pub(super) type ActorFactory<E> = dyn Fn(Cx, ManagedGeneration, usize) -> ManagedChildFuture<ManagedAppWorkError<E>>
+pub(super) type ActorFactory<E> = dyn Fn(
+        Cx,
+        ManagedGeneration,
+        usize,
+        ManagedAppResources,
+    ) -> ManagedChildFuture<ManagedAppWorkError<E>>
     + Send
     + Sync;
 
@@ -94,12 +100,12 @@ pub(super) fn factory<E, A, F>(
 where
     E: Send + 'static,
     A: Actor,
-    F: Fn(Cx, ManagedGeneration) -> A + Send + Sync + 'static,
+    F: Fn(Cx, ManagedGeneration, ManagedAppResources) -> A + Send + Sync + 'static,
 {
     let (sender, receiver) = watch::channel(None);
     let sender = Arc::new(sender);
     let create = Arc::new(create);
-    let factory = Arc::new(move |cx: Cx, generation, capacity| {
+    let factory = Arc::new(move |cx: Cx, generation, capacity, resources| {
         let create = Arc::clone(&create);
         let sender = Arc::clone(&sender);
         Box::pin(async move {
@@ -109,7 +115,7 @@ where
                         .unwrap_or_else(|| CancelReason::user("AppSpec actor cancelled")),
                 );
             }
-            let actor = create(cx.clone(), generation);
+            let actor = create(cx.clone(), generation, resources);
             let mut actor = match cx.spawn_actor(actor, capacity) {
                 Ok(actor) => actor,
                 Err(error) => return Outcome::Err(ManagedAppWorkError::Spawn(error)),

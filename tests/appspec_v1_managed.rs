@@ -100,7 +100,10 @@ where
 mod typed_actors {
     use super::*;
     use asupersync::actor::Actor;
-    use asupersync::app::ManagedAppActorGeneration;
+    use asupersync::app::{
+        ManagedAppActorGeneration, ManagedAppResourceBinding, ManagedAppResourceError,
+        ManagedAppResourceRequirement, ManagedAppResources,
+    };
     use asupersync::channel::{mpsc, watch};
     use std::pin::Pin;
     use std::sync::Mutex;
@@ -468,6 +471,331 @@ mod typed_actors {
             } else {
                 assert!(matches!(error, ManagedAppBindError::Unsupported { .. }));
             }
+            assert_eq!(state.factories.load(Ordering::Acquire), 0);
+            assert!(receiver.borrow_and_clone().is_none());
+        }
+    }
+
+    struct ResourceActor {
+        inner: BoundActor,
+        outgoing: Arc<mpsc::Sender<u32>>,
+    }
+
+    impl Actor for ResourceActor {
+        type Message = Message;
+
+        fn on_start(&mut self, cx: &Cx) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            self.inner.on_start(cx)
+        }
+
+        fn handle(
+            &mut self,
+            cx: &Cx,
+            message: Message,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            let cx = cx.clone();
+            Box::pin(async move {
+                if let Message::Value(value) = &message {
+                    self.outgoing.send_checked(&cx, *value).await.unwrap();
+                }
+                self.inner.handle(&cx, message).await;
+            })
+        }
+
+        fn on_stop(&mut self, cx: &Cx) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            self.inner.on_stop(cx)
+        }
+    }
+
+    fn resource_manifest() -> Value {
+        let mut declaration = manifest(Some(1));
+        declaration["services"][0]["resources"] = json!(["state"]);
+        declaration["services"][0]["actors"][0]["required_capabilities"] = json!({
+            "cx_capabilities": ["spawn", "trace", "messaging"],
+            "feature_flags": [],
+            "resources": ["outgoing"]
+        });
+        declaration["resources"] = json!([
+            {"name": "state", "kind": "memory", "capability": "trace", "feature_flag": null},
+            {"name": "outgoing", "kind": "message_bus", "capability": "messaging", "feature_flag": null},
+            {"name": "hidden", "kind": "memory", "capability": "trace", "feature_flag": null}
+        ]);
+        declaration
+    }
+
+    fn actor_requirements() -> Vec<ManagedAppResourceRequirement> {
+        vec![
+            ManagedAppResourceRequirement::of::<mpsc::Sender<u32>>("outgoing"),
+            ManagedAppResourceRequirement::of::<Arc<State>>("state"),
+        ]
+    }
+
+    fn resource_binding(
+        requirements: Vec<ManagedAppResourceRequirement>,
+    ) -> (
+        ManagedAppBinding<()>,
+        watch::Receiver<Option<ManagedAppActorGeneration<Message>>>,
+    ) {
+        ManagedAppBinding::actor_with_resources(
+            "api.actor.cache",
+            ManagedRestartMode::Transient,
+            requirements,
+            |cx: Cx, generation, resources: ManagedAppResources| {
+                assert_actor_authority(&cx);
+                assert_eq!(cx.task_id(), generation.task);
+                assert_eq!(cx.region_id(), generation.region);
+                assert_eq!(resources.names().collect::<Vec<_>>(), ["outgoing", "state"]);
+                assert!(matches!(
+                    resources.get::<u8>("hidden"),
+                    Err(ManagedAppResourceError::Undeclared(_))
+                ));
+                let state = resources.get::<Arc<State>>("state").unwrap();
+                let state = Arc::clone(state.as_ref());
+                let attempt = state.factories.fetch_add(1, Ordering::AcqRel);
+                assert_eq!(
+                    state.drops.load(Ordering::Acquire),
+                    attempt,
+                    "resource-backed replacement overtook actor retirement"
+                );
+                ResourceActor {
+                    inner: BoundActor {
+                        state,
+                        generation,
+                        pause_start: false,
+                        pause_stop: attempt > 0,
+                    },
+                    outgoing: resources.get::<mpsc::Sender<u32>>("outgoing").unwrap(),
+                }
+            },
+        )
+    }
+
+    fn actor_resources(
+        spec: &AppSpecV1,
+        state: &Arc<State>,
+        sender: mpsc::Sender<u32>,
+    ) -> Vec<ManagedAppResourceBinding> {
+        let declaration = |name| {
+            spec.resources
+                .iter()
+                .find(|resource| resource.name == name)
+                .unwrap()
+                .clone()
+        };
+        vec![
+            ManagedAppResourceBinding::new(declaration("state"), Arc::clone(state)),
+            ManagedAppResourceBinding::new(declaration("outgoing"), sender),
+            ManagedAppResourceBinding::new(declaration("hidden"), 17_u8),
+        ]
+    }
+
+    async fn resource_mailbox_and_restart(cx: Cx) {
+        let parent = cx.open_child_region(parent_spec()).await.unwrap();
+        let state = Arc::new(State::default());
+        let (sender, mut output) = mpsc::channel(1);
+        let spec = parse(resource_manifest());
+        let resources = actor_resources(&spec, &state, sender);
+        let (binding, mut receiver) = resource_binding(actor_requirements());
+        let app = spec
+            .bind_managed_with_resources(vec![binding], resources, config())
+            .unwrap();
+        assert_eq!(state.factories.load(Ordering::Acquire), 0);
+        assert!(receiver.borrow_and_clone().is_none());
+        let mut app = app.start(parent.cx()).unwrap();
+        let first = next_generation(&mut receiver, &cx, 0).await;
+        assert!(matches!(
+            first.actor.send(&cx, Message::Value(7)).await,
+            Outcome::Ok(())
+        ));
+        assert_eq!(output.recv(&cx).await.unwrap(), 7);
+        state
+            .changed
+            .wait_until(|| state.values.lock().unwrap().len() == 1)
+            .await;
+        assert!(matches!(
+            first.actor.send(&cx, Message::Crash).await,
+            Outcome::Ok(())
+        ));
+        let second = next_generation(&mut receiver, &cx, first.generation.number).await;
+        assert_eq!(second.generation.number, first.generation.number + 1);
+        assert_ne!(second.generation.region, first.generation.region);
+        assert_eq!(
+            first.actor.try_send(Message::Value(9)),
+            Err(mpsc::SendError::Disconnected(Message::Value(9)))
+        );
+        assert!(matches!(
+            second.actor.send(&cx, Message::Value(11)).await,
+            Outcome::Ok(())
+        ));
+        assert_eq!(output.recv(&cx).await.unwrap(), 11);
+        state
+            .changed
+            .wait_until(|| state.values.lock().unwrap().len() == 2)
+            .await;
+        assert_eq!(
+            *state.values.lock().unwrap(),
+            [(first.generation.number, 7), (second.generation.number, 11)]
+        );
+        assert!(matches!(
+            second.actor.send(&cx, Message::Park).await,
+            Outcome::Ok(())
+        ));
+        state.handler_parked.notified().await;
+        app.abort();
+        state.stop_parked.notified().await;
+        let mut join = std::pin::pin!(app.join());
+        poll_fn(|task| {
+            assert!(join.as_mut().poll(task).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        assert_eq!(state.drops.load(Ordering::Acquire), 1);
+        assert_eq!(
+            receiver.borrow_and_clone().unwrap().generation,
+            second.generation
+        );
+        state.stop_release.notify_one();
+        let report = join.await.unwrap();
+        assert_eq!(report.started, 2);
+        assert_eq!(report.joined, 2);
+        assert_eq!(report.restart_batches, 1);
+        assert!(matches!(report.outcome, Outcome::Cancelled(_)));
+        assert!(matches!(report.children[0].outcome, Outcome::Cancelled(_)));
+        assert!(receiver.borrow_and_clone().is_none());
+        assert!(second.actor.is_closed());
+        assert_eq!(state.factories.load(Ordering::Acquire), 2);
+        assert_eq!(state.starts.load(Ordering::Acquire), 2);
+        assert_eq!(state.stops.load(Ordering::Acquire), 1);
+        assert_eq!(state.drops.load(Ordering::Acquire), 2);
+        parent.close().await.unwrap();
+    }
+
+    #[test]
+    fn managed_typed_actor_resources_survive_restart_and_cancelled_cleanup() {
+        for workers in [1, 2] {
+            native(workers, resource_mailbox_and_restart);
+        }
+    }
+
+    #[test]
+    fn managed_typed_actor_resources_refuse_invalid_bindings_before_factory() {
+        for case in [
+            "missing_type",
+            "wrong_type",
+            "extra_type",
+            "duplicate_type",
+            "missing_capability",
+            "missing_catalog",
+            "missing_spawn",
+            "zero_capacity",
+        ] {
+            let state = Arc::new(State::default());
+            let (sender, _output) = mpsc::channel(1);
+            let mut declaration = resource_manifest();
+            let mut requirements = actor_requirements();
+            match case {
+                "missing_type" => {
+                    requirements.remove(0);
+                }
+                "wrong_type" => {
+                    requirements[0] = ManagedAppResourceRequirement::of::<u64>("outgoing");
+                }
+                "extra_type" => {
+                    requirements.push(ManagedAppResourceRequirement::of::<u8>("hidden"));
+                }
+                "duplicate_type" => requirements.push(requirements[0].clone()),
+                "missing_capability" => {
+                    declaration["services"][0]["actors"][0]["required_capabilities"]
+                        ["cx_capabilities"] = json!(["spawn", "trace"]);
+                }
+                "missing_spawn" => {
+                    declaration["services"][0]["actors"][0]["required_capabilities"]
+                        ["cx_capabilities"] = json!(["trace", "messaging"]);
+                }
+                "zero_capacity" => {
+                    declaration["services"][0]["actors"][0]["mailbox_capacity"] = json!(0);
+                }
+                _ => {}
+            }
+            let spec = parse(declaration);
+            let resources = actor_resources(&spec, &state, sender);
+            let (binding, receiver) = resource_binding(requirements);
+            let result = if case == "missing_catalog" {
+                spec.bind_managed(vec![binding], config())
+            } else {
+                spec.bind_managed_with_resources(vec![binding], resources, config())
+            };
+            let error = result.err().expect("resource preflight must refuse");
+            match (case, error) {
+                (
+                    "missing_type",
+                    ManagedAppBindError::Resource(ManagedAppResourceError::MissingRequirement {
+                        resource,
+                        ..
+                    }),
+                )
+                | (
+                    "wrong_type",
+                    ManagedAppBindError::Resource(ManagedAppResourceError::TypeMismatch {
+                        resource,
+                        ..
+                    }),
+                )
+                | (
+                    "duplicate_type",
+                    ManagedAppBindError::Resource(ManagedAppResourceError::DuplicateRequirement {
+                        resource,
+                        ..
+                    }),
+                )
+                | (
+                    "missing_capability",
+                    ManagedAppBindError::Resource(ManagedAppResourceError::MissingCapability {
+                        resource,
+                        ..
+                    }),
+                ) => assert_eq!(resource, "outgoing"),
+                (
+                    "extra_type",
+                    ManagedAppBindError::Resource(ManagedAppResourceError::UnexpectedRequirement {
+                        resource,
+                        ..
+                    }),
+                ) => assert_eq!(resource, "hidden"),
+                ("missing_spawn", ManagedAppBindError::Capability { capability, .. }) => {
+                    assert_eq!(capability, asupersync::app::AppCxCapabilityV1::Spawn);
+                }
+                ("missing_catalog" | "zero_capacity", ManagedAppBindError::Unsupported { .. }) => {}
+                (case, error) => panic!("{case}: unexpected refusal {error:?}"),
+            }
+            assert_eq!(state.factories.load(Ordering::Acquire), 0, "{case}");
+            assert!(receiver.borrow_and_clone().is_none(), "{case}");
+        }
+    }
+
+    #[test]
+    fn managed_typed_and_plain_actors_refuse_inherited_resources_without_catalog() {
+        for typed_resources in [false, true] {
+            let state = Arc::new(State::default());
+            let mut declaration = resource_manifest();
+            declaration["services"][0]["actors"][0]["required_capabilities"] = json!({
+                "cx_capabilities": ["spawn", "trace"],
+                "feature_flags": [],
+                "resources": []
+            });
+            let (binding, receiver) = if typed_resources {
+                resource_binding(Vec::new())
+            } else {
+                binding(&state, false, false)
+            };
+            let error = parse(declaration)
+                .bind_managed(vec![binding], config())
+                .err()
+                .expect("inherited service resources require an explicit catalog");
+            assert!(matches!(
+                error,
+                ManagedAppBindError::Unsupported { unit, .. } if unit == "api.actor.cache"
+            ));
             assert_eq!(state.factories.load(Ordering::Acquire), 0);
             assert!(receiver.borrow_and_clone().is_none());
         }
