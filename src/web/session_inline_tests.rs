@@ -10,6 +10,447 @@ use super::super::handler::Handler;
 use super::super::response::StatusCode;
 use super::*;
 
+// asupersync-a1q12q MEDIUM 2: exercise real middleware futures with two
+// requests holding the same snapshot, then choose their commit order.
+mod concurrent_sessions {
+    use super::*;
+    use std::future::{Future, poll_fn};
+    use std::pin::Pin;
+    use std::task::{Context, Poll, Waker};
+
+    const ID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    fn data(user: &str) -> SessionData {
+        let mut data = SessionData::new();
+        data.insert("user", user);
+        data
+    }
+
+    fn request(id: &str) -> Request {
+        let mut request = Request::new("GET", "/session");
+        request
+            .headers
+            .insert("cookie".to_string(), format!("session_id={id}"));
+        request
+    }
+
+    fn protected(store: MemoryStore) -> SessionLayer<MemoryStore> {
+        SessionLayer::new(store)
+            .csrf_protection(false)
+            .try_concurrency_protection()
+            .expect("MemoryStore supports atomic persistence")
+    }
+
+    fn finish<F: Future<Output = Response> + ?Sized>(future: Pin<&mut F>) -> Response {
+        let Poll::Ready(response) = future.poll(&mut Context::from_waker(Waker::noop())) else {
+            panic!("released handler must complete without another wait");
+        };
+        response
+    }
+
+    fn assert_conflict(response: &Response) {
+        assert_eq!(response.status, StatusCode::CONFLICT);
+        assert!(response.set_cookies.is_empty(), "no stale cookie or expiry");
+        assert!(!response.headers.contains_key("set-cookie"));
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum Action {
+        Read,
+        Write,
+        Rotate,
+        Logout,
+        Clear,
+    }
+
+    struct ActionHandler {
+        action: Action,
+        pause: bool,
+    }
+
+    impl Handler for ActionHandler {
+        fn call(
+            &self,
+            _cx: &crate::Cx,
+            req: Request,
+        ) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+            Box::pin(async move {
+                let session = req
+                    .extensions
+                    .get_typed::<Session>()
+                    .expect("middleware injects a session");
+                match self.action {
+                    Action::Read => {
+                        let _ = session.get("user");
+                    }
+                    Action::Write => session.insert("note", "updated"),
+                    Action::Rotate => {
+                        session.regenerate().expect("test entropy");
+                    }
+                    Action::Logout => {
+                        session.regenerate().expect("test entropy");
+                        session.clear();
+                    }
+                    Action::Clear => session.clear(),
+                }
+                if self.pause {
+                    let mut yielded = false;
+                    poll_fn(move |task| {
+                        if yielded {
+                            Poll::Ready(())
+                        } else {
+                            yielded = true;
+                            task.waker().wake_by_ref();
+                            Poll::Pending
+                        }
+                    })
+                    .await;
+                }
+                Response::new(StatusCode::OK, "handler completed")
+            })
+        }
+    }
+
+    #[test]
+    fn memory_store_updates_keep_the_incarnation_so_logout_still_wins() {
+        let store = MemoryStore::new();
+        assert_eq!(
+            store.commit_atomic(SessionCommit::Create {
+                id: ID,
+                data: &data("alice"),
+            }),
+            SessionCommitOutcome::Applied
+        );
+        let logout = store.load_atomic(ID).unwrap();
+        let update = store.clone().load_atomic(ID).unwrap();
+        store.save(ID, &data("ordinary legacy update"));
+        assert_eq!(
+            store.commit_atomic(SessionCommit::Update {
+                id: ID,
+                incarnation: &update.incarnation,
+                data: &data("ordinary protected update"),
+            }),
+            SessionCommitOutcome::Applied
+        );
+        assert_eq!(
+            store.commit_atomic(SessionCommit::Delete {
+                id: ID,
+                incarnation: &logout.incarnation,
+            }),
+            SessionCommitOutcome::Applied
+        );
+        assert_eq!(
+            store.commit_atomic(SessionCommit::Update {
+                id: ID,
+                incarnation: &update.incarnation,
+                data: &update.data,
+            }),
+            SessionCommitOutcome::Conflict
+        );
+        assert!(store.is_empty());
+    }
+
+    #[test]
+    fn memory_store_rotation_checks_both_ids_before_changing_either() {
+        let store = MemoryStore::with_max_sessions(2);
+        store.save(ID, &data("alice"));
+        store.save("occupied", &data("bob"));
+        let snapshot = store.load_atomic(ID).unwrap();
+        for new_id in [ID, "occupied"] {
+            assert_eq!(
+                store.commit_atomic(SessionCommit::Rotate {
+                    id: ID,
+                    incarnation: &snapshot.incarnation,
+                    new_id,
+                    data: &data("must not replace either entry"),
+                }),
+                SessionCommitOutcome::Conflict
+            );
+            assert_eq!(store.load(ID).unwrap().get("user"), Some("alice"));
+            assert_eq!(store.load("occupied").unwrap().get("user"), Some("bob"));
+            assert_eq!(store.len(), 2);
+        }
+        assert_eq!(
+            store.commit_atomic(SessionCommit::Create {
+                id: "occupied",
+                data: &data("must not overwrite"),
+            }),
+            SessionCommitOutcome::Conflict
+        );
+        assert_eq!(store.load("occupied").unwrap().get("user"), Some("bob"));
+    }
+
+    #[test]
+    fn memory_store_recreation_after_delete_or_eviction_rejects_old_tokens() {
+        for evict in [false, true] {
+            let store = MemoryStore::with_max_sessions(1);
+            store.save(ID, &data("alice"));
+            let stale = store.load_atomic(ID).unwrap();
+            if evict {
+                store.save("another", &data("evicts alice"));
+            } else {
+                store.delete(ID);
+            }
+            store.save(ID, &data("replacement"));
+            for commit in [
+                SessionCommit::Update {
+                    id: ID,
+                    incarnation: &stale.incarnation,
+                    data: &stale.data,
+                },
+                SessionCommit::Delete {
+                    id: ID,
+                    incarnation: &stale.incarnation,
+                },
+                SessionCommit::Rotate {
+                    id: ID,
+                    incarnation: &stale.incarnation,
+                    new_id: "must not exist",
+                    data: &stale.data,
+                },
+            ] {
+                assert_eq!(store.commit_atomic(commit), SessionCommitOutcome::Conflict);
+            }
+            assert_eq!(store.len(), 1);
+            assert_eq!(store.load(ID).unwrap().get("user"), Some("replacement"));
+            assert!(store.load("must not exist").is_none());
+        }
+    }
+
+    #[test]
+    fn logout_fences_read_only_updates_and_rotations_from_other_layers() {
+        for action in [Action::Read, Action::Write, Action::Rotate] {
+            let store = MemoryStore::new();
+            store.save(ID, &data("alice"));
+            let layer = protected(store.clone());
+            // Exercise Layer::layer as well as independently built wrap().
+            let slow = crate::service::Layer::layer(
+                &layer,
+                ActionHandler {
+                    action,
+                    pause: true,
+                },
+            );
+            let logout = protected(store.clone()).wrap(ActionHandler {
+                action: Action::Logout,
+                pause: false,
+            });
+            let cx = crate::Cx::for_testing();
+            let mut stale = Handler::call(&slow, &cx, request(ID));
+            assert!(
+                stale
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                    .is_pending()
+            );
+
+            let response = call_sync(&logout, request(ID));
+            assert_eq!(response.status, StatusCode::OK);
+            assert!(response.set_cookies[0].contains("Max-Age=0"));
+            assert!(store.is_empty());
+            assert_conflict(&finish(stale.as_mut()));
+            assert!(store.is_empty(), "stale {action:?} must not restore login");
+        }
+    }
+
+    #[test]
+    fn rotation_at_capacity_fences_other_rotations_and_older_logout() {
+        for action in [Action::Read, Action::Rotate, Action::Logout] {
+            let store = MemoryStore::with_max_sessions(1);
+            store.save(ID, &data("alice"));
+            let slow = protected(store.clone()).wrap(ActionHandler {
+                action,
+                pause: true,
+            });
+            let winner = protected(store.clone()).wrap(ActionHandler {
+                action: Action::Rotate,
+                pause: false,
+            });
+            let cx = crate::Cx::for_testing();
+            let mut stale = Handler::call(&slow, &cx, request(ID));
+            assert!(
+                stale
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                    .is_pending()
+            );
+
+            let response = call_sync(&winner, request(ID));
+            assert_eq!(response.status, StatusCode::OK);
+            let new_id = extract_set_cookie_id(&response.set_cookies[0]);
+            assert_ne!(new_id, ID);
+            assert!(store.load(ID).is_none());
+            assert_conflict(&finish(stale.as_mut()));
+            assert_eq!(store.len(), 1);
+            assert_eq!(store.load(new_id).unwrap().get("user"), Some("alice"));
+            store.save("next", &data("capacity remains usable"));
+            assert_eq!(store.len(), 1);
+            assert!(store.load(new_id).is_none());
+        }
+    }
+
+    #[test]
+    fn pending_logout_still_revokes_after_an_ordinary_request_commits() {
+        let store = MemoryStore::new();
+        store.save(ID, &data("alice"));
+        let logout = protected(store.clone()).wrap(ActionHandler {
+            action: Action::Logout,
+            pause: true,
+        });
+        let update = protected(store.clone()).wrap(ActionHandler {
+            action: Action::Write,
+            pause: false,
+        });
+        let cx = crate::Cx::for_testing();
+        let mut pending = Handler::call(&logout, &cx, request(ID));
+        assert!(
+            pending
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        assert_eq!(call_sync(&update, request(ID)).status, StatusCode::OK);
+        assert_eq!(store.load(ID).unwrap().get("note"), Some("updated"));
+        let response = finish(pending.as_mut());
+        assert_eq!(response.status, StatusCode::OK);
+        assert!(response.set_cookies[0].contains("Max-Age=0"));
+        assert!(store.is_empty());
+    }
+
+    #[test]
+    fn dropped_handlers_revoke_only_the_captured_incarnation() {
+        for action in [Action::Read, Action::Clear, Action::Logout, Action::Rotate] {
+            for replace in [false, true] {
+                let store = MemoryStore::with_max_sessions(1);
+                store.save(ID, &data("alice"));
+                let handler = protected(store.clone()).wrap(ActionHandler {
+                    action,
+                    pause: true,
+                });
+                let cx = crate::Cx::for_testing();
+                let mut pending = Handler::call(&handler, &cx, request(ID));
+                assert!(
+                    pending
+                        .as_mut()
+                        .poll(&mut Context::from_waker(Waker::noop()))
+                        .is_pending()
+                );
+                if replace {
+                    store.save("evict", &data("evicts original incarnation"));
+                    store.save(ID, &data("replacement"));
+                }
+                drop(pending);
+                if replace {
+                    assert_eq!(store.load(ID).unwrap().get("user"), Some("replacement"));
+                } else if matches!(action, Action::Read) {
+                    assert_eq!(store.load(ID).unwrap().get("user"), Some("alice"));
+                } else {
+                    assert!(store.is_empty(), "dropped {action:?} must revoke");
+                }
+            }
+        }
+    }
+
+    struct LegacyStore(MemoryStore);
+
+    impl SessionStore for LegacyStore {
+        fn load(&self, id: &str) -> Option<SessionData> {
+            self.0.load(id)
+        }
+        fn save(&self, id: &str, data: &SessionData) {
+            self.0.save(id, data);
+        }
+        fn delete(&self, id: &str) {
+            self.0.delete(id);
+        }
+    }
+
+    #[test]
+    fn legacy_backends_keep_working_and_cannot_silently_opt_into_atomicity() {
+        let store = MemoryStore::new();
+        assert!(matches!(
+            SessionLayer::new(LegacyStore(store.clone())).try_concurrency_protection(),
+            Err(SessionConcurrencyUnsupported)
+        ));
+        assert!(store.is_empty());
+        let legacy = SessionLayer::new(LegacyStore(store.clone())).wrap(TestHandler);
+        let response = call_sync(&legacy, Request::new("GET", "/"));
+        assert_eq!(response.status, StatusCode::OK);
+        assert_eq!(store.len(), 1);
+        assert_eq!(response.set_cookies.len(), 1);
+    }
+
+    #[test]
+    fn protected_new_session_is_persisted_and_then_updated() {
+        let store = MemoryStore::new();
+        let handler = protected(store.clone()).wrap(TestHandler);
+        let created = call_sync(&handler, Request::new("GET", "/"));
+        assert_eq!(created.status, StatusCode::OK);
+        let id = extract_set_cookie_id(&created.set_cookies[0]);
+        let updated = call_sync(&handler, request(id));
+        assert_eq!(updated.status, StatusCode::OK);
+        assert_eq!(store.load(id).unwrap().get("count"), Some("2"));
+        assert_eq!(store.len(), 1);
+    }
+
+    struct ReplacedDuringLoad(MemoryStore);
+
+    impl SessionStore for ReplacedDuringLoad {
+        fn load(&self, _: &str) -> Option<SessionData> {
+            panic!("protected middleware must use the atomic load");
+        }
+        fn save(&self, _: &str, _: &SessionData) {
+            panic!("protected middleware must use the atomic commit");
+        }
+        fn delete(&self, _: &str) {
+            panic!("protected middleware must use conditional deletion");
+        }
+        fn atomic_store(&self) -> Option<&dyn AtomicSessionStore> {
+            Some(self)
+        }
+    }
+
+    impl AtomicSessionStore for ReplacedDuringLoad {
+        fn load_atomic(&self, id: &str) -> Option<SessionSnapshot> {
+            let snapshot = self.0.load_atomic(id);
+            // A linearizable load may be followed by a replacement before its
+            // caller acts on the returned snapshot.
+            self.0.delete(id);
+            self.0.save(id, &data("replacement"));
+            snapshot
+        }
+        fn commit_atomic(&self, commit: SessionCommit<'_>) -> SessionCommitOutcome {
+            self.0.commit_atomic(commit)
+        }
+    }
+
+    #[test]
+    fn expired_snapshot_cannot_delete_a_recreated_session_or_run_the_handler() {
+        let store = MemoryStore::new();
+        let mut expired = data("expired");
+        expired.insert(LAST_ACCESSED_KEY, "0");
+        store.save(ID, &expired);
+        let handler = SessionLayer::new(ReplacedDuringLoad(store.clone()))
+            .idle_ttl_seconds(10)
+            .try_concurrency_protection()
+            .unwrap()
+            .wrap(PanicNoRegenerateHandler);
+        assert_conflict(&call_sync(&handler, request(ID)));
+        assert_eq!(store.load(ID).unwrap().get("user"), Some("replacement"));
+        assert_eq!(store.len(), 1);
+    }
+
+    #[test]
+    fn backend_incarnation_tokens_are_inspectable_but_debug_is_redacted() {
+        let token = SessionIncarnation::new(String::from("private durable nonce"));
+        assert_eq!(
+            token.downcast_ref::<String>().map(String::as_str),
+            Some("private durable nonce")
+        );
+        assert!(!format!("{token:?}").contains("private durable nonce"));
+    }
+}
+
 fn call_sync<H: Handler + ?Sized>(handler: &H, req: Request) -> Response {
     futures_lite::future::block_on(Handler::call(handler, &crate::Cx::for_testing(), req))
 }
@@ -926,6 +1367,7 @@ fn regenerate_guard_drop_suppresses_store_delete_panic_during_handler_unwind() {
         let _guard = RegenerateGuard {
             armed: true,
             store: &store,
+            atomic: None,
             session_handle,
             session_id: "00112233445566778899aabbccddeeff".to_string(),
             is_new: false,
@@ -952,6 +1394,7 @@ fn regenerate_guard_drop_surfaces_store_delete_panic_without_handler_unwind() {
         let _guard = RegenerateGuard {
             armed: true,
             store: &store,
+            atomic: None,
             session_handle,
             session_id: "00112233445566778899aabbccddeeff".to_string(),
             is_new: false,

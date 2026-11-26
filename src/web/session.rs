@@ -17,6 +17,7 @@
 //! ```
 
 use parking_lot::Mutex;
+use std::any::Any;
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::fmt::Write as _;
@@ -99,6 +100,8 @@ struct RegenerateGuard<'a, S: SessionStore + ?Sized> {
     /// guard to the middleware's `&self` borrow, which outlives the
     /// inner handler call.
     store: &'a S,
+    /// Protected requests invalidate only the incarnation they loaded.
+    atomic: Option<(&'a dyn AtomicSessionStore, SessionIncarnation)>,
     /// Shared session data (also seen by the handler). Inspected
     /// under lock during fail-closed processing to detect a pending
     /// `REGENERATE_FLAG_KEY`.
@@ -130,22 +133,31 @@ impl<S: SessionStore + ?Sized> Drop for RegenerateGuard<'_, S> {
         // Cancel/panic path: the handler did not give the middleware
         // a chance to rotate. Fail closed by invalidating the OLD
         // session server-side if a rotation was in fact requested.
-        let regenerate_requested = {
+        let invalidate_requested = {
             let guard = self.session_handle.lock();
             guard.get(REGENERATE_FLAG_KEY).is_some()
+                || (self.atomic.is_some() && guard.is_modified() && guard.is_empty())
         };
-        if regenerate_requested && !self.is_new {
+        if invalidate_requested && !self.is_new {
+            let invalidate = || {
+                if let Some((atomic, incarnation)) = &self.atomic {
+                    atomic.commit_atomic(SessionCommit::Delete {
+                        id: &self.session_id,
+                        incarnation,
+                    });
+                } else {
+                    self.store.delete(&self.session_id);
+                }
+            };
             if std::thread::panicking() {
                 // Avoid aborting the process with a double panic while preserving
                 // the original handler failure. Outside unwind, let store.delete
                 // panics surface: hiding a normal-path invalidation failure would
                 // make session rotation look safer than it was.
                 let _delete_outcome =
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        self.store.delete(&self.session_id);
-                    }));
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(invalidate));
             } else {
-                self.store.delete(&self.session_id);
+                invalidate();
             }
         }
     }
@@ -184,7 +196,137 @@ pub trait SessionStore: Send + Sync + 'static {
 
     /// Delete a session by ID.
     fn delete(&self, id: &str);
+
+    /// Optional atomic persistence used by
+    /// [`SessionLayer::try_concurrency_protection`].
+    ///
+    /// The default preserves existing backends and does not claim that a
+    /// separate load followed by save or delete is atomic.
+    fn atomic_store(&self) -> Option<&dyn AtomicSessionStore> {
+        None
+    }
 }
+
+/// Backend-issued identity of one live session incarnation.
+///
+/// An incarnation survives ordinary data updates but changes after deletion,
+/// eviction, or ID rotation. Tokens stay on the server; they are never cookies.
+/// Custom backends can carry a durable nonce and compare it atomically with
+/// their stored record. Debug output never includes the token's contents.
+#[derive(Clone)]
+pub struct SessionIncarnation(Arc<dyn Any + Send + Sync>);
+
+impl SessionIncarnation {
+    /// Wrap a backend-specific incarnation token.
+    #[must_use]
+    pub fn new<T: Any + Send + Sync>(token: T) -> Self {
+        Self(Arc::new(token))
+    }
+
+    /// Inspect the token using the type chosen by the issuing backend.
+    #[must_use]
+    pub fn downcast_ref<T: Any>(&self) -> Option<&T> {
+        self.0.downcast_ref()
+    }
+
+    fn same_allocation(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl fmt::Debug for SessionIncarnation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SessionIncarnation").finish_non_exhaustive()
+    }
+}
+
+/// Data and incarnation observed together by an atomic session load.
+#[derive(Debug, Clone)]
+pub struct SessionSnapshot {
+    /// The request's private copy of session data.
+    pub data: SessionData,
+    /// Identity to check when committing the request's changes.
+    pub incarnation: SessionIncarnation,
+}
+
+/// One indivisible session mutation.
+#[derive(Debug, Clone, Copy)]
+pub enum SessionCommit<'a> {
+    /// Insert only if the ID is absent, assigning a fresh incarnation.
+    Create {
+        /// New session ID.
+        id: &'a str,
+        /// Data to store.
+        data: &'a SessionData,
+    },
+    /// Replace data only while this incarnation remains live.
+    Update {
+        /// Existing session ID.
+        id: &'a str,
+        /// Identity returned by the request's load.
+        incarnation: &'a SessionIncarnation,
+        /// Replacement data; ordinary updates keep the same incarnation.
+        data: &'a SessionData,
+    },
+    /// Delete only the captured incarnation, leaving a replacement untouched.
+    Delete {
+        /// Existing session ID.
+        id: &'a str,
+        /// Identity returned by the request's load.
+        incarnation: &'a SessionIncarnation,
+    },
+    /// Check the old incarnation and the new ID's absence, then retire the old
+    /// record and insert the new record together. A conflict changes neither.
+    Rotate {
+        /// Session ID to retire.
+        id: &'a str,
+        /// Identity returned by the request's load.
+        incarnation: &'a SessionIncarnation,
+        /// Fresh session ID; it must not already exist.
+        new_id: &'a str,
+        /// Data to carry into a fresh incarnation.
+        data: &'a SessionData,
+    },
+}
+
+/// Result of an atomic session mutation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionCommitOutcome {
+    /// The complete mutation was applied.
+    Applied,
+    /// The expected incarnation is absent or replaced, or a new ID already
+    /// exists. No part of the mutation was applied.
+    Conflict,
+}
+
+/// Optional backend capability for atomic session persistence.
+///
+/// Each load observes data and incarnation together. Each commit checks its
+/// preconditions and applies its entire mutation atomically with respect to
+/// other store operations, including legacy saves and deletes. Implementations
+/// must not compose a separate load with an unconditional write. Incarnations
+/// must survive ordinary updates and never be reused after removal while a
+/// request can still hold the old token. Durable backends should persist and
+/// compare their own nonce, rather than relying on process-local identity.
+pub trait AtomicSessionStore: Send + Sync {
+    /// Read one live session and its incarnation atomically.
+    fn load_atomic(&self, id: &str) -> Option<SessionSnapshot>;
+
+    /// Apply a conditional mutation with the semantics of [`SessionCommit`].
+    fn commit_atomic(&self, commit: SessionCommit<'_>) -> SessionCommitOutcome;
+}
+
+/// The selected session backend has no atomic persistence capability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionConcurrencyUnsupported;
+
+impl fmt::Display for SessionConcurrencyUnsupported {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("session store does not support atomic persistence")
+    }
+}
+
+impl std::error::Error for SessionConcurrencyUnsupported {}
 
 // ─── SessionData ────────────────────────────────────────────────────────────
 
@@ -280,9 +422,67 @@ pub struct MemoryStore {
 
 #[derive(Default)]
 struct MemoryStoreState {
-    sessions: HashMap<String, SessionData>,
+    sessions: HashMap<String, StoredSession>,
     access_order: BTreeSet<(u64, String)>,
     max_sessions: Option<usize>,
+}
+
+struct StoredSession {
+    data: SessionData,
+    incarnation: SessionIncarnation,
+}
+
+impl MemoryStoreState {
+    fn has_incarnation(&self, id: &str, incarnation: &SessionIncarnation) -> bool {
+        self.sessions
+            .get(id)
+            .is_some_and(|entry| entry.incarnation.same_allocation(incarnation))
+    }
+
+    fn save(&mut self, id: &str, mut stored: SessionData) {
+        stored.modified = false;
+        // Retain identity across ordinary updates so a concurrent write cannot
+        // defeat logout. A removed entry's allocation stays alive only while a
+        // request holds its snapshot, preventing ABA without tombstones.
+        let incarnation = self.sessions.get(id).map_or_else(
+            || SessionIncarnation::new(()),
+            |entry| entry.incarnation.clone(),
+        );
+        if self.max_sessions.is_some() {
+            let old_ts = self
+                .sessions
+                .get(id)
+                .map(|entry| session_last_accessed(&entry.data));
+            if let Some(old_ts) = old_ts {
+                self.access_order.remove(&(old_ts, id.to_string()));
+            } else if self
+                .max_sessions
+                .is_some_and(|max_sessions| self.sessions.len() >= max_sessions)
+            {
+                if let Some((_, evicted_id)) = self.access_order.pop_first() {
+                    self.sessions.remove(&evicted_id);
+                }
+            }
+            let ts = session_last_accessed(&stored);
+            self.access_order.insert((ts, id.to_string()));
+        }
+        self.sessions.insert(
+            id.to_string(),
+            StoredSession {
+                data: stored,
+                incarnation,
+            },
+        );
+    }
+
+    fn delete(&mut self, id: &str) {
+        if let Some(entry) = self.sessions.remove(id) {
+            if self.max_sessions.is_some() {
+                self.access_order
+                    .remove(&(session_last_accessed(&entry.data), id.to_string()));
+            }
+        }
+    }
 }
 
 impl MemoryStore {
@@ -343,42 +543,78 @@ impl fmt::Debug for MemoryStore {
 
 impl SessionStore for MemoryStore {
     fn load(&self, id: &str) -> Option<SessionData> {
-        self.state.lock().sessions.get(id).cloned()
+        self.state
+            .lock()
+            .sessions
+            .get(id)
+            .map(|entry| entry.data.clone())
     }
 
     fn save(&self, id: &str, data: &SessionData) {
-        let mut stored = data.clone();
-        // Reset modified flag so reloaded sessions don't appear pre-modified,
-        // which would cause unnecessary re-saves and Set-Cookie headers.
-        stored.modified = false;
-        let mut state = self.state.lock();
-        if state.max_sessions.is_some() {
-            let old_ts = state.sessions.get(id).map(session_last_accessed);
-            if let Some(old_ts) = old_ts {
-                state.access_order.remove(&(old_ts, id.to_string()));
-            } else if state
-                .max_sessions
-                .is_some_and(|max_sessions| state.sessions.len() >= max_sessions)
-            {
-                if let Some((_, evicted_id)) = state.access_order.pop_first() {
-                    state.sessions.remove(&evicted_id);
-                }
-            }
-            let ts = session_last_accessed(&stored);
-            state.access_order.insert((ts, id.to_string()));
-        }
-        state.sessions.insert(id.to_string(), stored);
+        let stored = data.clone();
+        self.state.lock().save(id, stored);
     }
 
     fn delete(&self, id: &str) {
+        self.state.lock().delete(id);
+    }
+
+    fn atomic_store(&self) -> Option<&dyn AtomicSessionStore> {
+        Some(self)
+    }
+}
+
+impl AtomicSessionStore for MemoryStore {
+    fn load_atomic(&self, id: &str) -> Option<SessionSnapshot> {
+        self.state
+            .lock()
+            .sessions
+            .get(id)
+            .map(|entry| SessionSnapshot {
+                data: entry.data.clone(),
+                incarnation: entry.incarnation.clone(),
+            })
+    }
+
+    fn commit_atomic(&self, commit: SessionCommit<'_>) -> SessionCommitOutcome {
         let mut state = self.state.lock();
-        if let Some(data) = state.sessions.remove(id) {
-            if state.max_sessions.is_some() {
-                state
-                    .access_order
-                    .remove(&(session_last_accessed(&data), id.to_string()));
+        match commit {
+            SessionCommit::Create { id, data } => {
+                if state.sessions.contains_key(id) {
+                    return SessionCommitOutcome::Conflict;
+                }
+                state.save(id, data.clone());
+            }
+            SessionCommit::Update {
+                id,
+                incarnation,
+                data,
+            } => {
+                if !state.has_incarnation(id, incarnation) {
+                    return SessionCommitOutcome::Conflict;
+                }
+                state.save(id, data.clone());
+            }
+            SessionCommit::Delete { id, incarnation } => {
+                if !state.has_incarnation(id, incarnation) {
+                    return SessionCommitOutcome::Conflict;
+                }
+                state.delete(id);
+            }
+            SessionCommit::Rotate {
+                id,
+                incarnation,
+                new_id,
+                data,
+            } => {
+                if !state.has_incarnation(id, incarnation) || state.sessions.contains_key(new_id) {
+                    return SessionCommitOutcome::Conflict;
+                }
+                state.delete(id);
+                state.save(new_id, data.clone());
             }
         }
+        SessionCommitOutcome::Applied
     }
 }
 
@@ -619,6 +855,7 @@ pub struct SessionLayer<S: SessionStore> {
     store: Arc<S>,
     config: SessionConfig,
     absolute_ttl_seconds: Option<u64>,
+    concurrency_protection: bool,
 }
 
 impl<S: SessionStore> SessionLayer<S> {
@@ -640,7 +877,49 @@ impl<S: SessionStore> SessionLayer<S> {
             store: Arc::new(store),
             config,
             absolute_ttl_seconds: None,
+            concurrency_protection: false,
         }
+    }
+
+    /// Protect persistence against concurrent logout, ID rotation, and eviction.
+    ///
+    /// Requires the store's [`AtomicSessionStore`] capability; unsupported
+    /// backends are rejected here, before any handler runs. [`MemoryStore`]
+    /// supports this across its clones and independently constructed layers.
+    ///
+    /// A request that loaded an incarnation which has since been revoked gets
+    /// HTTP 409 without a session cookie or expiry. Its snapshot is discarded,
+    /// including any attempted ID rotation. Handler side effects are not rolled
+    /// back, and handlers are never retried automatically. Ordinary writes to
+    /// the same live incarnation still use last-completer-wins semantics: this
+    /// is not general lost-update protection or account-wide revocation. If a
+    /// rotation wins before an older logout, that logout conflicts and does not
+    /// revoke the new incarnation.
+    ///
+    /// Use `Session::regenerate()` followed by `Session::clear()` for logout.
+    /// An empty, modified session is also deleted, including if its handler is
+    /// dropped while still empty. Removing individual authentication fields or
+    /// clearing then adding data without regeneration is an ordinary update.
+    /// All routes sharing these sessions must opt in: legacy unconditional
+    /// saves can still recreate a deleted session. The default stays unchanged.
+    ///
+    /// ```ignore
+    /// let sessions = SessionLayer::new(MemoryStore::new())
+    ///     .try_concurrency_protection()?
+    ///     .wrap(my_handler);
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionConcurrencyUnsupported`] if the store does not expose
+    /// atomic persistence. Custom backends must implement the capability's
+    /// atomicity contract; a load-then-save fallback is insufficient.
+    pub fn try_concurrency_protection(mut self) -> Result<Self, SessionConcurrencyUnsupported> {
+        if self.store.atomic_store().is_none() {
+            return Err(SessionConcurrencyUnsupported);
+        }
+        self.concurrency_protection = true;
+        Ok(self)
     }
 
     /// Set the session cookie name.
@@ -746,6 +1025,7 @@ impl<S: SessionStore> SessionLayer<S> {
             store: self.store,
             config: self.config,
             absolute_ttl_seconds: self.absolute_ttl_seconds,
+            concurrency_protection: self.concurrency_protection,
         }
     }
 }
@@ -769,6 +1049,7 @@ impl<S: SessionStore, H: Handler> crate::service::Layer<H> for SessionLayer<S> {
             store: Arc::clone(&self.store),
             config: self.config.clone(),
             absolute_ttl_seconds: self.absolute_ttl_seconds,
+            concurrency_protection: self.concurrency_protection,
         }
     }
 }
@@ -778,6 +1059,7 @@ impl<S: SessionStore> fmt::Debug for SessionLayer<S> {
         f.debug_struct("SessionLayer")
             .field("config", &self.config)
             .field("absolute_ttl_seconds", &self.absolute_ttl_seconds)
+            .field("concurrency_protection", &self.concurrency_protection)
             .finish_non_exhaustive()
     }
 }
@@ -790,6 +1072,7 @@ pub struct SessionMiddleware<S: SessionStore, H: Handler> {
     store: Arc<S>,
     config: SessionConfig,
     absolute_ttl_seconds: Option<u64>,
+    concurrency_protection: bool,
 }
 
 impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
@@ -800,6 +1083,17 @@ impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
         let cx = cx.clone();
         Box::pin(async move {
+            let atomic_store = if self.concurrency_protection {
+                let Some(store) = self.store.atomic_store() else {
+                    return Response::new(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Session store no longer supports atomic persistence",
+                    );
+                };
+                Some(store)
+            } else {
+                None
+            };
             // 1. Extract or generate session ID.
             //    If the client-supplied ID is syntactically valid but absent from the
             //    store, regenerate to prevent session-fixation attacks (an attacker
@@ -822,11 +1116,32 @@ impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
             //    prevent session-fixation attacks. Also: if an idle or
             //    absolute TTL is configured and elapsed, server-side delete
             //    + new id (br-asupersync-7udumi, br-asupersync-ne8jdw).
+            let mut incarnation = None;
+            let loaded = if is_new {
+                None
+            } else if let Some(store) = atomic_store {
+                store.load_atomic(&session_id).map(|snapshot| {
+                    incarnation = Some(snapshot.incarnation);
+                    snapshot.data
+                })
+            } else {
+                self.store.load(&session_id)
+            };
             let mut session_data = if is_new {
                 SessionData::new()
-            } else if let Some(data) = self.store.load(&session_id) {
+            } else if let Some(data) = loaded {
                 if self.is_idle_expired(&data) || self.is_absolute_expired(&data) {
-                    self.store.delete(&session_id);
+                    if let Some((store, incarnation)) = atomic_store.zip(incarnation.as_ref()) {
+                        if store.commit_atomic(SessionCommit::Delete {
+                            id: &session_id,
+                            incarnation,
+                        }) == SessionCommitOutcome::Conflict
+                        {
+                            return session_conflict_response();
+                        }
+                    } else {
+                        self.store.delete(&session_id);
+                    }
                     let Some(new_id) = generate_session_id() else {
                         return Response::new(
                             StatusCode::INTERNAL_SERVER_ERROR,
@@ -835,6 +1150,7 @@ impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
                     };
                     session_id = new_id;
                     is_new = true;
+                    incarnation = None;
                     SessionData::new()
                 } else {
                     data
@@ -960,6 +1276,7 @@ impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
             let mut regenerate_guard = RegenerateGuard {
                 armed: true,
                 store: self.store.as_ref(),
+                atomic: atomic_store.zip(incarnation.clone()),
                 session_handle: Arc::clone(&session_handle),
                 session_id: session_id.clone(),
                 is_new,
@@ -995,7 +1312,7 @@ impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
             let logout =
                 marker.as_deref() == Some(REGENERATE_AFTER_CLEAR) && session_data.is_empty();
             if regenerate_requested && !logout {
-                if !is_new {
+                if !is_new && atomic_store.is_none() {
                     self.store.delete(&session_id);
                 }
                 let Some(new_id) = generate_session_id() else {
@@ -1015,23 +1332,66 @@ impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
             // br-asupersync-qokau8: explicit rotation path has now taken
             // responsibility for the regenerate flag. Disarm the
             // fail-closed finalizer so its Drop is a no-op.
-            regenerate_guard.disarm();
+            if atomic_store.is_none() {
+                regenerate_guard.disarm();
+            }
 
             // 6. Save if modified. Untouched new sessions are NOT saved to prevent DoS.
             let session_cleared = session_data.is_empty() && session_data.is_modified();
             let should_save_session =
                 !session_cleared && (session_data.is_modified() || regenerate_requested);
 
-            if session_cleared {
+            if should_save_session {
+                if session_data.get(CREATED_AT_KEY).is_none() {
+                    session_data.insert(CREATED_AT_KEY, now_unix_secs().to_string());
+                }
+                session_data.insert(LAST_ACCESSED_KEY, now_unix_secs().to_string());
+            }
+
+            if let Some(store) = atomic_store {
+                let outcome = if session_cleared {
+                    incarnation
+                        .as_ref()
+                        .map_or(SessionCommitOutcome::Applied, |incarnation| {
+                            store.commit_atomic(SessionCommit::Delete {
+                                id: &regenerate_guard.session_id,
+                                incarnation,
+                            })
+                        })
+                } else if should_save_session {
+                    let commit = match incarnation.as_ref() {
+                        Some(incarnation) if regenerate_requested => SessionCommit::Rotate {
+                            id: &regenerate_guard.session_id,
+                            incarnation,
+                            new_id: &session_id,
+                            data: &session_data,
+                        },
+                        Some(incarnation) => SessionCommit::Update {
+                            id: &session_id,
+                            incarnation,
+                            data: &session_data,
+                        },
+                        None => SessionCommit::Create {
+                            id: &session_id,
+                            data: &session_data,
+                        },
+                    };
+                    store.commit_atomic(commit)
+                } else {
+                    SessionCommitOutcome::Applied
+                };
+                if outcome == SessionCommitOutcome::Conflict {
+                    // Keep the guard armed: a failed rotation still revokes
+                    // its old incarnation, without touching any replacement.
+                    return session_conflict_response();
+                }
+                regenerate_guard.disarm();
+            } else if session_cleared {
                 if !is_new {
                     // Session cleared → delete server-side data and expire the cookie.
                     self.store.delete(&session_id);
                 }
             } else if should_save_session {
-                if session_data.get(CREATED_AT_KEY).is_none() {
-                    session_data.insert(CREATED_AT_KEY, now_unix_secs().to_string());
-                }
-                session_data.insert(LAST_ACCESSED_KEY, now_unix_secs().to_string());
                 self.store.save(&session_id, &session_data);
             }
 
@@ -1061,6 +1421,14 @@ impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
             resp
         })
     }
+}
+
+fn session_conflict_response() -> Response {
+    Response::new(
+        StatusCode::CONFLICT,
+        "Session changed while this request was running",
+    )
+    .header("cache-control", "no-store")
 }
 
 impl<S: SessionStore, H: Handler> SessionMiddleware<S, H> {
