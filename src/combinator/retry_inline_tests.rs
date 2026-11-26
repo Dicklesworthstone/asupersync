@@ -143,6 +143,79 @@ fn token_bucket_wait_beyond_duration_range_is_duration_max() {
     assert_eq!(bucket.time_to_tokens(1), Duration::MAX);
 }
 
+// asupersync-combinator-time-audit-fqdvqn: disabled replenishment must preserve
+// the initial allowance instead of refilling on NaN or erasing it on negatives.
+#[test]
+fn token_bucket_invalid_rates_preserve_existing_credit_without_refilling() {
+    for rate in [0.0, -0.0, -1.0, f64::NEG_INFINITY, f64::INFINITY, f64::NAN] {
+        let mut bucket = RetryTokenBucket::new(3, rate, Time::ZERO);
+        assert!(bucket.try_consume(1, Time::ZERO));
+        assert_eq!(bucket.time_to_tokens(2), Duration::ZERO);
+        assert_eq!(bucket.time_to_tokens(3), Duration::MAX, "rate {rate:?}");
+
+        for seconds in [1, 1_000] {
+            assert!(
+                !bucket.try_consume(3, Time::from_secs(seconds)),
+                "rate {rate:?} must not replenish tokens"
+            );
+            assert_eq!(bucket.available_tokens(), 2, "rate {rate:?}");
+        }
+
+        assert!(bucket.try_consume(2, Time::from_secs(1_000)));
+        assert!(!bucket.try_consume(1, Time::from_secs(1_001)));
+        assert_eq!(bucket.time_to_tokens(1), Duration::MAX);
+        assert!(bucket.try_consume(0, Time::from_secs(1_002)));
+        assert_eq!(bucket.available_tokens(), 0);
+    }
+}
+
+#[test]
+fn token_bucket_wait_respects_capacity_and_zero_cost() {
+    for capacity in [0, 1, 10, u32::MAX] {
+        let mut bucket = RetryTokenBucket::new(capacity, 1.0, Time::ZERO);
+        assert!(bucket.try_consume(0, Time::ZERO));
+        assert_eq!(bucket.time_to_tokens(0), Duration::ZERO);
+
+        if let Some(impossible_cost) = capacity.checked_add(1) {
+            assert_eq!(bucket.time_to_tokens(impossible_cost), Duration::MAX);
+            assert!(!bucket.try_consume(impossible_cost, Time::from_secs(10)));
+            assert_eq!(bucket.available_tokens(), capacity);
+        }
+
+        assert!(bucket.try_consume(capacity, Time::from_secs(10)));
+        assert_eq!(bucket.available_tokens(), 0);
+        assert!(bucket.try_consume(0, Time::from_secs(10)));
+        assert_eq!(bucket.time_to_tokens(0), Duration::ZERO);
+        if capacity == 0 {
+            assert_eq!(bucket.time_to_tokens(1), Duration::MAX);
+            assert!(!bucket.try_consume(1, Time::from_secs(20)));
+        } else {
+            assert_eq!(
+                bucket.time_to_tokens(capacity),
+                Duration::from_secs(u64::from(capacity))
+            );
+            assert!(bucket.try_consume(capacity, Time::from_secs(10 + u64::from(capacity))));
+        }
+    }
+}
+
+#[test]
+fn token_bucket_positive_finite_rates_keep_fractional_refills_and_capacity_cap() {
+    let mut fractional = RetryTokenBucket::new(2, 0.5, Time::ZERO);
+    assert!(fractional.try_consume(2, Time::ZERO));
+    assert!(!fractional.try_consume(1, Time::from_secs(1)));
+    assert_eq!(fractional.available_tokens(), 0);
+    assert_eq!(fractional.time_to_tokens(1), Duration::from_secs(1));
+    assert!(fractional.try_consume(1, Time::from_secs(2)));
+    assert_eq!(fractional.available_tokens(), 0);
+
+    let mut fast = RetryTokenBucket::new(2, f64::MAX, Time::ZERO);
+    assert!(fast.try_consume(2, Time::ZERO));
+    assert!(fast.try_consume(2, Time::from_secs(2)));
+    assert_eq!(fast.available_tokens(), 0);
+    assert_eq!(fast.time_to_tokens(3), Duration::MAX);
+}
+
 #[test]
 fn calculate_delay_exponential() {
     let policy = RetryPolicy::new()

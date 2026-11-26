@@ -414,6 +414,10 @@ pub struct RetryTokenBucket {
 impl RetryTokenBucket {
     /// Creates a new token bucket with the specified capacity and refill rate.
     ///
+    /// The bucket starts full. Non-positive or non-finite refill rates disable
+    /// replenishment without removing existing tokens. A zero capacity never
+    /// admits a positive cost; zero-cost requests are always permitted.
+    ///
     /// # Arguments
     /// * `capacity` - Maximum tokens the bucket can hold
     /// * `refill_rate` - Tokens added per second
@@ -446,28 +450,23 @@ impl RetryTokenBucket {
     /// Calculates when the next token will be available.
     ///
     /// Returns the duration to wait before enough tokens are available.
+    /// Returns `Duration::MAX` if the cost exceeds the capacity, replenishment
+    /// is disabled with insufficient tokens, or the wait exceeds the duration
+    /// range. The balance reflects the last refill; this does not advance time.
     #[must_use]
     pub fn time_to_tokens(&self, cost: u32) -> Duration {
         if self.tokens >= cost as f64 {
             return Duration::ZERO;
         }
 
-        // A non-positive (or non-finite) refill rate means tokens never
-        // accrue: the wait is effectively unbounded. Only the positive,
-        // finite-result branch computes a duration; everything else (rate
-        // <= 0, NaN, or a non-finite quotient) falls through to
-        // `Duration::MAX`. This avoids `Duration::from_secs_f64` panicking on
-        // `inf`/negative input, mirroring `RateLimiter::time_until_available`
-        // for `rate == 0`. (`NaN > 0.0` is `false`, so NaN falls through too.)
-        if self.refill_rate > 0.0 {
-            let tokens_needed = cost as f64 - self.tokens;
-            // A finite quotient can still exceed Duration's range (a refill rate
-            // of 1e-30 gives 1e30 s), where from_secs_f64 panics.
-            if let Ok(wait) = Duration::try_from_secs_f64(tokens_needed / self.refill_rate) {
-                return wait;
-            }
+        if cost > self.capacity || !self.refill_rate.is_finite() || self.refill_rate <= 0.0 {
+            return Duration::MAX;
         }
-        Duration::MAX
+
+        let tokens_needed = f64::from(cost) - self.tokens;
+        // A finite quotient can still exceed Duration's range (a refill rate
+        // of 1e-30 gives 1e30 s), where from_secs_f64 panics.
+        Duration::try_from_secs_f64(tokens_needed / self.refill_rate).unwrap_or(Duration::MAX)
     }
 
     /// Refills the bucket based on time elapsed.
@@ -477,11 +476,14 @@ impl RetryTokenBucket {
         if now <= self.last_refill {
             return;
         }
-        let elapsed_nanos = now.duration_since(self.last_refill);
-        let elapsed_secs = elapsed_nanos as f64 / 1_000_000_000.0;
-
-        let tokens_to_add = elapsed_secs * self.refill_rate;
-        self.tokens = (self.tokens + tokens_to_add).min(self.capacity as f64);
+        // Invalid rates must neither mint tokens nor erase existing credit.
+        // In particular, f64::min would turn a NaN balance into full capacity.
+        if self.refill_rate.is_finite() && self.refill_rate > 0.0 {
+            let elapsed_nanos = now.duration_since(self.last_refill);
+            let elapsed_secs = elapsed_nanos as f64 / 1_000_000_000.0;
+            let tokens_to_add = elapsed_secs * self.refill_rate;
+            self.tokens = (self.tokens + tokens_to_add).min(f64::from(self.capacity));
+        }
         self.last_refill = now;
     }
 

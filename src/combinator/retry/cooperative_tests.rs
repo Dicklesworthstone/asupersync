@@ -1,10 +1,11 @@
 //! Poll-level regressions for retry fairness and cancellation-safe admission.
 
 use super::{
-    AlwaysRetry, MAX_READY_ATTEMPTS_PER_POLL, NeverRetry, RetryBudget, RetryPolicy, RetryResult,
-    RetryTokenBucket, retry,
+    AlwaysRetry, MAX_READY_ATTEMPTS_PER_POLL, NeverRetry, RateLimitedRetryPolicy, RetryBudget,
+    RetryPolicy, RetryResult, RetryTokenBucket, retry,
 };
-use crate::types::{Outcome, Time};
+use crate::time::{TimerDriverHandle, VirtualClock};
+use crate::types::{Budget, Outcome, RegionId, TaskId, Time};
 use std::future::{Future, ready};
 use std::marker::PhantomPinned;
 use std::pin::Pin;
@@ -549,4 +550,99 @@ fn cancellation_during_backoff_returns_the_admitted_token() {
         3,
         "the unstarted retry's token is returned"
     );
+}
+
+fn virtual_retry_context() -> (Cx, Arc<VirtualClock>, TimerDriverHandle) {
+    let clock = Arc::new(VirtualClock::new());
+    let driver = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+    let context = Cx::new_with_drivers(
+        RegionId::new_for_test(0, 1),
+        TaskId::new_for_test(0, 0),
+        Budget::INFINITE,
+        None,
+        None,
+        None,
+        Some(driver.clone()),
+        None,
+    );
+    (context, clock, driver)
+}
+
+#[test]
+fn invalid_refill_rates_cannot_bypass_or_erase_a_shared_retry_budget() {
+    // asupersync-combinator-time-audit-fqdvqn: advance the runtime clock between
+    // real attempts so an invalid refill cannot hide behind an unchanged time.
+    for rate in [0.0, -0.0, -1.0, f64::NEG_INFINITY, f64::INFINITY, f64::NAN] {
+        let (context, clock, _) = virtual_retry_context();
+        let _current = Cx::set_current(Some(context));
+        let policy =
+            RateLimitedRetryPolicy::new(RetryPolicy::immediate(8)).with_token_bucket(2, rate);
+        let budget = policy.budget(Time::ZERO).expect("configured retry budget");
+        let calls = AtomicU32::new(0);
+
+        for expected_calls in [3, 1] {
+            let before = calls.load(Ordering::Relaxed);
+            let mut operation = Box::pin(
+                retry(policy.retry_policy.clone(), AlwaysRetry, || {
+                    let attempt = calls.fetch_add(1, Ordering::Relaxed) + 1;
+                    clock.advance_to(Time::from_secs(u64::from(attempt)));
+                    ready(Outcome::<(), &str>::Err("dependency unavailable"))
+                })
+                .with_budget(budget.clone()),
+            );
+            let Poll::Ready(RetryResult::Failed(error)) = operation
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+            else {
+                panic!("the shared budget must bound ready failures for rate {rate:?}");
+            };
+            assert_eq!(error.attempts, expected_calls, "rate {rate:?}");
+            assert_eq!(error.final_error, "dependency unavailable");
+            assert_eq!(error.total_delay, Duration::ZERO);
+            assert_eq!(calls.load(Ordering::Relaxed) - before, expected_calls);
+            assert_eq!(budget.available(), 0);
+        }
+    }
+}
+
+#[test]
+fn invalid_refill_rates_preserve_a_cancelled_backoff_refund() {
+    for rate in [0.0, -0.0, -1.0, f64::NEG_INFINITY, f64::INFINITY, f64::NAN] {
+        let (context, clock, driver) = virtual_retry_context();
+        let _current = Cx::set_current(Some(context.clone()));
+        let budget = RetryBudget::new(RetryTokenBucket::new(2, rate, Time::ZERO));
+        let calls = AtomicU32::new(0);
+        let mut operation = Box::pin(
+            retry(
+                RetryPolicy::fixed_delay(Duration::from_secs(3600), 3),
+                AlwaysRetry,
+                || {
+                    calls.fetch_add(1, Ordering::Relaxed);
+                    clock.advance_to(Time::from_secs(1));
+                    ready(Outcome::<(), &str>::Err("dependency unavailable"))
+                },
+            )
+            .with_budget(budget.clone()),
+        );
+        let mut task = Context::from_waker(Waker::noop());
+        assert!(operation.as_mut().poll(&mut task).is_pending());
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(budget.available(), 1, "rate {rate:?}");
+        assert_eq!(driver.pending_count(), 1);
+
+        clock.advance_to(Time::from_secs(100));
+        context.cancel_fast(CancelKind::User);
+        assert!(matches!(
+            operation.as_mut().poll(&mut task),
+            Poll::Ready(RetryResult::Cancelled(reason)) if reason.kind == CancelKind::User
+        ));
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(budget.available(), 2, "the unstarted retry is refunded");
+        assert!(driver.is_empty(), "cancellation releases the backoff timer");
+
+        assert!(budget.try_acquire(Time::from_secs(101)));
+        assert!(budget.try_acquire(Time::from_secs(102)));
+        assert!(!budget.try_acquire(Time::from_secs(103)), "rate {rate:?}");
+        assert_eq!(budget.available(), 0);
+    }
 }
