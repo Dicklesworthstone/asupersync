@@ -9739,7 +9739,9 @@ mod tests {
                             let mut options =
                                 MySqlConnectOptions::parse("mysql://localhost/test").unwrap();
                             options.connect_timeout = Some(Duration::from_millis(50));
-                            conn.options = Some(options);
+                            conn.options = Some(
+                                MySqlCancelTarget::capture(options, &conn.inner.stream).unwrap(),
+                            );
                             let tx =
                                 begin(&mut conn, &mut peer, &request_cx, restore_boundary).await;
                             let mut rollback = Box::pin(tx.rollback(&request_cx));
@@ -9819,7 +9821,8 @@ mod tests {
                         let mut options =
                             MySqlConnectOptions::parse("mysql://localhost/test").unwrap();
                         options.connect_timeout = Some(Duration::from_millis(50));
-                        conn.options = Some(options);
+                        conn.options =
+                            Some(MySqlCancelTarget::capture(options, &conn.inner.stream).unwrap());
                         let owned = String::from("caller-owned rollback state");
                         let mut state = BeginBorrowedState {
                             value: owned.as_str(),
@@ -9889,7 +9892,8 @@ mod tests {
                         let mut options =
                             MySqlConnectOptions::parse("mysql://localhost/test").unwrap();
                         options.connect_timeout = Some(Duration::from_millis(20));
-                        conn.options = Some(options);
+                        conn.options =
+                            Some(MySqlCancelTarget::capture(options, &conn.inner.stream).unwrap());
                         let tx = begin(&mut conn, &mut peer, &request_cx, isolated).await;
                         let mut rollback = Box::pin(tx.rollback(&request_cx));
                         command_while_pending(rollback.as_mut(), &mut peer, ROLLBACK_SQL)
@@ -10949,7 +10953,9 @@ mod tests {
                             let mut options =
                                 MySqlConnectOptions::parse("mysql://localhost/test").unwrap();
                             options.connect_timeout = Some(Duration::from_millis(50));
-                            conn.options = Some(options);
+                            conn.options = Some(
+                                MySqlCancelTarget::capture(options, &conn.inner.stream).unwrap(),
+                            );
                             write_failed_isolated_begin(&mut peer, server_error);
                             let mut operation = Box::pin(conn.begin_with_isolation(
                                 &request_cx,
@@ -11061,7 +11067,8 @@ mod tests {
                         let mut options =
                             MySqlConnectOptions::parse("mysql://localhost/test").unwrap();
                         options.connect_timeout = Some(Duration::from_millis(20));
-                        conn.options = Some(options);
+                        conn.options =
+                            Some(MySqlCancelTarget::capture(options, &conn.inner.stream).unwrap());
                         write_failed_isolated_begin(&mut peer, false);
                         let mut operation = Box::pin(conn.begin_with_isolation(
                             &request_cx,
@@ -11128,7 +11135,10 @@ mod tests {
                                         MySqlConnectOptions::parse("mysql://localhost/test")
                                             .unwrap();
                                     options.connect_timeout = Some(Duration::from_millis(50));
-                                    conn.options = Some(options);
+                                    conn.options = Some(
+                                        MySqlCancelTarget::capture(options, &conn.inner.stream)
+                                            .unwrap(),
+                                    );
                                     write_failed_isolated_begin(&mut peer, server_error);
                                     let mut operation = Box::pin(conn.begin_with_isolation(
                                         &child_cx,
@@ -13400,6 +13410,332 @@ mod tests {
                 assert!(
                     matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
                 );
+            }
+        }
+    }
+
+    // asupersync-bi2462.112: connection IDs are local to the server that
+    // issued them. Changing the saved resolver input models a DNS rotation
+    // without depending on a host-wide DNS fixture or a real MySQL instance.
+    #[cfg(not(target_arch = "wasm32"))]
+    mod kill_peer_pinning {
+        use super::*;
+
+        #[derive(Clone, Copy, Debug)]
+        enum Cleanup {
+            Explicit,
+            Drain,
+            Drop,
+        }
+
+        fn accept_cleanup(listener: &std::net::TcpListener) -> std::net::TcpStream {
+            listener.set_nonblocking(true).unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(5)))
+                            .unwrap();
+                        stream
+                            .set_write_timeout(Some(Duration::from_secs(5)))
+                            .unwrap();
+                        return stream;
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "missing pinned KILL peer"
+                        );
+                        // A watchdog for the real accept, not evidence of ordering.
+                        std::thread::park_timeout(Duration::from_millis(1));
+                    }
+                    Err(error) => panic!("accept pinned KILL: {error}"),
+                }
+            }
+        }
+
+        fn assert_untouched(listener: &std::net::TcpListener) {
+            listener.set_nonblocking(true).unwrap();
+            assert!(
+                matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock),
+                "a connection ID must never be sent to the replacement endpoint"
+            );
+        }
+
+        fn native_journey<F, Fut>(workers: usize, journey: F)
+        where
+            F: FnOnce(Cx) -> Fut + Send + 'static,
+            Fut: Future<Output = ()> + Send + 'static,
+        {
+            let runtime = pool_reset_runtime(workers);
+            let caller = runtime.request_cx_with_budget(crate::types::Budget::INFINITE);
+            runtime.block_on(runtime.handle().spawn(async move {
+                let cx = Cx::current().expect("native pinned KILL task");
+                crate::time::timeout(cx.now(), Duration::from_secs(10), journey(caller))
+                    .await
+                    .expect("bounded pinned KILL journey");
+            }));
+            assert_pool_reset_drained(&runtime);
+        }
+
+        #[test]
+        fn mysql_kill_keeps_the_original_peer_for_explicit_drain_and_drop() {
+            for workers in [1, 2] {
+                for cleanup in [Cleanup::Explicit, Cleanup::Drain, Cleanup::Drop] {
+                    let replacement = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                    let replacement_address = replacement.local_addr().unwrap();
+                    let query_seen = Arc::new(crate::sync::Notify::new());
+                    let peer_query_seen = Arc::clone(&query_seen);
+                    let finished = Arc::new(crate::sync::Notify::new());
+                    let peer_finished = Arc::clone(&finished);
+                    let peer = PoolResetPeer::start_with_listener(move |listener, original| {
+                        pool_reset_peer_auth(original, false);
+                        if matches!(cleanup, Cleanup::Drop) {
+                            pool_reset_peer_command(
+                                original,
+                                command::COM_QUERY,
+                                b"SELECT SLEEP(30)",
+                            );
+                            peer_query_seen.notify_one();
+                        }
+                        let mut killer = accept_cleanup(listener);
+                        pool_reset_peer_auth(&mut killer, false);
+                        pool_reset_peer_command(&mut killer, command::COM_QUERY, b"KILL QUERY 1");
+                        write_response_packet(&mut killer, 1, ok_packet_payload(0, 2));
+                        pool_reset_peer_eof(&mut killer);
+                        pool_reset_peer_eof(original);
+                        peer_finished.notify_one();
+                    });
+                    let options = peer.options(None);
+                    let original_address = peer.addr;
+                    native_journey(workers, move |caller| async move {
+                        let cx = Cx::current().unwrap();
+                        let mut connection = MySqlConnection::connect_with_options(&cx, options)
+                            .await
+                            .unwrap();
+                        let target = connection.options.as_mut().unwrap();
+                        assert!(matches!(target.endpoint, MySqlCancelEndpoint::Tcp(address)
+                            if address == original_address));
+                        target.options.host = replacement_address.ip().to_string();
+                        target.options.port = replacement_address.port();
+                        match cleanup {
+                            Cleanup::Explicit => {
+                                connection.cancel_in_flight_query(&cx).await.unwrap();
+                            }
+                            Cleanup::Drain => {
+                                caller.cancel_with_reason(CancelReason::user("pinned drain"));
+                                connection.wire_cancel_in_drain(&caller).await;
+                            }
+                            Cleanup::Drop => {
+                                let mut query =
+                                    Box::pin(connection.query_static_sql(&cx, "SELECT SLEEP(30)"));
+                                let observed = query_seen.notified();
+                                let mut observed = std::pin::pin!(observed);
+                                std::future::poll_fn(|task_cx| {
+                                    assert!(query.as_mut().poll(task_cx).is_pending());
+                                    observed.as_mut().poll(task_cx)
+                                })
+                                .await;
+                                drop(query);
+                                assert!(connection.inner.closed);
+                                assert!(
+                                    connection
+                                        .inner
+                                        .query_in_flight
+                                        .load(std::sync::atomic::Ordering::Acquire)
+                                );
+                            }
+                        }
+                        drop(connection);
+                        finished.notified().await;
+                    });
+                    peer.finish();
+                    assert_untouched(&replacement);
+                    eprintln!(
+                        "event=mysql_kill_peer_pinned workers={workers} cleanup={cleanup:?} \
+                         original={original_address} replacement={replacement_address} \
+                         connection_id=1 replacement_connections=0"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn mysql_kill_does_not_fall_back_when_the_original_peer_is_unavailable() {
+            for workers in [1, 2] {
+                let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                let original_address = listener.local_addr().unwrap();
+                let replacement = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                let replacement_address = replacement.local_addr().unwrap();
+                let listener_closed = Arc::new(crate::sync::Notify::new());
+                let peer_closed = Arc::clone(&listener_closed);
+                std::thread::scope(|scope| {
+                    let server = scope.spawn(move || {
+                        let mut original = accept_cleanup(&listener);
+                        pool_reset_peer_auth(&mut original, false);
+                        drop(listener);
+                        peer_closed.notify_one();
+                        pool_reset_peer_eof(&mut original);
+                    });
+                    native_journey(workers, move |_| async move {
+                        let cx = Cx::current().unwrap();
+                        let mut connection = MySqlConnection::connect(
+                            &cx,
+                            &format!("mysql://user@{original_address}/test"),
+                        )
+                        .await
+                        .unwrap();
+                        let target = connection.options.as_mut().unwrap();
+                        target.options.host = replacement_address.ip().to_string();
+                        target.options.port = replacement_address.port();
+                        listener_closed.notified().await;
+                        assert!(matches!(
+                            connection.cancel_in_flight_query(&cx).await,
+                            Err(MySqlError::Io(_))
+                        ));
+                        drop(connection);
+                    });
+                    server.join().unwrap();
+                });
+                assert_untouched(&replacement);
+                eprintln!(
+                    "event=mysql_kill_peer_unavailable workers={workers} \
+                     original={original_address} replacement={replacement_address} fallback=false"
+                );
+            }
+        }
+
+        #[cfg(feature = "tls")]
+        mod tls {
+            use super::*;
+            use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
+
+            const CERT: &[u8] = include_bytes!("../../tests/fixtures/tls/admission_peer.crt");
+            const KEY: &[u8] = include_bytes!("../../tests/fixtures/tls/admission_peer.key");
+            type Peer = rustls::StreamOwned<rustls::ServerConnection, std::net::TcpStream>;
+
+            fn connector() -> TlsConnector {
+                let mut roots = rustls::RootCertStore::empty();
+                roots
+                    .add(CertificateDer::from_pem_slice(CERT).unwrap())
+                    .unwrap();
+                TlsConnector::new(
+                    rustls::ClientConfig::builder()
+                        .with_root_certificates(roots)
+                        .with_no_client_auth(),
+                )
+            }
+
+            fn authenticate(mut socket: std::net::TcpStream) -> Peer {
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                socket
+                    .set_write_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let capabilities = capability::CLIENT_PROTOCOL_41
+                    | capability::CLIENT_SECURE_CONNECTION
+                    | capability::CLIENT_PLUGIN_AUTH
+                    | capability::CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA
+                    | capability::CLIENT_TRANSACTIONS
+                    | capability::CLIENT_CONNECT_WITH_DB
+                    | capability::CLIENT_SSL;
+                socket
+                    .write_all(&handshake_packet_bytes(capabilities))
+                    .unwrap();
+                let (sequence, request) = read_native_kat_peer_packet(&mut socket);
+                assert_eq!(sequence, 1);
+                assert_eq!(request.len(), 32, "only SSLRequest may precede TLS");
+                assert_ne!(
+                    u32::from_le_bytes(request[..4].try_into().unwrap()) & capability::CLIENT_SSL,
+                    0
+                );
+                let config = rustls::ServerConfig::builder()
+                    .with_no_client_auth()
+                    .with_single_cert(
+                        vec![CertificateDer::from_pem_slice(CERT).unwrap()],
+                        PrivateKeyDer::from_pem_slice(KEY).unwrap(),
+                    )
+                    .unwrap();
+                let mut tls = rustls::StreamOwned::new(
+                    rustls::ServerConnection::new(Arc::new(config)).unwrap(),
+                    socket,
+                );
+                let (sequence, response) = read_native_kat_peer_packet(&mut tls);
+                assert_eq!(sequence, 2);
+                assert_eq!(&response[..32], request.as_slice());
+                assert_eq!(tls.conn.server_name(), Some("localhost"));
+                write_response_packet(&mut tls, 3, ok_packet_payload(0, 2));
+                tls
+            }
+
+            fn eof(peer: &mut Peer) {
+                let mut byte = [0];
+                match peer.read(&mut byte) {
+                    Ok(0) => {}
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::UnexpectedEof
+                                | io::ErrorKind::ConnectionReset
+                                | io::ErrorKind::ConnectionAborted
+                        ) => {}
+                    other => panic!("pinned TLS session must close: {other:?}"),
+                }
+            }
+
+            #[test]
+            fn mysql_kill_pinned_peer_preserves_tls_hostname_and_custom_trust() {
+                for workers in [1, 2] {
+                    for mode in [SslMode::Preferred, SslMode::Required] {
+                        let replacement = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                        let replacement_address = replacement.local_addr().unwrap();
+                        let peer = PoolResetPeer::start_with_listener(move |listener, socket| {
+                            let mut original = authenticate(socket.try_clone().unwrap());
+                            let mut killer = authenticate(accept_cleanup(listener));
+                            pool_reset_peer_command(
+                                &mut killer,
+                                command::COM_QUERY,
+                                b"KILL QUERY 1",
+                            );
+                            write_response_packet(&mut killer, 1, ok_packet_payload(0, 2));
+                            eof(&mut killer);
+                            eof(&mut original);
+                        });
+                        let original_address = peer.addr;
+                        let mut options = peer.options(None);
+                        options.host = "localhost".to_string();
+                        options.ssl_mode = mode;
+                        native_journey(workers, move |_| async move {
+                            let cx = Cx::current().unwrap();
+                            let mut connection = MySqlConnection::connect_with_tls_connector(
+                                &cx,
+                                options,
+                                connector(),
+                            )
+                            .await
+                            .unwrap();
+                            assert!(connection.is_tls());
+                            let target = connection.options.as_mut().unwrap();
+                            assert!(matches!(target.endpoint, MySqlCancelEndpoint::Tcp(address)
+                                if address == original_address));
+                            assert_eq!(target.options.host, "localhost");
+                            // Keep the certificate identity, change only the
+                            // resolver port. The stored peer remains decisive.
+                            target.options.port = replacement_address.port();
+                            connection.cancel_in_flight_query(&cx).await.unwrap();
+                            drop(connection);
+                        });
+                        peer.finish();
+                        assert_untouched(&replacement);
+                        eprintln!(
+                            "event=mysql_kill_tls_peer_pinned workers={workers} mode={mode:?} \
+                             original={original_address} replacement={replacement_address} \
+                             sni=localhost custom_trust=true replacement_connections=0"
+                        );
+                    }
+                }
             }
         }
     }

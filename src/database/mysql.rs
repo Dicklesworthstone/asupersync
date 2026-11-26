@@ -2737,16 +2737,67 @@ pub fn test_active_mysql_drop_kills() -> usize {
 pub struct MySqlConnection {
     /// Inner connection state.
     inner: MySqlConnectionInner,
-    /// Options used to construct this connection. Stored so that
+    /// Original options and the actual connected endpoint. Stored so that
     /// [`cancel_in_flight_query`](Self::cancel_in_flight_query) can
     /// reopen a fresh connection to the same server to issue
     /// `KILL QUERY <connection_id>`. `None` for connections built
     /// directly via test fixtures rather than `connect`/
     /// `connect_with_options`.
-    options: Option<MySqlConnectOptions>,
+    options: Option<MySqlCancelTarget>,
     /// Connect-time session baseline, present only for an opt-in pool that
     /// can restore its initially selected database.
     pool_reset: Option<MySqlPoolReset>,
+}
+
+/// A server connection ID is meaningful only at the endpoint that issued it.
+/// Keep that endpoint separate from the hostname used for TLS verification.
+#[derive(Clone)]
+struct MySqlCancelTarget {
+    options: MySqlConnectOptions,
+    endpoint: MySqlCancelEndpoint,
+}
+
+#[derive(Clone)]
+enum MySqlCancelEndpoint {
+    Tcp(std::net::SocketAddr),
+    #[cfg(unix)]
+    Unix(String),
+}
+
+impl MySqlCancelTarget {
+    fn capture(options: MySqlConnectOptions, stream: &MySqlStream) -> Result<Self, MySqlError> {
+        let endpoint = match stream {
+            MySqlStream::Plain(stream) => {
+                MySqlCancelEndpoint::Tcp(stream.peer_addr().map_err(MySqlError::Io)?)
+            }
+            #[cfg(unix)]
+            MySqlStream::Unix(_) => MySqlCancelEndpoint::Unix(options.host.clone()),
+            #[cfg(feature = "tls")]
+            MySqlStream::Tls { stream, .. } => {
+                MySqlCancelEndpoint::Tcp(stream.get_ref().peer_addr().map_err(MySqlError::Io)?)
+            }
+            #[cfg(feature = "tls")]
+            MySqlStream::Upgrading => {
+                return Err(MySqlError::Protocol(
+                    "cannot capture a MySQL cancellation endpoint during TLS upgrade".to_string(),
+                ));
+            }
+        };
+        Ok(Self { options, endpoint })
+    }
+}
+
+impl MySqlCancelEndpoint {
+    async fn connect(&self) -> Result<MySqlStream, MySqlError> {
+        match self {
+            Self::Tcp(address) => TcpStream::connect(*address)
+                .await
+                .map(MySqlStream::Plain)
+                .map_err(MySqlError::Io),
+            #[cfg(unix)]
+            Self::Unix(path) => MySqlConnection::connect_unix(path).await,
+        }
+    }
 }
 
 struct MySqlPoolReset {
@@ -3265,6 +3316,26 @@ impl MySqlConnection {
         additional_capabilities: u32,
         #[cfg(feature = "tls")] connector: Option<TlsConnector>,
     ) -> Outcome<Self, MySqlError> {
+        Self::connect_bounded_at_endpoint(
+            cx,
+            options,
+            capture_pool_session,
+            additional_capabilities,
+            None,
+            #[cfg(feature = "tls")]
+            connector,
+        )
+        .await
+    }
+
+    async fn connect_bounded_at_endpoint(
+        cx: &Cx,
+        options: MySqlConnectOptions,
+        capture_pool_session: bool,
+        additional_capabilities: u32,
+        endpoint: Option<MySqlCancelEndpoint>,
+        #[cfg(feature = "tls")] connector: Option<TlsConnector>,
+    ) -> Outcome<Self, MySqlError> {
         use std::future::Future;
 
         let mut deadline = crate::time::Sleep::after(
@@ -3280,6 +3351,7 @@ impl MySqlConnection {
             let mut conn = match Self::connect_inner(
                 options,
                 additional_capabilities,
+                endpoint,
                 #[cfg(feature = "tls")]
                 connector,
             )
@@ -3343,6 +3415,7 @@ impl MySqlConnection {
     async fn connect_inner(
         options: MySqlConnectOptions,
         additional_capabilities: u32,
+        endpoint: Option<MySqlCancelEndpoint>,
         #[cfg(feature = "tls")] connector: Option<TlsConnector>,
     ) -> Outcome<Self, MySqlError> {
         let cx = Cx::current().expect("connect_bounded installs its Cx during polling");
@@ -3358,7 +3431,14 @@ impl MySqlConnection {
         if options.host.starts_with('/') && options.ssl_mode != SslMode::Disabled {
             return Outcome::Err(MySqlError::TlsRequired);
         }
-        let stream = if options.host.starts_with('/') {
+        let stream = if let Some(endpoint) = endpoint {
+            // Cancellation must not re-resolve a hostname or try another
+            // server: its connection ID belongs only to the captured peer.
+            match endpoint.connect().await {
+                Ok(stream) => stream,
+                Err(error) => return Outcome::Err(error),
+            }
+        } else if options.host.starts_with('/') {
             match Self::connect_unix(&options.host).await {
                 Ok(stream) => stream,
                 Err(error) => return Outcome::Err(error),
@@ -3371,6 +3451,13 @@ impl MySqlConnection {
             }
         };
 
+        // Capture after TCP address fallback has selected the actual peer,
+        // before TLS takes ownership of the socket. Preserve the original
+        // hostname in the options for SNI and certificate verification.
+        let cancel_target = match MySqlCancelTarget::capture(options.clone(), &stream) {
+            Ok(target) => target,
+            Err(error) => return Outcome::Err(error),
+        };
         let mut conn = Self {
             inner: MySqlConnectionInner {
                 stream,
@@ -3396,7 +3483,7 @@ impl MySqlConnection {
             // Stash options so cancel_in_flight_query can reopen a fresh
             // connection to issue KILL QUERY <connection_id>
             // (br-asupersync-og4pm6).
-            options: Some(options.clone()),
+            options: Some(cancel_target),
             pool_reset: None,
         };
 
@@ -3527,6 +3614,11 @@ impl MySqlConnection {
     /// `<id>` is the per-connection thread id captured from the
     /// HandshakeV10 packet (see [`Self::connection_id`]).
     ///
+    /// The cleanup connection uses the original connection's actual TCP peer
+    /// address (or Unix socket path), without another DNS lookup or fallback
+    /// to a different endpoint. TLS still verifies the original hostname with
+    /// the original connector. An unavailable peer fails the cleanup exchange.
+    ///
     /// # Cx requirement
     ///
     /// `cx` is used to drive the kill connection and the KILL QUERY
@@ -3579,12 +3671,16 @@ impl MySqlConnection {
     /// All socket operations see the explicit Cx only during their poll.
     async fn kill_query_bounded(
         cx: &Cx,
-        mut options: MySqlConnectOptions,
+        target: MySqlCancelTarget,
         thread_id: u32,
         #[cfg(feature = "tls")] connector: Option<TlsConnector>,
     ) -> Result<(), MySqlError> {
         use std::future::Future;
 
+        let MySqlCancelTarget {
+            mut options,
+            endpoint,
+        } = target;
         if thread_id == 0 {
             return Err(MySqlError::Protocol(
                 "KILL QUERY requires a server connection ID".to_string(),
@@ -3595,10 +3691,12 @@ impl MySqlConnection {
             .map_or(MYSQL_KILL_TIMEOUT, |bound| bound.min(MYSQL_KILL_TIMEOUT));
         options.connect_timeout = Some(bound);
         let exchange = async {
-            let mut killer = match Self::connect_bounded(
+            let mut killer = match Self::connect_bounded_at_endpoint(
                 cx,
                 options,
                 false,
+                0,
+                Some(endpoint),
                 #[cfg(feature = "tls")]
                 connector,
             )
@@ -6123,7 +6221,7 @@ impl MySqlConnection {
         const CANCEL_CLEANUP_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
         self.options
             .as_ref()
-            .and_then(|options| options.connect_timeout)
+            .and_then(|target| target.options.connect_timeout)
             .map_or(CANCEL_CLEANUP_GRACE, |bound| {
                 bound.min(CANCEL_CLEANUP_GRACE)
             })
