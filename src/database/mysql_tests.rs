@@ -4962,6 +4962,10 @@ mod tests {
 
         const SQL: &str = "SELECT value FROM stream_values WHERE tenant = ?";
 
+        // These fixtures observe exact owned KILL exchanges. Keep their
+        // cleanup demand below the shared drop-KILL concurrency limit.
+        static ROW_STREAM_KILL_FIXTURE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
         fn prepared_stream_runtime(workers: usize) -> crate::runtime::Runtime {
             let builder = if workers == 1 {
                 crate::runtime::RuntimeBuilder::current_thread().with_sharded_state(false)
@@ -5938,6 +5942,10 @@ mod tests {
         }
 
         fn row_stream_native_errors_remain_terminal(binary: bool) {
+            let _fixture = ROW_STREAM_KILL_FIXTURE
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+
             for workers in [1, 2] {
                 for terminal in [
                     Terminal::EndOfRows,
@@ -6070,6 +6078,10 @@ mod tests {
         }
 
         fn row_stream_native_startup_enforces_terminal_and_column_limits(binary: bool) {
+            let _fixture = ROW_STREAM_KILL_FIXTURE
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+
             for workers in [1, 2] {
                 for response in [
                     FirstResponse::Ok,
@@ -6196,6 +6208,10 @@ mod tests {
         #[cfg(unix)]
         fn row_stream_native_dropped_partial_read_cannot_resume(binary: bool) {
             use std::os::fd::AsFd;
+
+            let _fixture = ROW_STREAM_KILL_FIXTURE
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
 
             for workers in [1, 2] {
                 for prefix_len in [2, 7] {

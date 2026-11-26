@@ -227,6 +227,256 @@ fn mysql_streaming_terminator_restores_reuse_without_spurious_kill() {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum RowStreamCompletion {
+    Drain,
+    Deadline,
+    AbortAfterMalformed,
+    FinishAfterMalformed,
+}
+
+#[test]
+fn mysql_row_stream_finish_drains_text_and_prepared_replies() {
+    let _serial = SERIAL.lock().unwrap();
+    for workers in [0, 2] {
+        for prepared in [false, true] {
+            row_stream_completion_case(workers, prepared, RowStreamCompletion::Drain);
+        }
+    }
+}
+
+#[test]
+fn mysql_row_stream_finish_deadline_drains_kill_ownership() {
+    let _serial = SERIAL.lock().unwrap();
+    for workers in [0, 2] {
+        for prepared in [false, true] {
+            row_stream_completion_case(workers, prepared, RowStreamCompletion::Deadline);
+        }
+    }
+}
+
+#[test]
+fn mysql_row_stream_explicit_cleanup_retires_failed_streams() {
+    let _serial = SERIAL.lock().unwrap();
+    for workers in [0, 2] {
+        for prepared in [false, true] {
+            for completion in [
+                RowStreamCompletion::AbortAfterMalformed,
+                RowStreamCompletion::FinishAfterMalformed,
+            ] {
+                row_stream_completion_case(workers, prepared, completion);
+            }
+        }
+    }
+}
+
+fn row_stream_completion_case(workers: usize, prepared: bool, completion: RowStreamCompletion) {
+    assert_eq!(test_active_mysql_drop_kills(), 0);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let closed = Arc::new(asupersync::sync::Notify::new());
+    let peer_closed = Arc::clone(&closed);
+    let (dropped_tx, dropped_rx) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let mut main = accept(&listener);
+        authenticate(&mut main, 42, true);
+        if prepared {
+            assert_eq!(
+                read_packet(&mut main),
+                (0, b"\x16SELECT 7 UNION ALL SELECT 8".to_vec())
+            );
+            write_packet(&mut main, 1, &[0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+            assert_eq!(
+                read_packet(&mut main),
+                (0, vec![0x17, 7, 0, 0, 0, 0, 1, 0, 0, 0])
+            );
+        } else {
+            assert_eq!(
+                read_packet(&mut main),
+                (0, b"\x03SELECT 7 UNION ALL SELECT 8".to_vec())
+            );
+        }
+        stream_header(&mut main);
+        let first_row: &[u8] = if prepared {
+            &[0, 0, 7, 0, 0, 0]
+        } else {
+            b"\x017"
+        };
+        write_packet(&mut main, 4, first_row);
+        match completion {
+            RowStreamCompletion::Drain => {
+                let second_row: &[u8] = if prepared {
+                    &[0, 0, 8, 0, 0, 0]
+                } else {
+                    b"\x018"
+                };
+                write_packet(&mut main, 5, second_row);
+                write_packet(&mut main, 6, &[0xfe, 0, 0, 2, 0]);
+                // Only finish consumes the second row and terminal packet.
+                // A reused connection must read this fresh ping response.
+                assert_eq!(read_packet(&mut main), (0, vec![0x0e]));
+                write_packet(&mut main, 1, OK);
+                assert_eq!(read_packet(&mut main), (0, vec![1]));
+            }
+            RowStreamCompletion::Deadline
+            | RowStreamCompletion::AbortAfterMalformed
+            | RowStreamCompletion::FinishAfterMalformed => {
+                if !matches!(completion, RowStreamCompletion::Deadline) {
+                    // Truncated text length prefix, or invalid binary header.
+                    // No terminal packet follows this malformed row.
+                    write_packet(&mut main, 5, &[0xfc, 1]);
+                }
+                // The deadline case deliberately stalls after the first row.
+                // Explicit completion must finish this KILL before returning;
+                // the original connection is retained until both peers close.
+                let mut killer = accept(&listener);
+                authenticate(&mut killer, 43, true);
+                assert_eq!(
+                    read_packet(&mut killer),
+                    (0, b"\x03KILL QUERY 42".to_vec())
+                );
+                write_packet(&mut killer, 1, OK);
+                assert_eof(&mut killer);
+            }
+        }
+        assert_eof(&mut main);
+        peer_closed.notify_one();
+        dropped_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        // Drop acquires its permit synchronously. Drain every acquired permit
+        // before asserting that explicit cleanup did not schedule another KILL.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while test_active_mysql_drop_kills() != 0 {
+            assert!(
+                Instant::now() < deadline,
+                "completion={completion:?}: cleanup thread permit retained"
+            );
+            thread::park_timeout(Duration::from_millis(1));
+        }
+        assert!(
+            matches!(listener.accept(), Err(ref error) if error.kind() == std::io::ErrorKind::WouldBlock),
+            "completion={completion:?}: unexpected extra KILL connection"
+        );
+    });
+    let builder = if workers == 0 {
+        RuntimeBuilder::current_thread()
+    } else {
+        RuntimeBuilder::multi_thread().worker_threads(workers)
+    };
+    let runtime = builder.build().unwrap();
+    let join = runtime.handle().spawn(async move {
+        let cx = Cx::current().unwrap();
+        asupersync::time::timeout(cx.now(), Duration::from_secs(10), async {
+            let mut connection = match MySqlConnection::connect(
+                &cx,
+                &format!("mysql://test:test@{address}/test"),
+            )
+            .await
+            {
+                Outcome::Ok(connection) => connection,
+                other => panic!("main connect: {other:?}"),
+            };
+            let started = if prepared {
+                connection
+                    .query_stream_params(&cx, "SELECT 7 UNION ALL SELECT 8", &[])
+                    .await
+            } else {
+                connection
+                    .query_stream(&cx, "SELECT 7 UNION ALL SELECT 8")
+                    .await
+            };
+            let mut stream = match started {
+                Outcome::Ok(stream) => stream,
+                Outcome::Err(error) => panic!("stream: {error:?}"),
+                Outcome::Cancelled(reason) => panic!("stream cancelled: {reason:?}"),
+                Outcome::Panicked(_) => panic!("stream panicked"),
+            };
+            let row = match stream.next(&cx).await {
+                Outcome::Ok(Some(row)) => row,
+                other => panic!("first row: {other:?}"),
+            };
+            assert_eq!(row.get_i32("value").unwrap(), 7);
+            assert_eq!(stream.row_count(), 1);
+            if matches!(
+                completion,
+                RowStreamCompletion::AbortAfterMalformed | RowStreamCompletion::FinishAfterMalformed
+            ) {
+                let result = stream.next(&cx).await;
+                assert!(
+                    matches!(
+                        &result,
+                        Outcome::Err(MySqlError::InvalidPacket(_) | MySqlError::Protocol(_))
+                    ),
+                    "malformed row: {result:?}"
+                );
+                // A failed stream stops yielding rows, but its outstanding
+                // query still needs explicit cleanup rather than a no-op.
+                assert!(matches!(stream.next(&cx).await, Outcome::Ok(None)));
+            }
+            match completion {
+                RowStreamCompletion::Drain => {
+                    let result = stream.finish(&cx, Duration::from_secs(2)).await;
+                    assert!(matches!(&result, Outcome::Ok(())), "finish: {result:?}");
+                }
+                RowStreamCompletion::Deadline => {
+                    let mut finish = Box::pin(stream.finish(&cx, Duration::from_millis(100)));
+                    // Observe an actually pending drain before its deadline.
+                    // No wall-clock sleep guesses when a read has parked.
+                    poll_fn(|task_cx| {
+                        let state = finish.as_mut().poll(task_cx);
+                        assert!(state.is_pending(), "drain did not park: {state:?}");
+                        Poll::Ready(())
+                    })
+                    .await;
+                    let result = finish.await;
+                    assert!(
+                        matches!(
+                            &result,
+                            Outcome::Err(MySqlError::Io(error))
+                                if error.kind() == std::io::ErrorKind::TimedOut
+                        ),
+                        "finish deadline: {result:?}"
+                    );
+                }
+                RowStreamCompletion::AbortAfterMalformed => stream.abort(&cx).await,
+                RowStreamCompletion::FinishAfterMalformed => {
+                    let result = stream.finish(&cx, Duration::from_secs(2)).await;
+                    assert!(
+                        matches!(&result, Outcome::Err(MySqlError::ConnectionClosed)),
+                        "finish after malformed row: {result:?}"
+                    );
+                }
+            }
+            if matches!(completion, RowStreamCompletion::Drain) {
+                assert!(matches!(connection.ping(&cx).await, Outcome::Ok(())));
+                connection.close().await.unwrap();
+            } else {
+                assert!(matches!(
+                    connection.ping(&cx).await,
+                    Outcome::Err(MySqlError::ConnectionClosed)
+                ));
+            }
+            // Observe transport closure before Drop can perform fallback
+            // cleanup, proving that finish/abort completed it themselves.
+            closed.notified().await;
+            assert_eq!(test_active_mysql_drop_kills(), 0);
+            drop(connection);
+            dropped_tx.send(()).unwrap();
+        })
+        .await
+        .expect("bounded MySQL row-stream completion journey");
+    });
+    runtime.block_on(join);
+    server.join().unwrap();
+    let report = runtime.shutdown_drained(Duration::from_secs(2));
+    assert_eq!(report.outcome, RootDrainOutcome::Quiescent, "{report:?}");
+    assert_eq!(test_active_mysql_drop_kills(), 0);
+    eprintln!(
+        "event=mysql_row_stream_completion workers={workers} prepared={prepared} \
+         completion={completion:?} transport_closed=true cleanup_threads=0"
+    );
+}
+
 fn write_packet(stream: &mut impl Write, sequence: u8, payload: &[u8]) {
     let length = u32::try_from(payload.len()).unwrap().to_le_bytes();
     stream

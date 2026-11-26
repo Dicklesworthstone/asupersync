@@ -667,10 +667,11 @@ impl MySqlRow {
 
 /// Streaming query result iterator for bounded-memory row processing.
 ///
-/// DEFECT FIX: This provides streaming iteration over MySQL query results to address
-/// the memory usage issue where all rows are collected into `Vec<MySqlRow>` before
-/// returning (lines 2244, 2310, 2434). With this API, memory usage is O(1) per row
-/// instead of O(result_set_size).
+/// Rows are read one at a time while column metadata is shared across results.
+/// Use [`Self::finish`] to discard unread rows within a deadline and restore
+/// connection reuse, or [`Self::abort`] to await cancellation and transport
+/// cleanup. Dropping an unfinished stream poisons the connection and retains
+/// its connection-drop cleanup responsibility.
 ///
 /// # Example Usage
 /// ```ignore
@@ -832,6 +833,128 @@ impl MySqlRowStream<'_> {
                 }
             }
         }
+    }
+
+    /// Discard unread rows within `max_wait` and release this connection borrow.
+    ///
+    /// A consumed terminator restores connection reuse. A synchronized server
+    /// error is returned while preserving reuse; malformed input, abandonment,
+    /// cancellation, and an elapsed deadline retire the connection through the
+    /// existing bounded KILL/close cleanup. Cleanup can extend total latency
+    /// beyond `max_wait`, and neither draining nor cancellation implies rollback.
+    ///
+    /// Both text and prepared binary streams use this path. Rows are discarded
+    /// one at a time, and a continuously ready peer cannot avoid deadline checks
+    /// or cooperative yields. A stream poisoned by an earlier `next` call is
+    /// cleaned up and returns `ConnectionClosed`; a clean completion is a no-op.
+    ///
+    /// Dropping a polled `finish` future leaves the connection poisoned and
+    /// retains its connection-drop cleanup responsibility.
+    pub async fn finish(
+        mut self,
+        cx: &Cx,
+        max_wait: std::time::Duration,
+    ) -> Outcome<(), MySqlError> {
+        use std::future::Future;
+
+        if self.finished {
+            if self.connection.inner.closed {
+                self.abort_inner(cx).await;
+                return Outcome::Err(MySqlError::ConnectionClosed);
+            }
+            return Outcome::Ok(());
+        }
+
+        let deadline = cx.now() + max_wait;
+        let drained = {
+            let drain = async {
+                let mut rows_since_yield = 0;
+                loop {
+                    // Check between immediately ready rows as well as while
+                    // parked: the outer timer is only polled after a yield.
+                    if cx.now() > deadline {
+                        return None;
+                    }
+                    match self.next(cx).await {
+                        Outcome::Ok(Some(_)) => {
+                            rows_since_yield += 1;
+                            if rows_since_yield == 32 {
+                                rows_since_yield = 0;
+                                crate::runtime::yield_now().await;
+                            }
+                        }
+                        Outcome::Ok(None) => return Some(Outcome::Ok(())),
+                        Outcome::Err(error) => return Some(Outcome::Err(error)),
+                        Outcome::Cancelled(reason) => return Some(Outcome::Cancelled(reason)),
+                        Outcome::Panicked(payload) => return Some(Outcome::Panicked(payload)),
+                    }
+                }
+            };
+            let mut timed = std::pin::pin!(crate::time::timeout_at(deadline, drain));
+            std::future::poll_fn(|task_cx| {
+                // The explicit caller owns the deadline and its timer driver.
+                // Install that context only for this poll, never across await.
+                let _current = Cx::set_current(Some(cx.clone()));
+                timed.as_mut().poll(task_cx)
+            })
+            .await
+        };
+
+        match drained {
+            Ok(Some(result)) => {
+                if self.connection.inner.closed {
+                    self.abort_inner(cx).await;
+                }
+                result
+            }
+            Ok(None) | Err(_) => {
+                self.abort_inner(cx).await;
+                Outcome::Err(MySqlError::Io(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "row-stream drain deadline elapsed",
+                )))
+            }
+        }
+    }
+
+    /// Stop this stream and await bounded KILL/transport cleanup.
+    ///
+    /// An unfinished, abandoned, or malformed response always retires the
+    /// connection, even when `next` has already reported its terminal error.
+    /// A cleanly completed response is left reusable. If KILL fails, transport
+    /// closure is the fallback; this operation does not promise rollback.
+    ///
+    /// Dropping this future before cleanup completes retains the connection's
+    /// existing drop-time cleanup responsibility.
+    pub async fn abort(mut self, cx: &Cx) {
+        self.abort_inner(cx).await;
+    }
+
+    async fn abort_inner(&mut self, cx: &Cx) {
+        if self.finished && !self.read_in_progress && !self.connection.inner.closed {
+            return;
+        }
+
+        // Preserve the fence and in-flight ownership across the cleanup await,
+        // including when a previous protocol failure already set finished.
+        self.read_in_progress = true;
+        self.connection.inner.closed = true;
+        if self
+            .connection
+            .inner
+            .query_in_flight
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            self.connection.wire_cancel_in_drain(cx).await;
+        } else {
+            let _ = self.connection.inner.stream.shutdown(std::net::Shutdown::Both);
+        }
+        self.connection
+            .inner
+            .query_in_flight
+            .store(false, std::sync::atomic::Ordering::Release);
+        self.finished = true;
+        self.read_in_progress = false;
     }
 
     /// Get the number of rows processed so far by this stream.
