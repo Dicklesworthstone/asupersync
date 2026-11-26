@@ -6838,6 +6838,7 @@ impl MySqlConnection {
             statement_id,
             owner_connection_id: self.inner.connection_id,
             owner_prepared_statement_epoch: self.inner.prepared_statement_epoch,
+            owner_origin: Arc::clone(&self.inner.prepared_cache.origin),
             param_count,
             column_count,
             params,
@@ -6918,6 +6919,30 @@ impl MySqlConnection {
         result
     }
 
+    fn validate_prepared_statement_owner(&self, stmt: &MySqlStatement) -> Result<(), MySqlError> {
+        if stmt.owner_connection_id != self.inner.connection_id {
+            return Err(MySqlError::InvalidParameter(format!(
+                "prepared statement belongs to connection {} but current connection is {}",
+                stmt.owner_connection_id, self.inner.connection_id
+            )));
+        }
+        if stmt.owner_prepared_statement_epoch != self.inner.prepared_statement_epoch {
+            return Err(MySqlError::InvalidParameter(format!(
+                "prepared statement belongs to pooled checkout epoch {} but current epoch is {}",
+                stmt.owner_prepared_statement_epoch, self.inner.prepared_statement_epoch
+            )));
+        }
+        // Wire connection IDs are scoped to one server, and may also be
+        // recycled after a disconnect. Matching those IDs and checkout epochs
+        // cannot authorize a handle from another physical connection.
+        if !Arc::ptr_eq(&stmt.owner_origin, &self.inner.prepared_cache.origin) {
+            return Err(MySqlError::InvalidParameter(
+                "prepared statement belongs to a different MySQL connection".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Validate, bind, and start one binary-protocol query. Collecting and
     /// streaming readers share this admission and first-packet boundary.
     async fn start_prepared_query(
@@ -6960,18 +6985,8 @@ impl MySqlConnection {
             return Outcome::Err(MySqlError::ConnectionClosed);
         }
 
-        if stmt.owner_connection_id != self.inner.connection_id {
-            return Outcome::Err(MySqlError::InvalidParameter(format!(
-                "prepared statement belongs to connection {} but current connection is {}",
-                stmt.owner_connection_id, self.inner.connection_id
-            )));
-        }
-
-        if stmt.owner_prepared_statement_epoch != self.inner.prepared_statement_epoch {
-            return Outcome::Err(MySqlError::InvalidParameter(format!(
-                "prepared statement belongs to pooled checkout epoch {} but current epoch is {}",
-                stmt.owner_prepared_statement_epoch, self.inner.prepared_statement_epoch
-            )));
+        if let Err(error) = self.validate_prepared_statement_owner(stmt) {
+            return Outcome::Err(error);
         }
 
         if params.len() != stmt.param_count as usize {
@@ -7141,18 +7156,8 @@ impl MySqlConnection {
             return Outcome::Err(MySqlError::ConnectionClosed);
         }
 
-        if stmt.owner_connection_id != self.inner.connection_id {
-            return Outcome::Err(MySqlError::InvalidParameter(format!(
-                "prepared statement belongs to connection {} but current connection is {}",
-                stmt.owner_connection_id, self.inner.connection_id
-            )));
-        }
-
-        if stmt.owner_prepared_statement_epoch != self.inner.prepared_statement_epoch {
-            return Outcome::Err(MySqlError::InvalidParameter(format!(
-                "prepared statement belongs to pooled checkout epoch {} but current epoch is {}",
-                stmt.owner_prepared_statement_epoch, self.inner.prepared_statement_epoch
-            )));
+        if let Err(error) = self.validate_prepared_statement_owner(stmt) {
+            return Outcome::Err(error);
         }
 
         if params.len() != stmt.param_count as usize {
@@ -8062,6 +8067,10 @@ mod param_flag {
 
 /// A MySQL prepared statement.
 ///
+/// Handles, including clones, belong to the physical connection that prepared
+/// them. Equal server-reported connection IDs on different servers do not make
+/// their statement handles interchangeable.
+///
 /// When pooling connections, use [`MySqlConnectionManager`] so prepared
 /// handles are invalidated across pool handoff and cannot leak into a
 /// later logical session on the same physical connection.
@@ -8073,6 +8082,8 @@ pub struct MySqlStatement {
     owner_connection_id: u32,
     /// Logical pool-borrow epoch that prepared this statement.
     owner_prepared_statement_epoch: u64,
+    /// Identity of the physical connection's prepared-statement namespace.
+    owner_origin: Arc<()>,
     /// Number of parameters.
     param_count: u16,
     /// Number of columns.
@@ -8154,6 +8165,10 @@ impl MySqlPreparedCacheStats {
 
 /// Bounded LRU cache for server-side MySQL prepared statements.
 struct MySqlPreparedStatementCache {
+    /// Created once per physical connection and retained when entries are
+    /// cleared, including pool session reset. Held statements keep the identity
+    /// alive after disconnect, preventing allocation reuse from aliasing it.
+    origin: Arc<()>,
     entries: HashMap<String, MySqlStatement>,
     lru: VecDeque<String>,
     cap: usize,
@@ -8166,6 +8181,7 @@ struct MySqlPreparedStatementCache {
 impl MySqlPreparedStatementCache {
     fn new(cap: usize) -> Self {
         Self {
+            origin: Arc::new(()),
             entries: HashMap::with_capacity(cap.min(64)),
             lru: VecDeque::with_capacity(cap.min(64)),
             cap,
@@ -8336,6 +8352,7 @@ pub fn bench_prepared_cache_repeated_workload(
                     statement_id: next_statement_id,
                     owner_connection_id: 1,
                     owner_prepared_statement_epoch: 1,
+                    owner_origin: Arc::clone(&cache.origin),
                     param_count: 1,
                     column_count: 2,
                     params: Vec::new(),

@@ -764,6 +764,7 @@ mod tests {
             statement_id: 7,
             owner_connection_id: 41,
             owner_prepared_statement_epoch: 0,
+            owner_origin: Arc::clone(&conn.inner.prepared_cache.origin),
             param_count: 0,
             column_count: 1,
             params: Vec::new(),
@@ -4311,6 +4312,7 @@ mod tests {
             statement_id: 7,
             owner_connection_id: 0,
             owner_prepared_statement_epoch: 0,
+            owner_origin: Arc::clone(&conn.inner.prepared_cache.origin),
             param_count: 0,
             column_count: 1,
             params: Vec::new(),
@@ -4343,6 +4345,7 @@ mod tests {
             statement_id: 11,
             owner_connection_id: 99,
             owner_prepared_statement_epoch: 0,
+            owner_origin: Arc::clone(&conn.inner.prepared_cache.origin),
             param_count: 0,
             column_count: 0,
             params: Vec::new(),
@@ -4363,6 +4366,260 @@ mod tests {
             !conn.inner.closed,
             "mismatch must fail before any protocol I/O marks the connection closed"
         );
+    }
+
+    // Follow-up to br-asupersync-u3dvxl: different physical sessions can
+    // report the same server connection ID, statement ID, and checkout epoch.
+    const PREPARED_ORIGIN_SOURCE_SQL: &str = "UPDATE source_table SET value = 1";
+    const PREPARED_ORIGIN_RECEIVER_SQL: &str = "UPDATE receiver_table SET value = 2";
+
+    fn prepared_origin_connection(
+        sql: &str,
+    ) -> (MySqlConnection, std::net::TcpStream, MySqlStatement) {
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        conn.inner.connection_id = 41;
+        peer.set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("bounded prepare wire check");
+        write_response_packet(&mut peer, 1, prepare_ok_payload(7));
+        let statement = match run(conn.prepare(&Cx::for_testing(), sql)) {
+            Outcome::Ok(statement) => statement,
+            other => panic!("prepare origin fixture: {other:?}"),
+        };
+        let mut expected = vec![command::COM_STMT_PREPARE];
+        expected.extend_from_slice(sql.as_bytes());
+        assert_eq!(read_client_command(&mut peer), expected);
+        (conn, peer, statement)
+    }
+
+    fn assert_prepared_owner_rejected<T>(
+        future: impl std::future::Future<Output = Outcome<T, MySqlError>>,
+        expected: &str,
+    ) {
+        let mut future = std::pin::pin!(future);
+        match poll_once(&mut future) {
+            Poll::Ready(Outcome::Err(MySqlError::InvalidParameter(message))) => {
+                assert!(message.contains(expected), "{message}");
+            }
+            Poll::Ready(Outcome::Err(error)) => panic!("unexpected rejection: {error}"),
+            Poll::Ready(Outcome::Cancelled(reason)) => panic!("unexpected cancellation: {reason}"),
+            Poll::Ready(Outcome::Panicked(payload)) => panic!("unexpected panic: {payload:?}"),
+            Poll::Ready(Outcome::Ok(_)) => panic!("foreign prepared statement was accepted"),
+            Poll::Pending => panic!("ownership refusal must not wait for protocol I/O"),
+        }
+    }
+
+    fn assert_prepared_origin_wire_idle(peer: &mut std::net::TcpStream) {
+        peer.set_nonblocking(true).expect("nonblocking wire check");
+        let mut byte = [0; 1];
+        assert_eq!(
+            peer.read(&mut byte).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "refused handles must not execute or start transaction/timeout cleanup"
+        );
+        peer.set_nonblocking(false).expect("restore blocking peer");
+    }
+
+    fn expect_prepared_origin_execute(peer: &mut std::net::TcpStream) {
+        let mut expected = vec![command::COM_STMT_EXECUTE];
+        expected.extend_from_slice(&7_u32.to_le_bytes());
+        expected.push(0); // no cursor
+        expected.extend_from_slice(&1_u32.to_le_bytes());
+        assert_eq!(read_client_command(peer), expected);
+    }
+
+    #[test]
+    fn prepared_origin_rejects_colliding_foreign_handles_before_statement_io() {
+        let foreign = {
+            let (_source, _peer, statement) =
+                prepared_origin_connection(PREPARED_ORIGIN_SOURCE_SQL);
+            statement.clone()
+        };
+        // The handle retains its identity after its original connection drops.
+        for maintenance_pending in [false, true] {
+            let (mut conn, mut peer, local) =
+                prepared_origin_connection(PREPARED_ORIGIN_RECEIVER_SQL);
+            assert_eq!(foreign.owner_connection_id(), local.owner_connection_id());
+            assert_eq!(foreign.statement_id, local.statement_id);
+            assert_eq!(
+                foreign.owner_prepared_statement_epoch,
+                local.owner_prepared_statement_epoch
+            );
+            conn.inner.needs_rollback = maintenance_pending;
+            conn.inner.session_isolation_restore =
+                maintenance_pending.then_some(IsolationLevel::ReadCommitted);
+            conn.inner.statement_timeout_override =
+                maintenance_pending.then_some(Duration::from_millis(500));
+            conn.inner.applied_max_execution_time_ms = maintenance_pending.then_some(250);
+            conn.inner.max_execution_time_uncertain = maintenance_pending;
+            let before = conn.prepared_cache_stats();
+            let sequence = conn.inner.sequence;
+            let cx = Cx::for_testing();
+            let expected = "different MySQL connection";
+
+            assert_prepared_owner_rejected(conn.query_prepared(&cx, &foreign, &[]), expected);
+            assert_prepared_owner_rejected(conn.execute_prepared(&cx, &foreign, &[]), expected);
+            assert_prepared_owner_rejected(
+                conn.execute_prepared_result(&cx, &foreign, &[]),
+                expected,
+            );
+            assert_prepared_owner_rejected(
+                conn.query_stream_prepared(&cx, &foreign, &[]),
+                expected,
+            );
+            assert_prepared_owner_rejected(
+                conn.query_cursor_prepared(&cx, &foreign, &[], 1),
+                expected,
+            );
+
+            let cancelled = cancelled_cx();
+            assert_user_cancelled(run(conn.query_prepared(&cancelled, &foreign, &[])));
+            assert_user_cancelled(run(conn.execute_prepared(&cancelled, &foreign, &[])));
+            assert_user_cancelled(run(conn.execute_prepared_result(&cancelled, &foreign, &[])));
+            assert_user_cancelled(run(conn.query_stream_prepared(&cancelled, &foreign, &[])));
+            assert_user_cancelled(run(conn.query_cursor_prepared(
+                &cancelled,
+                &foreign,
+                &[],
+                1,
+            )));
+
+            assert!(!conn.inner.closed);
+            assert!(
+                !conn
+                    .inner
+                    .query_in_flight
+                    .load(std::sync::atomic::Ordering::Acquire)
+            );
+            assert_eq!(conn.inner.sequence, sequence);
+            assert_eq!(conn.inner.needs_rollback, maintenance_pending);
+            assert_eq!(
+                conn.inner.session_isolation_restore,
+                maintenance_pending.then_some(IsolationLevel::ReadCommitted)
+            );
+            assert_eq!(
+                conn.inner.statement_timeout_override,
+                maintenance_pending.then_some(Duration::from_millis(500))
+            );
+            assert_eq!(
+                conn.inner.applied_max_execution_time_ms,
+                maintenance_pending.then_some(250)
+            );
+            assert_eq!(conn.inner.max_execution_time_uncertain, maintenance_pending);
+            assert_eq!(conn.prepared_cache_stats(), before);
+            assert_eq!(conn.inner.prepared_cache.entries.len(), 1);
+            assert_eq!(
+                conn.inner.prepared_cache.entries[PREPARED_ORIGIN_RECEIVER_SQL].statement_id,
+                local.statement_id
+            );
+            assert_prepared_origin_wire_idle(&mut peer);
+        }
+    }
+
+    #[test]
+    fn prepared_origin_multi_result_admission_rejects_colliding_foreign_handles() {
+        let (_source, _source_peer, foreign) =
+            prepared_origin_connection(PREPARED_ORIGIN_SOURCE_SQL);
+        for maintenance_pending in [false, true] {
+            let (mut inner, mut peer, local) =
+                prepared_origin_connection(PREPARED_ORIGIN_RECEIVER_SQL);
+            assert_eq!(foreign.statement_id, local.statement_id);
+            assert_eq!(foreign.owner_connection_id(), local.owner_connection_id());
+            assert_eq!(
+                foreign.owner_prepared_statement_epoch,
+                local.owner_prepared_statement_epoch
+            );
+            inner.inner.capabilities =
+                capability::CLIENT_MULTI_RESULTS | capability::CLIENT_PS_MULTI_RESULTS;
+            inner.inner.needs_rollback = maintenance_pending;
+            inner.inner.max_execution_time_uncertain = maintenance_pending;
+            let mut conn = MySqlMultiResultConnection::from_connection_for_test(
+                inner,
+                MySqlMultiResultLimits::default(),
+            );
+            let cx = Cx::for_testing();
+            assert_prepared_owner_rejected(
+                conn.query_prepared(&cx, &foreign, &[]),
+                "different MySQL connection",
+            );
+            assert_prepared_owner_rejected(
+                conn.query_stream_prepared(
+                    &cx,
+                    &foreign,
+                    &[],
+                    MySqlMultiResultStreamConfig::default(),
+                ),
+                "different MySQL connection",
+            );
+            let cancelled = cancelled_cx();
+            assert_user_cancelled(run(conn.query_prepared(&cancelled, &foreign, &[])));
+            assert_user_cancelled(run(conn.query_stream_prepared(
+                &cancelled,
+                &foreign,
+                &[],
+                MySqlMultiResultStreamConfig::default(),
+            )));
+            assert!(!conn.is_closed());
+            assert_prepared_origin_wire_idle(&mut peer);
+
+            if !maintenance_pending {
+                write_response_packet(&mut peer, 1, ok_packet_payload(3, 0));
+                let results = match run(conn.query_prepared(&cx, &local.clone(), &[])) {
+                    Outcome::Ok(results) => results,
+                    other => panic!("same-owner multi-result query: {other:?}"),
+                };
+                assert_eq!(results.len(), 1);
+                assert_eq!(results[0].command_result().unwrap().affected_rows, 3);
+                expect_prepared_origin_execute(&mut peer);
+                assert!(!conn.is_closed());
+            }
+        }
+    }
+
+    #[test]
+    fn prepared_origin_preserves_local_clones_cache_hits_and_checkout_epochs() {
+        let (mut conn, mut peer, original) =
+            prepared_origin_connection(PREPARED_ORIGIN_RECEIVER_SQL);
+        let cx = Cx::for_testing();
+        let clone = original.clone();
+        write_response_packet(&mut peer, 1, ok_packet_payload(3, 0));
+        assert!(matches!(
+            run(conn.execute_prepared(&cx, &clone, &[])),
+            Outcome::Ok(3)
+        ));
+        expect_prepared_origin_execute(&mut peer);
+
+        let cached = match run(conn.prepare(&cx, PREPARED_ORIGIN_RECEIVER_SQL)) {
+            Outcome::Ok(statement) => statement,
+            other => panic!("same-owner cache hit: {other:?}"),
+        };
+        assert_eq!(conn.prepared_cache_stats().hits, 1);
+        assert_prepared_origin_wire_idle(&mut peer);
+        write_response_packet(&mut peer, 1, ok_packet_payload(0, 0));
+        assert!(
+            matches!(run(conn.query_prepared(&cx, &cached, &[])), Outcome::Ok(rows) if rows.is_empty())
+        );
+        expect_prepared_origin_execute(&mut peer);
+
+        conn.invalidate_prepared_statements_for_pool_return();
+        assert_prepared_owner_rejected(
+            conn.execute_prepared(&cx, &clone, &[]),
+            "pooled checkout epoch 0 but current epoch is 1",
+        );
+        assert_prepared_origin_wire_idle(&mut peer);
+        let refreshed = match run(conn.prepare(&cx, PREPARED_ORIGIN_RECEIVER_SQL)) {
+            Outcome::Ok(statement) => statement,
+            other => panic!("new-checkout cache hit: {other:?}"),
+        };
+        assert_eq!(refreshed.owner_prepared_statement_epoch, 1);
+        assert_eq!(conn.prepared_cache_stats().hits, 2);
+        assert_prepared_origin_wire_idle(&mut peer);
+        write_response_packet(&mut peer, 1, ok_packet_payload(5, 0));
+        assert!(matches!(
+            run(conn.execute_prepared(&cx, &refreshed, &[])),
+            Outcome::Ok(5)
+        ));
+        expect_prepared_origin_execute(&mut peer);
+        assert!(!conn.inner.closed);
     }
 
     #[test]
@@ -6553,6 +6810,7 @@ mod tests {
                 statement_id: 31,
                 owner_connection_id: pooled.connection_id(),
                 owner_prepared_statement_epoch: pooled.inner.prepared_statement_epoch,
+                owner_origin: Arc::clone(&pooled.inner.prepared_cache.origin),
                 param_count: 0,
                 column_count: 0,
                 params: Vec::new(),
@@ -6699,6 +6957,7 @@ mod tests {
             statement_id: 7,
             owner_connection_id: 0,
             owner_prepared_statement_epoch: 0,
+            owner_origin: Arc::clone(&conn.inner.prepared_cache.origin),
             param_count: 2,
             column_count: 0,
             params: Vec::new(),
@@ -6790,6 +7049,7 @@ mod tests {
             statement_id: 7,
             owner_connection_id: 0,
             owner_prepared_statement_epoch: 0,
+            owner_origin: Arc::clone(&conn.inner.prepared_cache.origin),
             param_count: 0,
             column_count: 0,
             params: Vec::new(),
@@ -6820,6 +7080,7 @@ mod tests {
             statement_id: 23,
             owner_connection_id: 88,
             owner_prepared_statement_epoch: 0,
+            owner_origin: Arc::clone(&conn.inner.prepared_cache.origin),
             param_count: 0,
             column_count: 0,
             params: Vec::new(),
