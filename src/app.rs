@@ -131,8 +131,9 @@ mod managed_execution {
 
     /// One proposed workload invocation, before its region or factory is admitted.
     ///
-    /// The budget already meets the live owner's limits, the work-unit budget,
-    /// and the hook's named budget. An adapter may only tighten it further.
+    /// The budget already meets the live owner's limits, the service budget,
+    /// the work-unit budget, and the hook's named budget. An adapter may only
+    /// tighten it further.
     /// Route calls have no supervisor generation; actor/job attempts carry the
     /// generation that is making this admission request.
     #[derive(Clone, Debug)]
@@ -871,6 +872,7 @@ mod managed_execution {
         name: String,
         kind: AppSpecV1WorkUnitKind,
         required: AppRequiredCapabilitiesV1,
+        service_budget: Option<AppBudgetSpecV1>,
         budget: Option<AppBudgetSpecV1>,
         slo: Option<WorkSlo>,
         interval: Option<Duration>,
@@ -923,6 +925,13 @@ mod managed_execution {
     }
 
     impl WorkPolicy {
+        fn execution_budgets(&self) -> impl Iterator<Item = &AppBudgetSpecV1> {
+            self.service_budget
+                .iter()
+                .chain(self.budget.iter())
+                .chain(self.slo.iter().filter_map(|slo| slo.budget.as_ref()))
+        }
+
         fn validate_runtime(&self, cx: &Cx) -> Result<(), ManagedAppBindError> {
             validate_required_capabilities(
                 &self.name,
@@ -933,14 +942,8 @@ mod managed_execution {
             if (self.interval.is_some()
                 || cx.budget().deadline.is_some()
                 || self
-                    .budget
-                    .as_ref()
-                    .is_some_and(|b| b.deadline_ms.is_some())
-                || self
-                    .slo
-                    .as_ref()
-                    .and_then(|slo| slo.budget.as_ref())
-                    .is_some_and(|b| b.deadline_ms.is_some()))
+                    .execution_budgets()
+                    .any(|budget| budget.deadline_ms.is_some()))
                 && cx.timer_driver().is_none()
             {
                 return Err(ManagedAppBindError::Capability {
@@ -958,11 +961,7 @@ mod managed_execution {
 
         fn envelope(&self) -> CapabilityBudget {
             let mut budget = CapabilityBudget::UNSPECIFIED;
-            for spec in self
-                .budget
-                .iter()
-                .chain(self.slo.iter().filter_map(|slo| slo.budget.as_ref()))
-            {
+            for spec in self.execution_budgets() {
                 budget = budget.meet(CapabilityBudget {
                     io_bytes: spec.io_bytes,
                     memory_bytes: spec.memory_bytes,
@@ -975,11 +974,7 @@ mod managed_execution {
         fn region_spec(&self, cx: &Cx) -> ChildRegionSpec {
             let mut budget = Budget::INFINITE;
             let now = cx.now_for_observability();
-            for spec in self
-                .budget
-                .iter()
-                .chain(self.slo.iter().filter_map(|slo| slo.budget.as_ref()))
-            {
+            for spec in self.execution_budgets() {
                 let mut limit = Budget::INFINITE;
                 if let Some(polls) = spec.poll_quota {
                     limit.poll_quota = u32::try_from(polls).expect("validated AppSpec poll quota");
@@ -2129,6 +2124,19 @@ mod managed_execution {
                 .iter()
                 .map(|service| (service.name.clone(), service.resources.clone()))
                 .collect();
+            // The public plan retains its selected work-unit preset for
+            // compatibility. Managed execution also preserves the service
+            // ceiling when the child selects a different named preset.
+            let service_budgets: BTreeMap<_, _> = self
+                .services
+                .iter()
+                .filter_map(|service| {
+                    service
+                        .budget
+                        .as_ref()
+                        .map(|budget| (service.name.clone(), budget.clone()))
+                })
+                .collect();
             // Keep the legacy public compiler-plan struct unchanged. Only the
             // typed actor binding consumes this original manifest declaration.
             let actor_mailboxes: BTreeMap<_, _> = self
@@ -2353,13 +2361,18 @@ mod managed_execution {
                     .as_ref()
                     .and_then(|name| budgets.get(name))
                     .cloned();
-                if let Some(budget) = &budget {
+                let service_budget = service_budgets
+                    .get(&child.service)
+                    .and_then(|name| budgets.get(name))
+                    .cloned();
+                for budget in service_budget.iter().chain(budget.iter()) {
                     validate_execution_budget(budget)?;
                 }
                 let policy = Arc::new(WorkPolicy {
                     name: child.name.clone(),
                     kind: child.kind.clone(),
                     required: child.required_capabilities,
+                    service_budget,
                     budget,
                     slo,
                     interval,
@@ -3162,6 +3175,11 @@ pub struct AppServiceSpecV1 {
     /// Resource names used by the service as a whole.
     pub resources: Vec<String>,
     /// Optional named budget for the service root.
+    ///
+    /// Managed execution meets this ceiling with each work unit's selected
+    /// preset and the live owner's limits. Limits apply per invocation; they
+    /// do not aggregate consumption across siblings. Relative deadlines start
+    /// at invocation admission.
     pub budget: Option<String>,
     /// Optional supervision group this service expects to belong to.
     pub supervision_group: Option<String>,

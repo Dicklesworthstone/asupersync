@@ -4453,3 +4453,410 @@ mod managed_observability {
         }
     }
 }
+
+mod service_budgets {
+    use super::*;
+    use asupersync::actor::Actor;
+    use asupersync::app::ManagedAppAdmission;
+    use asupersync::channel::mpsc;
+    use std::pin::Pin;
+
+    const UNITS: [&str; 4] = [
+        "api.route.health",
+        "api.actor.cache",
+        "api.job.startup",
+        "api.job.reload",
+    ];
+
+    #[derive(Clone, Copy)]
+    struct Limits {
+        polls: u32,
+        io_bytes: u64,
+        memory_bytes: u64,
+        deadline_ms: u64,
+    }
+
+    impl Limits {
+        fn assert_admission(self, admission: &ManagedAppAdmission) {
+            assert_eq!(admission.budget.poll_quota, self.polls);
+            assert_eq!(admission.budget.cost_quota, Some(96));
+            assert_eq!(admission.capability_budget.io_bytes, Some(self.io_bytes));
+            assert_eq!(
+                admission.capability_budget.memory_bytes,
+                Some(self.memory_bytes)
+            );
+            assert!(
+                admission.budget.deadline.unwrap()
+                    <= admission.now + Duration::from_millis(self.deadline_ms)
+            );
+        }
+
+        fn assert_cx(self, cx: &Cx) {
+            assert!(cx.budget().poll_quota <= self.polls);
+            assert!(cx.budget().cost_quota.unwrap() <= 11);
+            assert_eq!(cx.capability_budget().io_bytes, Some(self.io_bytes));
+            assert_eq!(
+                cx.capability_budget().memory_bytes,
+                Some(self.memory_bytes)
+            );
+            assert!(
+                cx.budget().deadline.unwrap()
+                    <= cx.now_for_observability() + Duration::from_millis(self.deadline_ms)
+            );
+            let ambient = Cx::current().expect("managed work has an ambient context");
+            assert_eq!(ambient.task_id(), cx.task_id());
+            assert!(ambient.budget().poll_quota <= self.polls);
+            assert_eq!(
+                ambient.capability_budget().memory_bytes,
+                Some(self.memory_bytes)
+            );
+        }
+    }
+
+    #[derive(Default)]
+    struct Visits {
+        route: AtomicUsize,
+        actor: AtomicUsize,
+        worker: AtomicUsize,
+        signal: AtomicUsize,
+        changed: Notify,
+    }
+
+    struct BudgetActor {
+        limits: Limits,
+        visits: Arc<Visits>,
+    }
+
+    impl Actor for BudgetActor {
+        type Message = ();
+
+        fn handle(
+            &mut self,
+            cx: &Cx,
+            (): (),
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            let cx = cx.clone();
+            Box::pin(async move {
+                self.limits.assert_cx(&cx);
+                yield_now().await;
+                self.limits.assert_cx(&cx);
+                self.visits.actor.fetch_add(1, Ordering::AcqRel);
+                self.visits.changed.notify_waiters();
+            })
+        }
+    }
+
+    fn manifest(service_stricter: bool) -> (Value, Limits) {
+        let mut declaration = manifest_json();
+        declaration["services"][0]["budget"] = json!("service");
+        declaration["services"][0]["actors"][0]["required_capabilities"]
+            ["cx_capabilities"] = json!(["spawn"]);
+        declaration["services"][0]["background_jobs"] = json!([
+            {
+                "name": "startup", "entrypoint": "example::startup", "trigger": "startup",
+                "required_capabilities": {
+                    "cx_capabilities": ["pure"], "feature_flags": [], "resources": []
+                },
+                "budget": "work"
+            },
+            {
+                "name": "reload", "entrypoint": "example::reload",
+                "trigger": {"signal": {"source": "reload"}},
+                "required_capabilities": {
+                    "cx_capabilities": ["pure"], "feature_flags": [], "resources": []
+                },
+                "budget": "work"
+            }
+        ]);
+        let limits = if service_stricter {
+            declaration["budgets"] = json!([
+                {"name": "service", "poll_quota": 2048, "deadline_ms": 5000,
+                    "io_bytes": 256, "memory_bytes": 512},
+                {"name": "work", "poll_quota": 4096, "deadline_ms": 10000,
+                    "io_bytes": 1024, "memory_bytes": 2048},
+                {"name": "hook", "poll_quota": 8192, "deadline_ms": 20000,
+                    "io_bytes": 2048, "memory_bytes": 4096}
+            ]);
+            Limits {
+                polls: 2048,
+                io_bytes: 256,
+                memory_bytes: 512,
+                deadline_ms: 5000,
+            }
+        } else {
+            declaration["budgets"] = json!([
+                {"name": "service", "poll_quota": 4096, "deadline_ms": 10000,
+                    "io_bytes": 1024, "memory_bytes": 2048},
+                {"name": "work", "poll_quota": 1024, "deadline_ms": 20000,
+                    "io_bytes": 512, "memory_bytes": 4096},
+                {"name": "hook", "poll_quota": 2048, "deadline_ms": 5000,
+                    "io_bytes": 2048, "memory_bytes": 256}
+            ]);
+            Limits {
+                polls: 1024,
+                io_bytes: 128,
+                memory_bytes: 256,
+                deadline_ms: 5000,
+            }
+        };
+        declaration["slo_hooks"] = json!(
+            UNITS
+                .into_iter()
+                .enumerate()
+                .map(|(index, target)| json!({
+                    "name": format!("policy_{index}"), "kind": "latency",
+                    "target": target, "budget": "hook"
+                }))
+                .collect::<Vec<_>>()
+        );
+        (declaration, limits)
+    }
+
+    async fn all_work_scenario(cx: Cx, service_stricter: bool) {
+        let mut parent_spec = ChildRegionSpec::inherit()
+            .with_budget(Budget::INFINITE.with_poll_quota(8192).with_cost_quota(96));
+        parent_spec.capability_budget = Some(
+            CapabilityBudget::new()
+                .with_io_bytes(if service_stricter { 768 } else { 128 })
+                .with_memory_bytes(8192),
+        );
+        let parent = cx.open_child_region(parent_spec).await.unwrap();
+        let (declaration, limits) = manifest(service_stricter);
+        let visits = Arc::new(Visits::default());
+        let policies = Arc::new(AtomicUsize::new(0));
+        let mut adapters = ManagedAppAdapters::new();
+        for (index, target) in UNITS.into_iter().enumerate() {
+            let policies = Arc::clone(&policies);
+            adapters = adapters.slo_hook(ManagedAppSloBinding::new(
+                format!("policy_{index}"),
+                AppSloHookKindV1::Latency,
+                target,
+                move |_, admission| {
+                    limits.assert_admission(admission);
+                    policies.fetch_add(1, Ordering::AcqRel);
+                    ManagedAppSloDecision::Admit(Budget::INFINITE.with_cost_quota(11))
+                },
+            ));
+        }
+        let route_visits = Arc::clone(&visits);
+        let worker_visits = Arc::clone(&visits);
+        let actor_visits = Arc::clone(&visits);
+        let signal_visits = Arc::clone(&visits);
+        let (signals, receiver) = mpsc::channel(1);
+        let (actor, mut publication) = ManagedAppBinding::<()>::actor(
+            "api.actor.cache",
+            ManagedRestartMode::Temporary,
+            move |cx: Cx, _: ManagedGeneration| {
+                limits.assert_cx(&cx);
+                BudgetActor {
+                    limits,
+                    visits: Arc::clone(&actor_visits),
+                }
+            },
+        );
+        let app = parse(declaration)
+            .bind_managed_with_adapters(
+                vec![
+                    ManagedAppBinding::route(
+                        "api.route.health",
+                        AsyncCxFnHandler::new(move |cx: Cx| {
+                            limits.assert_cx(&cx);
+                            let visits = Arc::clone(&route_visits);
+                            async move {
+                                yield_now().await;
+                                limits.assert_cx(&cx);
+                                visits.route.fetch_add(1, Ordering::AcqRel);
+                                Response::new(StatusCode::OK, "service budget enforced")
+                            }
+                        }),
+                    ),
+                    actor,
+                    ManagedAppBinding::worker(
+                        "api.job.startup",
+                        ManagedRestartMode::Temporary,
+                        move |cx: Cx, _: ManagedGeneration| {
+                            limits.assert_cx(&cx);
+                            let visits = Arc::clone(&worker_visits);
+                            async move {
+                                yield_now().await;
+                                limits.assert_cx(&cx);
+                                visits.worker.fetch_add(1, Ordering::AcqRel);
+                                visits.changed.notify_waiters();
+                                Outcome::<(), ()>::Ok(())
+                            }
+                        },
+                    ),
+                    ManagedAppBinding::signal_worker(
+                        "api.job.reload",
+                        "reload",
+                        receiver,
+                        ManagedRestartMode::Temporary,
+                        move |cx: Cx, _: ManagedGeneration| {
+                            limits.assert_cx(&cx);
+                            let visits = Arc::clone(&signal_visits);
+                            async move {
+                                yield_now().await;
+                                limits.assert_cx(&cx);
+                                visits.signal.fetch_add(1, Ordering::AcqRel);
+                                visits.changed.notify_waiters();
+                                Outcome::<(), ()>::Ok(())
+                            }
+                        },
+                    ),
+                ],
+                adapters,
+                config(),
+            )
+            .unwrap();
+        let router = app.router();
+        let mut app = app.start(parent.cx()).unwrap();
+        while !app.routes_ready() {
+            yield_now().await;
+        }
+        let actor = loop {
+            if let Some(generation) = publication.borrow_and_update_clone() {
+                break generation.actor;
+            }
+            publication.changed(&cx).await.unwrap();
+        };
+        let response = router
+            .handle_with_cx(&cx, Request::new("GET", "/health"))
+            .await;
+        assert_eq!(response.status, StatusCode::OK);
+        assert!(matches!(actor.send(&cx, ()).await, Outcome::Ok(())));
+        for _ in 0..2 {
+            signals.send_checked(&cx, ()).await.unwrap();
+        }
+        visits
+            .changed
+            .wait_until(|| {
+                visits.actor.load(Ordering::Acquire) == 1
+                    && visits.worker.load(Ordering::Acquire) == 1
+                    && visits.signal.load(Ordering::Acquire) == 2
+            })
+            .await;
+        assert_eq!(visits.route.load(Ordering::Acquire), 1);
+        assert_eq!(policies.load(Ordering::Acquire), 5);
+        app.abort();
+        let report = app.join().await.unwrap();
+        assert_eq!(report.started, report.joined);
+        assert!(matches!(report.outcome, Outcome::Cancelled(_)));
+        assert!(publication.borrow_and_clone().is_none());
+        parent.close().await.unwrap();
+        assert!(!cx.is_cancel_requested());
+    }
+
+    #[test]
+    fn managed_service_budgets_meet_child_owner_and_slo_limits_for_all_work() {
+        for workers in [1, 2] {
+            for service_stricter in [false, true] {
+                native(workers, move |cx| all_work_scenario(cx, service_stricter));
+            }
+        }
+    }
+
+    #[test]
+    fn managed_service_budgets_validate_both_named_presets_before_factory() {
+        for invalid_name in ["service", "work"] {
+            for (field, value) in [
+                ("poll_quota", json!(0)),
+                ("poll_quota", json!(u64::from(u32::MAX) + 1)),
+                ("deadline_ms", json!(0)),
+                ("io_bytes", json!(0)),
+                ("memory_bytes", json!(0)),
+            ] {
+                let mut declaration = manifest_json();
+                declaration["services"][0]["routes"] = json!([]);
+                declaration["services"][0]["budget"] = json!("service");
+                declaration["budgets"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({"name": "service", "poll_quota": 32}));
+                let index = if invalid_name == "service" { 1 } else { 0 };
+                declaration["budgets"][index][field] = value;
+                let calls = Arc::new(AtomicUsize::new(0));
+                let factory_calls = Arc::clone(&calls);
+                let error = parse(declaration)
+                    .bind_managed(
+                        vec![ManagedAppBinding::worker(
+                            "api.actor.cache",
+                            ManagedRestartMode::Temporary,
+                            move |_: Cx, _: ManagedGeneration| {
+                                factory_calls.fetch_add(1, Ordering::AcqRel);
+                                async { Outcome::<(), ()>::Ok(()) }
+                            },
+                        )],
+                        config(),
+                    )
+                    .err()
+                    .expect("both service and child execution limits are validated");
+                assert!(matches!(
+                    error,
+                    ManagedAppBindError::Budget { name, .. } if name == invalid_name
+                ));
+                assert_eq!(calls.load(Ordering::Acquire), 0);
+            }
+        }
+    }
+
+    async fn parked_deadline_scenario(cx: Cx) {
+        let mut declaration = manifest_json();
+        declaration["services"][0]["routes"] = json!([]);
+        declaration["services"][0]["budget"] = json!("service");
+        declaration["budgets"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"name": "service", "deadline_ms": 500}));
+        let parked = Arc::new(AtomicBool::new(false));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let work_parked = Arc::clone(&parked);
+        let work_cancelled = Arc::clone(&cancelled);
+        let app = parse(declaration)
+            .bind_managed(
+                vec![ManagedAppBinding::worker(
+                    "api.actor.cache",
+                    ManagedRestartMode::Temporary,
+                    move |cx: Cx, _: ManagedGeneration| {
+                        assert!(cx.budget().deadline.is_some());
+                        assert!(cx.timer_driver().is_none(), "work declared Pure authority");
+                        let parked = Arc::clone(&work_parked);
+                        let cancelled = Arc::clone(&work_cancelled);
+                        async move {
+                            // The explicit child preset has no deadline and the
+                            // workload owns no timer or self-wake. The service
+                            // ceiling must wake this actual Pending wait.
+                            let mut wait = std::pin::pin!(cx.cancelled());
+                            poll_fn(|task| {
+                                let result = wait.as_mut().poll(task);
+                                if result.is_pending() {
+                                    parked.store(true, Ordering::Release);
+                                }
+                                result
+                            })
+                            .await;
+                            assert!(cx.checkpoint().is_err());
+                            let reason = cx.cancel_reason().unwrap();
+                            assert_eq!(reason.kind, CancelKind::Deadline);
+                            cancelled.store(true, Ordering::Release);
+                            Outcome::<(), ()>::Cancelled(reason)
+                        }
+                    },
+                )],
+                config(),
+            )
+            .unwrap();
+        let report = app.run(&cx).await.unwrap();
+        assert!(parked.load(Ordering::Acquire));
+        assert!(cancelled.load(Ordering::Acquire));
+        assert_eq!(report.started, 1);
+        assert_eq!(report.joined, 1);
+        assert_eq!(report.restart_batches, 0);
+    }
+
+    #[test]
+    fn managed_service_deadline_wakes_parked_work_with_an_explicit_child_preset() {
+        for workers in [1, 2] {
+            native(workers, parked_deadline_scenario);
+        }
+    }
+}
