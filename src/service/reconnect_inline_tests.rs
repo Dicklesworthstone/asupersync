@@ -831,9 +831,7 @@ fn reconnect_layer_applies() {
 fn reconnect_future_debug() {
     let fut: ReconnectFuture<_, std::io::Error, std::io::Error> = ReconnectFuture::inner(
         std::future::ready(Ok::<i32, std::io::Error>(42)),
-        Arc::new(AtomicBool::new(false)),
-        Arc::new(AtomicU64::new(0)),
-        0,
+        Arc::new(ReconnectSignal::new()),
     );
     let dbg = format!("{fut:?}");
     assert!(dbg.contains("ReconnectFuture"));
@@ -925,4 +923,553 @@ fn reconnect_error_second_poll_fails_closed_and_refresh_still_applies() {
     assert_eq!(rc.reconnect_count(), 1);
 
     crate::test_complete!("reconnect_error_second_poll_fails_closed_and_refresh_still_applies");
+}
+
+// Readiness recovery is part of the service contract, independent of whether
+// the failed request and its next readiness waiter run on the same task.
+type ReadinessFaultFuture =
+    Pin<Box<dyn Future<Output = Result<u32, ReconnectingCallError>> + Send>>;
+
+struct ReadinessFaultService {
+    id: u32,
+    ready: bool,
+    failure: ManualCallController,
+    calls: Arc<AtomicU32>,
+    releases: Arc<AtomicU32>,
+    before_ready: Option<Box<dyn FnOnce() + Send>>,
+}
+
+impl fmt::Debug for ReadinessFaultService {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ReadinessFaultService")
+            .field("id", &self.id)
+            .field("ready", &self.ready)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug)]
+struct ReadinessFaultMaker {
+    next_id: AtomicU32,
+    calls: Arc<AtomicU32>,
+    releases: Arc<AtomicU32>,
+}
+
+impl MakeService for ReadinessFaultMaker {
+    type Service = ReadinessFaultService;
+    type Error = ScriptedMakerError;
+
+    fn make_service(&self) -> Result<Self::Service, Self::Error> {
+        Ok(ReadinessFaultService {
+            id: self.next_id.fetch_add(1, Ordering::SeqCst),
+            ready: true,
+            failure: ManualCallController::new(),
+            calls: Arc::clone(&self.calls),
+            releases: Arc::clone(&self.releases),
+            before_ready: None,
+        })
+    }
+}
+
+impl Service<u8> for ReadinessFaultService {
+    type Response = u32;
+    type Error = ReconnectingCallError;
+    type Future = ReadinessFaultFuture;
+
+    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        if let Some(before_ready) = self.before_ready.take() {
+            before_ready();
+        }
+        if self.ready {
+            Poll::Ready(Ok(()))
+        } else {
+            // This instance never recovers on its own. Reconnect must wake
+            // its own waiter when an outstanding request reports failure.
+            Poll::Pending
+        }
+    }
+
+    fn call(&mut self, request: u8) -> Self::Future {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if request == 0 {
+            return Box::pin(std::future::ready(Ok(self.id)));
+        }
+        self.ready = false;
+        let failure = self.failure.future();
+        Box::pin(async move {
+            let result = failure.await;
+            assert_ne!(request, 2, "parked reconnect call panic");
+            result
+        })
+    }
+
+    fn release_readiness(&mut self) -> super::super::ReadinessRelease {
+        let releases = Arc::clone(&self.releases);
+        super::super::ReadinessRelease::new(move || {
+            releases.fetch_add(1, Ordering::SeqCst);
+        })
+    }
+}
+
+fn readiness_fault_reconnect() -> (Reconnect<ReadinessFaultMaker>, ManualCallController) {
+    let failure = ManualCallController::new();
+    let calls = Arc::new(AtomicU32::new(0));
+    let releases = Arc::new(AtomicU32::new(0));
+    let initial = ReadinessFaultService {
+        id: 0,
+        ready: true,
+        failure: failure.clone(),
+        calls: Arc::clone(&calls),
+        releases: Arc::clone(&releases),
+        before_ready: None,
+    };
+    let maker = ReadinessFaultMaker {
+        next_id: AtomicU32::new(1),
+        calls,
+        releases,
+    };
+    (Reconnect::new(maker, initial), failure)
+}
+
+fn poll_reconnect_future<F: Future + Unpin>(future: &mut F) -> Poll<F::Output> {
+    Pin::new(future).poll(&mut Context::from_waker(Waker::noop()))
+}
+
+struct ReconnectReadinessWake {
+    wakes: Arc<AtomicU32>,
+    drops: Arc<AtomicU32>,
+    outer_lock: Option<Arc<Mutex<()>>>,
+    forward: Option<Waker>,
+    panic_on_wake: bool,
+}
+
+impl ReconnectReadinessWake {
+    fn check_unlocked(&self) {
+        if let Some(outer_lock) = &self.outer_lock {
+            assert!(
+                outer_lock.try_lock().is_ok(),
+                "readiness callback ran under the shared service lock"
+            );
+        }
+    }
+}
+
+impl std::task::Wake for ReconnectReadinessWake {
+    fn wake(self: Arc<Self>) {
+        Self::wake_by_ref(&self);
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.check_unlocked();
+        self.wakes.fetch_add(1, Ordering::SeqCst);
+        if let Some(forward) = &self.forward {
+            forward.wake_by_ref();
+        }
+        assert!(!self.panic_on_wake, "secondary readiness wake panic");
+    }
+}
+
+impl Drop for ReconnectReadinessWake {
+    fn drop(&mut self) {
+        self.check_unlocked();
+        self.drops.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+fn readiness_probe(
+    wakes: &Arc<AtomicU32>,
+    drops: &Arc<AtomicU32>,
+    outer_lock: Option<Arc<Mutex<()>>>,
+) -> Waker {
+    Waker::from(Arc::new(ReconnectReadinessWake {
+        wakes: Arc::clone(wakes),
+        drops: Arc::clone(drops),
+        outer_lock,
+        forward: None,
+        panic_on_wake: false,
+    }))
+}
+
+#[test]
+fn reconnect_failure_invalidates_an_already_granted_ready_window() {
+    let (mut reconnect, failure) = readiness_fault_reconnect();
+    let mut cx = Context::from_waker(Waker::noop());
+    assert!(matches!(reconnect.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+    let mut first = reconnect.call(1);
+    assert!(poll_reconnect_future(&mut first).is_pending());
+
+    reconnect.inner_mut().unwrap().ready = true;
+    assert!(matches!(reconnect.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+    failure.fail();
+    assert!(matches!(
+        poll_reconnect_future(&mut first),
+        Poll::Ready(Err(ReconnectError::Inner(ReconnectingCallError)))
+    ));
+    assert!(matches!(
+        poll_reconnect_future(&mut reconnect.call(0)),
+        Poll::Ready(Err(ReconnectError::NotReady))
+    ));
+    assert_eq!(
+        reconnect.maker().calls.load(Ordering::SeqCst),
+        1,
+        "the invalidated request must not reach the failed instance"
+    );
+    assert_eq!(reconnect.maker().releases.load(Ordering::SeqCst), 1);
+
+    assert!(matches!(reconnect.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+    assert!(matches!(
+        poll_reconnect_future(&mut reconnect.call(0)),
+        Poll::Ready(Ok(1))
+    ));
+    assert_eq!(reconnect.reconnect_count(), 1);
+}
+
+#[test]
+fn reconnect_failure_during_inner_readiness_cannot_lose_its_wake() {
+    for inner_ready in [false, true] {
+        let (mut reconnect, failure) = readiness_fault_reconnect();
+        assert!(matches!(
+            reconnect.poll_ready(&mut Context::from_waker(Waker::noop())),
+            Poll::Ready(Ok(()))
+        ));
+        let mut first = reconnect.call(1);
+        assert!(poll_reconnect_future(&mut first).is_pending());
+        failure.fail();
+        let inner = reconnect.inner_mut().unwrap();
+        inner.ready = inner_ready;
+        inner.before_ready = Some(Box::new(move || {
+            assert!(matches!(
+                poll_reconnect_future(&mut first),
+                Poll::Ready(Err(ReconnectError::Inner(ReconnectingCallError)))
+            ));
+        }));
+
+        let wakes = Arc::new(AtomicU32::new(0));
+        let drops = Arc::new(AtomicU32::new(0));
+        let waker = readiness_probe(&wakes, &drops, None);
+        assert!(reconnect
+            .poll_ready(&mut Context::from_waker(&waker))
+            .is_pending());
+        assert_eq!(
+            wakes.load(Ordering::SeqCst),
+            1,
+            "failure before registration must still request the retry poll"
+        );
+        assert_eq!(
+            reconnect.maker().releases.load(Ordering::SeqCst),
+            u32::from(inner_ready)
+        );
+        assert!(matches!(
+            reconnect.poll_ready(&mut Context::from_waker(&waker)),
+            Poll::Ready(Ok(()))
+        ));
+        assert_eq!(reconnect.reconnect_count(), 1);
+        assert!(matches!(
+            poll_reconnect_future(&mut reconnect.call(0)),
+            Poll::Ready(Ok(1))
+        ));
+        drop(waker);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[test]
+fn reconnect_replaces_releases_and_drops_readiness_wakers_after_unlock() {
+    use super::super::service::ReadinessReleaseScope;
+
+    let (mut reconnect, failure) = readiness_fault_reconnect();
+    assert!(matches!(
+        reconnect.poll_ready(&mut Context::from_waker(Waker::noop())),
+        Poll::Ready(Ok(()))
+    ));
+    let mut first = reconnect.call(1);
+    assert!(poll_reconnect_future(&mut first).is_pending());
+
+    let outer = Arc::new(Mutex::new(()));
+    let wakes = Arc::new(AtomicU32::new(0));
+    let drops = Arc::new(AtomicU32::new(0));
+    let old = readiness_probe(&wakes, &drops, Some(Arc::clone(&outer)));
+    assert!(reconnect
+        .poll_ready(&mut Context::from_waker(&old))
+        .is_pending());
+    drop(old);
+
+    let next = readiness_probe(&wakes, &drops, Some(Arc::clone(&outer)));
+    let scope = ReadinessReleaseScope::new();
+    let locked = outer.lock().unwrap();
+    assert!(reconnect
+        .poll_ready(&mut Context::from_waker(&next))
+        .is_pending());
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+    drop(locked);
+    drop(scope);
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+    drop(next);
+
+    let scope = ReadinessReleaseScope::new();
+    let locked = outer.lock().unwrap();
+    failure.fail();
+    assert!(matches!(
+        poll_reconnect_future(&mut first),
+        Poll::Ready(Err(ReconnectError::Inner(ReconnectingCallError)))
+    ));
+    assert_eq!(wakes.load(Ordering::SeqCst), 0);
+    drop(locked);
+    drop(scope);
+    assert_eq!(wakes.load(Ordering::SeqCst), 1);
+    assert_eq!(drops.load(Ordering::SeqCst), 2);
+
+    for drop_service in [false, true] {
+        let (mut retained, _) = readiness_fault_reconnect();
+        assert!(matches!(
+            retained.poll_ready(&mut Context::from_waker(Waker::noop())),
+            Poll::Ready(Ok(()))
+        ));
+        let active = retained.call(1);
+        let waker = readiness_probe(&wakes, &drops, Some(Arc::clone(&outer)));
+        assert!(retained
+            .poll_ready(&mut Context::from_waker(&waker))
+            .is_pending());
+        drop(waker);
+        let before = drops.load(Ordering::SeqCst);
+        let scope = ReadinessReleaseScope::new();
+        let locked = outer.lock().unwrap();
+        if drop_service {
+            drop(retained);
+        } else {
+            drop(retained.release_readiness());
+        }
+        assert_eq!(drops.load(Ordering::SeqCst), before);
+        drop(locked);
+        drop(scope);
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            before + 1,
+            "an in-flight call must not retain abandoned readiness ownership"
+        );
+        drop(active);
+    }
+}
+
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn reconnect_fault_from_retired_instance_cannot_wake_its_replacement() {
+    for panics in [false, true] {
+        let (mut reconnect, failure) = readiness_fault_reconnect();
+        assert!(matches!(
+            reconnect.poll_ready(&mut Context::from_waker(Waker::noop())),
+            Poll::Ready(Ok(()))
+        ));
+        let mut first = reconnect.call(if panics { 2 } else { 1 });
+        assert!(poll_reconnect_future(&mut first).is_pending());
+
+        reconnect.reconnect().unwrap();
+        reconnect.inner_mut().unwrap().ready = false;
+        let wakes = Arc::new(AtomicU32::new(0));
+        let drops = Arc::new(AtomicU32::new(0));
+        let waker = readiness_probe(&wakes, &drops, None);
+        assert!(reconnect
+            .poll_ready(&mut Context::from_waker(&waker))
+            .is_pending());
+
+        std::thread::spawn(move || {
+            failure.fail();
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                poll_reconnect_future(&mut first)
+            }));
+            if panics {
+                assert!(outcome.is_err());
+            } else {
+                assert!(matches!(
+                    outcome.unwrap(),
+                    Poll::Ready(Err(ReconnectError::Inner(ReconnectingCallError)))
+                ));
+            }
+        })
+        .join()
+        .unwrap();
+
+        assert_eq!(wakes.load(Ordering::SeqCst), 0);
+        reconnect.inner_mut().unwrap().ready = true;
+        assert!(matches!(
+            reconnect.poll_ready(&mut Context::from_waker(&waker)),
+            Poll::Ready(Ok(()))
+        ));
+        assert_eq!(reconnect.reconnect_count(), 1);
+        assert!(matches!(
+            poll_reconnect_future(&mut reconnect.call(0)),
+            Poll::Ready(Ok(1))
+        ));
+        drop(waker);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[test]
+fn reconnect_preserves_the_original_poll_panic_when_readiness_wake_panics() {
+    let (mut reconnect, failure) = readiness_fault_reconnect();
+    assert!(matches!(
+        reconnect.poll_ready(&mut Context::from_waker(Waker::noop())),
+        Poll::Ready(Ok(()))
+    ));
+    let mut first = reconnect.call(2);
+    assert!(poll_reconnect_future(&mut first).is_pending());
+    let wakes = Arc::new(AtomicU32::new(0));
+    let drops = Arc::new(AtomicU32::new(0));
+    let waker = Waker::from(Arc::new(ReconnectReadinessWake {
+        wakes: Arc::clone(&wakes),
+        drops: Arc::clone(&drops),
+        outer_lock: None,
+        forward: None,
+        panic_on_wake: true,
+    }));
+    assert!(reconnect
+        .poll_ready(&mut Context::from_waker(&waker))
+        .is_pending());
+    failure.fail();
+    let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        poll_reconnect_future(&mut first)
+    }))
+    .expect_err("the original poll panic must propagate");
+    let message = payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&str>().copied())
+        .unwrap();
+    assert!(message.contains("parked reconnect call panic"));
+    assert_eq!(wakes.load(Ordering::SeqCst), 1);
+    drop(waker);
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        reconnect.poll_ready(&mut Context::from_waker(Waker::noop())),
+        Poll::Ready(Ok(()))
+    ));
+    assert_eq!(reconnect.reconnect_count(), 1);
+}
+
+#[test]
+fn reconnect_public_auto_traits_remain_available() {
+    fn check<T: Send + Sync + Unpin + std::panic::UnwindSafe + std::panic::RefUnwindSafe>() {}
+    check::<Reconnect<CountingReconnectMaker>>();
+    check::<ReconnectFuture<std::future::Ready<Result<u8, ()>>, (), ()>>();
+}
+
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn native_reconnect_call_failure_wakes_parked_readiness() {
+    use super::super::ServiceExt;
+    use crate::runtime::{RootDrainOutcome, RuntimeBuilder};
+    use std::time::Duration;
+
+    for workers in [1, 2] {
+        for panics in [false, true] {
+            let runtime = if workers == 1 {
+                RuntimeBuilder::current_thread()
+            } else {
+                RuntimeBuilder::new().worker_threads(workers)
+            }
+            .build()
+            .unwrap();
+            let wakes = Arc::new(AtomicU32::new(0));
+            let drops = Arc::new(AtomicU32::new(0));
+            let created = Arc::new(AtomicU32::new(0));
+            runtime.block_on(async {
+                let cx = crate::cx::Cx::current().unwrap();
+                let (mut reconnect, failure) = readiness_fault_reconnect();
+                assert!(matches!(
+                    reconnect.poll_ready(&mut Context::from_waker(Waker::noop())),
+                    Poll::Ready(Ok(()))
+                ));
+                let mut first = reconnect.call(if panics { 2 } else { 1 });
+                assert!(poll_reconnect_future(&mut first).is_pending());
+
+                let child_wakes = Arc::clone(&wakes);
+                let child_drops = Arc::clone(&drops);
+                let child_created = Arc::clone(&created);
+                let (parked, mut witness) = crate::channel::oneshot::channel();
+                let mut waiter = cx
+                    .spawn(move |child| async move {
+                        let mut readiness = Box::pin(reconnect.ready());
+                        let mut parked = Some(parked);
+                        crate::time::timeout(child.now(), Duration::from_secs(5), async {
+                            std::future::poll_fn(|task| {
+                                child_created.fetch_add(1, Ordering::SeqCst);
+                                let relay = Waker::from(Arc::new(ReconnectReadinessWake {
+                                    wakes: Arc::clone(&child_wakes),
+                                    drops: Arc::clone(&child_drops),
+                                    outer_lock: None,
+                                    forward: Some(task.waker().clone()),
+                                    panic_on_wake: false,
+                                }));
+                                let result = readiness
+                                    .as_mut()
+                                    .poll(&mut Context::from_waker(&relay));
+                                if result.is_pending() {
+                                    if let Some(parked) = parked.take() {
+                                        parked.send_blocking(()).unwrap();
+                                    }
+                                }
+                                result
+                            })
+                            .await
+                        })
+                        .await
+                        .expect("the failed call must wake the parked readiness task")
+                        .unwrap();
+                        drop(readiness);
+                        let response = reconnect.call(0).await.unwrap();
+                        assert_eq!(reconnect.maker().calls.load(Ordering::SeqCst), 2);
+                        (response, reconnect.reconnect_count())
+                    })
+                    .unwrap();
+                crate::time::timeout(cx.now(), Duration::from_secs(5), witness.recv(&cx))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(wakes.load(Ordering::SeqCst), 0);
+                let mut complete = move || {
+                    failure.fail();
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        poll_reconnect_future(&mut first)
+                    }));
+                    if panics {
+                        assert!(result.is_err());
+                    } else {
+                        assert!(matches!(
+                            result.unwrap(),
+                            Poll::Ready(Err(ReconnectError::Inner(ReconnectingCallError)))
+                        ));
+                    }
+                };
+                if workers == 1 {
+                    complete();
+                } else {
+                    std::thread::spawn(complete).join().unwrap();
+                }
+                assert!(
+                    wakes.load(Ordering::SeqCst) > 0,
+                    "the failed call emitted a real readiness notification"
+                );
+                assert_eq!(waiter.join(&cx).await.unwrap(), (1, 1));
+            });
+            let drained = runtime.shutdown_drained(Duration::from_secs(5));
+            assert_eq!(drained.outcome, RootDrainOutcome::Quiescent, "{drained:?}");
+            assert_eq!(
+                (
+                    drained.live_tasks,
+                    drained.live_regions,
+                    drained.pending_obligations,
+                    drained.pending_spawns,
+                    drained.queued_finalizers,
+                ),
+                (0, 0, 0, 0, 0)
+            );
+            assert!(!drained.has_pending_obligation_posts);
+            assert_eq!(
+                drops.load(Ordering::SeqCst),
+                created.load(Ordering::SeqCst),
+                "no readiness relay retains a retired native task"
+            );
+        }
+    }
 }

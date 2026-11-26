@@ -8,12 +8,12 @@
 //! stateful services that can drop and need re-establishment.
 
 use super::{Layer, Service};
-use crate::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicBool, Ordering};
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Poll};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::task::{Context, Poll, Waker};
 
 // ─── MakeService trait ────────────────────────────────────────────────────
 
@@ -107,11 +107,15 @@ impl<E: std::error::Error + 'static, M: std::error::Error + 'static> std::error:
 /// a new service instance is created from the maker.
 ///
 /// Each successful `poll_ready` authorizes exactly one subsequent `call`.
+/// A failure from an outstanding call invalidates that authorization and wakes
+/// any pending readiness wait. Failures belong to the service instance that
+/// produced the call; they cannot invalidate a replacement instance.
 pub struct Reconnect<M: MakeService> {
     maker: M,
     inner: Option<M::Service>,
-    refresh_pending: Arc<AtomicBool>,
-    service_epoch: Arc<AtomicU64>,
+    signal: Arc<ReconnectSignal>,
+    // Diagnostic only; generation identity is the retained signal allocation.
+    service_epoch: u64,
     ready_observed: bool,
     /// Number of successful reconnections.
     successes: u64,
@@ -126,8 +130,8 @@ impl<M: MakeService> Reconnect<M> {
         Self {
             maker,
             inner: Some(initial),
-            refresh_pending: Arc::new(AtomicBool::new(false)),
-            service_epoch: Arc::new(AtomicU64::new(1)),
+            signal: Arc::new(ReconnectSignal::new()),
+            service_epoch: 1,
             ready_observed: false,
             successes: 0,
             failures: 0,
@@ -140,8 +144,8 @@ impl<M: MakeService> Reconnect<M> {
         Self {
             maker,
             inner: None,
-            refresh_pending: Arc::new(AtomicBool::new(false)),
-            service_epoch: Arc::new(AtomicU64::new(0)),
+            signal: Arc::new(ReconnectSignal::new()),
+            service_epoch: 0,
             ready_observed: false,
             successes: 0,
             failures: 0,
@@ -154,11 +158,13 @@ impl<M: MakeService> Reconnect<M> {
     pub fn reconnect(&mut self) -> Result<(), M::Error> {
         match self.maker.make_service() {
             Ok(svc) => {
-                self.inner = Some(svc);
-                self.refresh_pending.store(false, Ordering::Release);
-                self.service_epoch.fetch_add(1, Ordering::AcqRel);
+                let release = self.replace_signal();
+                let previous = self.inner.replace(svc);
+                self.service_epoch = self.service_epoch.wrapping_add(1);
                 self.ready_observed = false;
                 self.successes += 1;
+                drop(previous);
+                drop(release);
                 Ok(())
             }
             Err(e) => {
@@ -209,13 +215,28 @@ impl<M: MakeService> Reconnect<M> {
         self.invalidate_inner();
     }
 
+    fn replace_signal(&mut self) -> super::ReadinessRelease {
+        let previous = std::mem::replace(&mut self.signal, Arc::new(ReconnectSignal::new()));
+        previous.release_readiness()
+    }
+
     fn invalidate_inner(&mut self) {
-        let had_inner = self.inner.take().is_some();
-        self.refresh_pending.store(false, Ordering::Release);
+        let previous = self.inner.take();
+        let release = self.replace_signal();
         self.ready_observed = false;
-        if had_inner {
-            self.service_epoch.fetch_add(1, Ordering::AcqRel);
+        if previous.is_some() {
+            self.service_epoch = self.service_epoch.wrapping_add(1);
         }
+        drop(previous);
+        drop(release);
+    }
+}
+
+impl<M: MakeService> Drop for Reconnect<M> {
+    fn drop(&mut self) {
+        // In-flight calls can retain the signal after the service is gone.
+        // They must not retain the abandoned readiness task's waker as well.
+        drop(self.signal.release_readiness());
     }
 }
 
@@ -223,11 +244,8 @@ impl<M: MakeService> fmt::Debug for Reconnect<M> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Reconnect")
             .field("connected", &self.inner.is_some())
-            .field(
-                "reconnect_pending",
-                &self.refresh_pending.load(Ordering::Relaxed),
-            )
-            .field("service_epoch", &self.service_epoch.load(Ordering::Relaxed))
+            .field("reconnect_pending", &self.signal.failed())
+            .field("service_epoch", &self.service_epoch)
             .field("ready_observed", &self.ready_observed)
             .field("successes", &self.successes)
             .field("failures", &self.failures)
@@ -236,19 +254,90 @@ impl<M: MakeService> fmt::Debug for Reconnect<M> {
     }
 }
 
+/// One retained identity per service instance. A completed call can only
+/// signal its own instance, even if replacement races with its completion.
+struct ReconnectSignal {
+    failed: AtomicBool,
+    readiness: Mutex<Option<Waker>>,
+}
+
+impl ReconnectSignal {
+    const fn new() -> Self {
+        Self {
+            failed: AtomicBool::new(false),
+            readiness: Mutex::new(None),
+        }
+    }
+
+    fn failed(&self) -> bool {
+        self.failed.load(Ordering::Acquire)
+    }
+
+    fn register_readiness(&self, waker: &Waker) {
+        let already_registered = self
+            .readiness
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|registered| registered.will_wake(waker));
+        if !already_registered {
+            // RawWaker clone/drop callbacks must not run under the slot lock.
+            let replacement = waker.clone();
+            let previous = self
+                .readiness
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .replace(replacement);
+            if let Some(previous) = previous {
+                drop(super::ReadinessRelease::new(move || drop(previous)));
+            }
+        }
+        // A failure may have arrived before the waiter was installed. Pairing
+        // this check with request_refresh's publication closes that lost wake.
+        if self.failed() {
+            self.wake_readiness();
+        }
+    }
+
+    fn release_readiness(&self) -> super::ReadinessRelease {
+        let waker = self
+            .readiness
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        waker.map_or_else(super::ReadinessRelease::default, |waker| {
+            super::ReadinessRelease::new(move || drop(waker))
+        })
+    }
+
+    fn wake_readiness(&self) {
+        let waker = self
+            .readiness
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(waker) = waker {
+            // Shared adapters may still hold their service mutex. Use their
+            // existing cleanup scope to notify only after those locks retire.
+            drop(super::ReadinessRelease::new(move || waker.wake()));
+        }
+    }
+
+    fn request_refresh(&self) {
+        self.failed.store(true, Ordering::Release);
+        self.wake_readiness();
+    }
+}
+
 struct RefreshPendingGuard<'a> {
-    refresh_pending: &'a AtomicBool,
-    service_epoch: &'a AtomicU64,
-    call_epoch: u64,
+    signal: &'a ReconnectSignal,
     armed: bool,
 }
 
 impl<'a> RefreshPendingGuard<'a> {
-    fn new(refresh_pending: &'a AtomicBool, service_epoch: &'a AtomicU64, call_epoch: u64) -> Self {
+    fn new(signal: &'a ReconnectSignal) -> Self {
         Self {
-            refresh_pending,
-            service_epoch,
-            call_epoch,
+            signal,
             armed: true,
         }
     }
@@ -260,8 +349,8 @@ impl<'a> RefreshPendingGuard<'a> {
 
 impl Drop for RefreshPendingGuard<'_> {
     fn drop(&mut self) {
-        if self.armed && self.service_epoch.load(Ordering::Acquire) == self.call_epoch {
-            self.refresh_pending.store(true, Ordering::Release);
+        if self.armed {
+            self.signal.request_refresh();
         }
     }
 }
@@ -284,14 +373,16 @@ where
 
     fn release_readiness(&mut self) -> super::ReadinessRelease {
         self.ready_observed = false;
-        self.inner.as_mut().map_or_else(
+        let outer = self.signal.release_readiness();
+        let inner = self.inner.as_mut().map_or_else(
             super::ReadinessRelease::default,
             <M::Service as Service<Request>>::release_readiness,
-        )
+        );
+        super::ReadinessRelease::new(move || drop((inner, outer)))
     }
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        if self.refresh_pending.swap(false, Ordering::AcqRel) {
+        if self.signal.failed() {
             self.invalidate_inner();
         }
 
@@ -309,7 +400,16 @@ where
             .expect("inner must be Some after successful reconnect");
         match svc.poll_ready(cx) {
             Poll::Ready(Ok(())) => {
+                if self.signal.failed() {
+                    // A concurrent call failed while the inner readiness poll
+                    // ran. Relinquish its reservation and retry on a fresh poll.
+                    self.ready_observed = false;
+                    drop(<M::Service as Service<Request>>::release_readiness(svc));
+                    self.signal.register_readiness(cx.waker());
+                    return Poll::Pending;
+                }
                 self.ready_observed = true;
+                drop(self.signal.release_readiness());
                 Poll::Ready(Ok(()))
             }
             Poll::Ready(Err(e)) => {
@@ -320,6 +420,7 @@ where
             }
             Poll::Pending => {
                 self.ready_observed = false;
+                self.signal.register_readiness(cx.waker());
                 Poll::Pending
             }
         }
@@ -330,21 +431,23 @@ where
             return ReconnectFuture::error(ReconnectError::NotReady);
         }
 
-        let call_epoch = self.service_epoch.load(Ordering::Acquire);
+        if self.signal.failed() {
+            // Readiness is a reservation, not a lease on a failed connection.
+            // Do not dispatch a new request after an earlier call invalidated it.
+            let release = <Self as Service<Request>>::release_readiness(self);
+            self.invalidate_inner();
+            drop(release);
+            return ReconnectFuture::error(ReconnectError::NotReady);
+        }
+
         let Some(inner) = self.inner.as_mut() else {
             return ReconnectFuture::error(ReconnectError::NotReady);
         };
 
-        let guard =
-            RefreshPendingGuard::new(&self.refresh_pending, &self.service_epoch, call_epoch);
+        let guard = RefreshPendingGuard::new(&self.signal);
         let fut = inner.call(req);
         guard.defuse();
-        ReconnectFuture::inner(
-            fut,
-            Arc::clone(&self.refresh_pending),
-            Arc::clone(&self.service_epoch),
-            call_epoch,
-        )
+        ReconnectFuture::inner(fut, Arc::clone(&self.signal))
     }
 }
 
@@ -356,28 +459,16 @@ pub struct ReconnectFuture<F, E, ME> {
 enum ReconnectFutureState<F, E, ME> {
     Inner {
         future: F,
-        refresh_pending: Arc<AtomicBool>,
-        service_epoch: Arc<AtomicU64>,
-        call_epoch: u64,
+        signal: Arc<ReconnectSignal>,
     },
     Error(ReconnectError<E, ME>),
     Done,
 }
 
 impl<F, E, ME> ReconnectFuture<F, E, ME> {
-    fn inner(
-        future: F,
-        refresh_pending: Arc<AtomicBool>,
-        service_epoch: Arc<AtomicU64>,
-        call_epoch: u64,
-    ) -> Self {
+    fn inner(future: F, signal: Arc<ReconnectSignal>) -> Self {
         Self {
-            state: ReconnectFutureState::Inner {
-                future,
-                refresh_pending,
-                service_epoch,
-                call_epoch,
-            },
+            state: ReconnectFutureState::Inner { future, signal },
         }
     }
 
@@ -407,13 +498,8 @@ where
         let state = std::mem::replace(&mut this.state, ReconnectFutureState::Done);
 
         match state {
-            ReconnectFutureState::Inner {
-                mut future,
-                refresh_pending,
-                service_epoch,
-                call_epoch,
-            } => {
-                let guard = RefreshPendingGuard::new(&refresh_pending, &service_epoch, call_epoch);
+            ReconnectFutureState::Inner { mut future, signal } => {
+                let guard = RefreshPendingGuard::new(&signal);
                 match Pin::new(&mut future).poll(cx) {
                     Poll::Ready(Ok(value)) => {
                         guard.defuse();
@@ -426,12 +512,7 @@ where
                     }
                     Poll::Pending => {
                         guard.defuse();
-                        this.state = ReconnectFutureState::Inner {
-                            future,
-                            refresh_pending,
-                            service_epoch,
-                            call_epoch,
-                        };
+                        this.state = ReconnectFutureState::Inner { future, signal };
                         Poll::Pending
                     }
                 }
