@@ -85,13 +85,23 @@ impl ScopedCpuAdmission {
     fn acquire<Caps>(
         self: &Arc<Self>,
         cx: &Cx<Caps>,
+        latch: &AtomicBool,
     ) -> Result<ScopedCpuPermit, crate::error::Error> {
         loop {
+            if latch.load(Ordering::Acquire) {
+                return Err(crate::error::Error::new(crate::error::ErrorKind::Cancelled));
+            }
             cx.checkpoint()?;
             let mut in_use = self
                 .in_use
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // A sibling panic drains this scope without cancelling its owner.
+            // Check under the admission lock too: drain publication shares
+            // this lock, so it cannot slip between this check and waiting.
+            if latch.load(Ordering::Acquire) {
+                return Err(crate::error::Error::new(crate::error::ErrorKind::Cancelled));
+            }
             if *in_use < self.limit.load(Ordering::Acquire) {
                 *in_use += 1;
                 return Ok(ScopedCpuPermit {
@@ -104,6 +114,18 @@ impl ScopedCpuAdmission {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             drop(guard);
         }
+    }
+
+    fn request_scope_drain(&self, latch: &AtomicBool) {
+        let in_use = self
+            .in_use
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        latch.store(true, Ordering::Release);
+        drop(in_use);
+        // A draining scope must stop waiting even if unrelated scopes retain
+        // every permit. Wake all scopes; each checks its own latch and budget.
+        self.available.notify_all();
     }
 }
 
@@ -257,7 +279,7 @@ impl<'scope, Caps: Send + Sync + 'static> ScopedCpu<'scope, '_, Caps> {
             self.spawned.fetch_sub(1, Ordering::AcqRel);
             return Err(ScopedCpuError::WorkerCapExceeded { cap: self.cap });
         }
-        let permit = match self.admission.acquire(&self.cx) {
+        let permit = match self.admission.acquire(&self.cx, &self.latch) {
             Ok(permit) => permit,
             Err(error) => {
                 self.spawned.fetch_sub(1, Ordering::AcqRel);
@@ -282,7 +304,7 @@ impl<'scope, Caps: Send + Sync + 'static> ScopedCpu<'scope, '_, Caps> {
         let latch = Arc::clone(&self.latch);
         let panic_box = Arc::clone(&self.panic_box);
         self.scope.spawn(move || {
-            let _permit = permit;
+            let worker_permit = permit;
             let child_cx = CpuCx {
                 cx,
                 latch: Arc::clone(&latch),
@@ -305,8 +327,9 @@ impl<'scope, Caps: Send + Sync + 'static> ScopedCpu<'scope, '_, Caps> {
                 }
                 drop(slot);
                 // Raise the latch so siblings drain at their next
-                // checkpoint (request -> drain -> finalize on panic).
-                latch.store(true, Ordering::Release);
+                // checkpoint and blocked spawn calls stop awaiting capacity
+                // (request -> drain -> finalize on panic).
+                worker_permit.admission.request_scope_drain(&latch);
             }
         });
         Ok(())
@@ -371,7 +394,7 @@ impl<Caps: Send + Sync + 'static> Cx<Caps> {
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&surface))) {
                 Ok(value) => value,
                 Err(payload) => {
-                    latch.store(true, Ordering::Release);
+                    surface.admission.request_scope_drain(&latch);
                     std::panic::resume_unwind(payload);
                 }
             }

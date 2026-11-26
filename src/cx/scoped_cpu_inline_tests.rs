@@ -214,3 +214,174 @@ fn cancelled_scope_refuses_new_worker_ne8jdw() {
         "cancelled scope must not start newly submitted work"
     );
 }
+
+fn wait_for_admission_checkpoints(cx: &Cx, minimum: u64) -> bool {
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while cx.checkpoint_state().checkpoint_count < minimum {
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::yield_now();
+    }
+    true
+}
+
+/// A scope's drain must release its blocked spawn even while another scope
+/// keeps all runtime-wide admission capacity. The owner itself stays healthy.
+#[test]
+fn draining_scope_refuses_waiter_before_unrelated_capacity_is_released() {
+    let admission = Arc::new(ScopedCpuAdmission::new(1));
+    let holder_latch = AtomicBool::new(false);
+    let holder = admission
+        .acquire(&Cx::for_testing(), &holder_latch)
+        .expect("unrelated scope holds the only permit");
+    let cx = Cx::for_testing();
+    let latch = Arc::new(AtomicBool::new(false));
+    let worker_ran = Arc::new(AtomicBool::new(false));
+
+    std::thread::scope(|threads| {
+        let scope = ScopedCpu {
+            scope: threads,
+            cx: cx.clone(),
+            latch: Arc::clone(&latch),
+            panic_box: Arc::new(Mutex::new(None)),
+            spawned: Arc::new(AtomicUsize::new(0)),
+            cap: 1,
+            admission: Arc::clone(&admission),
+        };
+        let ran = Arc::clone(&worker_ran);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let waiter = threads.spawn(move || {
+            let result = scope.spawn(move |_| ran.store(true, Ordering::Release));
+            done_tx
+                .send((result, scope.spawned()))
+                .expect("report waiting spawn");
+        });
+
+        // One spawn checkpoint and two admission checkpoints prove that the
+        // waiter passed the entry check and retried while capacity stayed full.
+        let was_waiting = wait_for_admission_checkpoints(&cx, 3);
+        admission.request_scope_drain(&latch);
+        let stopped_while_full = done_rx.recv_timeout(Duration::from_secs(2));
+        let occupied = *admission.in_use.lock().expect("admission accounting");
+
+        // Release and join before asserting, so the old hanging behavior also
+        // fails cleanly without stranding a test thread.
+        drop(holder);
+        waiter.join().expect("join waiting spawn");
+        assert!(was_waiting, "spawn reached the capacity wait");
+        let (result, spawned) = stopped_while_full
+            .expect("scope drain must not wait for unrelated capacity release");
+        assert!(matches!(result, Err(ScopedCpuError::Cancelled(_))));
+        assert_eq!(spawned, 0, "refused reservation is returned");
+        assert_eq!(occupied, 1, "the unrelated holder is still admitted");
+    });
+
+    assert!(!worker_ran.load(Ordering::Acquire));
+    assert!(!cx.is_cancel_requested(), "scope drain does not cancel its owner");
+    cx.checkpoint().expect("owner remains usable");
+    assert_eq!(*admission.in_use.lock().expect("admission accounting"), 0);
+}
+
+/// A panic payload can own cleanup that waits for the blocked orchestrator.
+/// The failed worker still owns its permit while that payload is being dropped.
+#[test]
+fn sibling_panic_releases_waiting_spawn_before_payload_cleanup() {
+    struct BlockingPanicPayload {
+        entered: std::sync::mpsc::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    }
+
+    impl Drop for BlockingPanicPayload {
+        fn drop(&mut self) {
+            let _ = self.entered.send(());
+            let _ = self.release.recv();
+        }
+    }
+
+    let admission = Arc::new(ScopedCpuAdmission::new(1));
+    let cx = Cx::for_testing();
+    let panic_box = Arc::new(Mutex::new(None));
+    let worker_ran = Arc::new(AtomicBool::new(false));
+    let (panic_tx, panic_rx) = std::sync::mpsc::channel();
+    let (cleanup_tx, cleanup_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+
+    std::thread::scope(|threads| {
+        let scope = ScopedCpu {
+            scope: threads,
+            cx: cx.clone(),
+            latch: Arc::new(AtomicBool::new(false)),
+            panic_box: Arc::clone(&panic_box),
+            spawned: Arc::new(AtomicUsize::new(0)),
+            cap: 2,
+            admission: Arc::clone(&admission),
+        };
+        scope
+            .spawn(move |_| {
+                let _ = panic_rx.recv();
+                std::panic::panic_any(BlockingPanicPayload {
+                    entered: cleanup_tx,
+                    release: release_rx,
+                });
+            })
+            .expect("first worker occupies the runtime permit");
+        let before_wait = cx.checkpoint_state().checkpoint_count;
+        let ran = Arc::clone(&worker_ran);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let waiter = threads.spawn(move || {
+            let result = scope.spawn(move |_| ran.store(true, Ordering::Release));
+            done_tx
+                .send((result, scope.spawned()))
+                .expect("report waiting spawn");
+        });
+
+        let was_waiting = wait_for_admission_checkpoints(&cx, before_wait + 3);
+        let _ = panic_tx.send(());
+        let cleanup_entered = cleanup_rx.recv_timeout(Duration::from_secs(2));
+        let stopped_during_cleanup = done_rx.recv_timeout(Duration::from_secs(2));
+        let occupied = *admission.in_use.lock().expect("admission accounting");
+
+        // Let the failed worker release its permit even when the regression
+        // makes the waiting spawn miss the scope's panic/drain notification.
+        let _ = release_tx.send(());
+        waiter.join().expect("join waiting spawn");
+        assert!(was_waiting, "second spawn waited before its sibling panicked");
+        assert!(cleanup_entered.is_ok(), "panic payload entered cleanup");
+        let (result, spawned) = stopped_during_cleanup
+            .expect("sibling panic must release admission before payload cleanup finishes");
+        assert!(matches!(result, Err(ScopedCpuError::Cancelled(_))));
+        assert_eq!(spawned, 1, "only the failed worker was admitted");
+        assert_eq!(occupied, 1, "panic payload still retains the worker permit");
+    });
+
+    assert_eq!(panic_box.lock().expect("first panic").as_ref().unwrap().0, 0);
+    assert!(!worker_ran.load(Ordering::Acquire));
+    assert!(!cx.is_cancel_requested());
+    assert_eq!(*admission.in_use.lock().expect("admission accounting"), 0);
+}
+
+#[test]
+fn scope_drain_refuses_admission_on_both_sides_of_capacity_release() {
+    for release_before_drain in [false, true] {
+        let admission = Arc::new(ScopedCpuAdmission::new(1));
+        let cx = Cx::for_testing();
+        let healthy = AtomicBool::new(false);
+        let drained = AtomicBool::new(false);
+        let mut holder = Some(admission.acquire(&cx, &healthy).expect("initial permit"));
+        if release_before_drain {
+            drop(holder.take());
+        }
+        admission.request_scope_drain(&drained);
+        drop(holder);
+
+        assert!(admission.acquire(&cx, &drained).is_err());
+        assert_eq!(*admission.in_use.lock().expect("admission accounting"), 0);
+        let fresh = admission
+            .acquire(&cx, &healthy)
+            .expect("draining one scope must not close shared admission");
+        assert_eq!(*admission.in_use.lock().expect("admission accounting"), 1);
+        drop(fresh);
+        assert_eq!(*admission.in_use.lock().expect("admission accounting"), 0);
+    }
+}
