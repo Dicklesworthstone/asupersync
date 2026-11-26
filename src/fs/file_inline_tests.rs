@@ -495,6 +495,82 @@ fn abandoned_replacement_does_not_revive_a_pending_seek_result() {
     crate::test_complete!("abandoned_replacement_does_not_revive_a_pending_seek_result");
 }
 
+/// A dropped cursor change or different write must not let a later observer
+/// credit an old write to a new request containing identical bytes.
+#[test]
+fn abandoned_replacement_does_not_revive_a_pending_write_result() {
+    init_test("abandoned_replacement_does_not_revive_a_pending_write_result");
+    for operation in ["seek", "rewind", "resize", "trait_seek", "write"] {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("superseded_write.txt");
+        std::fs::write(&path, b"abcdefghijklmnop").unwrap();
+        let mut file = File::from_std(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .unwrap(),
+        );
+        let ready = Arc::new(AtomicBool::new(false));
+        let completion_ready = Arc::clone(&ready);
+        let inner = Arc::clone(&file.inner);
+        *file.pending.lock() = Some(PendingIo::Write {
+            future: Box::pin(std::future::poll_fn(move |_| {
+                if !completion_ready.load(Ordering::Acquire) {
+                    return Poll::Pending;
+                }
+                let mut file_ref: &std::fs::File = &inner;
+                Poll::Ready(Write::write(&mut file_ref, b"hello"))
+            })),
+            chunk: Arc::new(b"hello".to_vec()),
+            retryable: true,
+            restore: None,
+        });
+        let _guard = crate::cx::Cx::set_current(Some(crate::cx::Cx::for_testing()));
+        {
+            let mut replacement: Pin<Box<dyn Future<Output = io::Result<()>> + '_>> =
+                match operation {
+                    "seek" => Box::pin(async { file.seek(SeekFrom::Start(2)).await.map(|_| ()) }),
+                    "rewind" => Box::pin(file.rewind()),
+                    "resize" => Box::pin(file.set_len(20)),
+                    "trait_seek" => Box::pin(async {
+                        std::future::poll_fn(|cx| {
+                            Pin::new(&mut file).poll_seek(cx, SeekFrom::Start(2))
+                        })
+                        .await
+                        .map(|_| ())
+                    }),
+                    "write" => Box::pin(async { file.write(b"different").await.map(|_| ()) }),
+                    _ => unreachable!(),
+                };
+            assert!(
+                replacement
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                    .is_pending()
+            );
+        }
+        ready.store(true, Ordering::Release);
+        futures_lite::future::block_on(file.flush()).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"hellofghijklmnop");
+        assert_eq!(
+            futures_lite::future::block_on(file.stream_position()).unwrap(),
+            5
+        );
+        assert_eq!(
+            futures_lite::future::block_on(file.write(b"hello")).unwrap(),
+            5
+        );
+        assert_eq!(
+            futures_lite::future::block_on(file.stream_position()).unwrap(),
+            10,
+            "dropping {operation} must not revive an abandoned write's result"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"hellohelloklmnop");
+    }
+    crate::test_complete!("abandoned_replacement_does_not_revive_a_pending_write_result");
+}
+
 #[derive(Default)]
 struct IoWakeCounter(std::sync::atomic::AtomicUsize);
 
@@ -521,6 +597,7 @@ fn interleaved_file_trait_waiters_all_receive_the_syscall_wake() {
             Poll::Pending
         })),
         chunk: Arc::new(b"hello".to_vec()),
+        retryable: true,
         restore: None,
     });
     let counters: [_; 4] = std::array::from_fn(|_| Arc::new(IoWakeCounter::default()));

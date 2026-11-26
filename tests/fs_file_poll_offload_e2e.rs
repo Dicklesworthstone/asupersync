@@ -782,6 +782,111 @@ fn explicit_cursor_changes_end_a_previous_trait_seek_retry() {
     }
 }
 
+/// Hold a real native write after it owns the cursor gate. Each replacement
+/// reaches that still-pending write and is dropped before its own effect can
+/// start. Collecting the original later must not suppress a new identical write.
+#[cfg(feature = "test-internals")]
+#[test]
+fn cancelled_file_replacements_do_not_suppress_a_later_identical_write() {
+    use asupersync::fs::FileCursorOperationProbe;
+    use asupersync::io::{AsyncSeek, AsyncWrite};
+    use std::future::{Future, poll_fn};
+    use std::pin::Pin;
+    use std::task::Poll;
+
+    struct ReleaseProbe(Arc<FileCursorOperationProbe>);
+    impl Drop for ReleaseProbe {
+        fn drop(&mut self) {
+            self.0.release_first();
+        }
+    }
+
+    for operation in ["seek", "rewind", "resize", "trait_seek", "write"] {
+        let path = scratch_path(&format!("native-superseded-write-{operation}"));
+        std::fs::write(&path, b"abcdefghijklmnop").expect("write fixture");
+        let std_file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("open file");
+        let mut file = File::from_std(std_file);
+        let probe = Arc::new(FileCursorOperationProbe::new());
+        file.install_cursor_operation_probe_for_test(Arc::clone(&probe));
+        let runtime = RuntimeBuilder::current_thread()
+            .blocking_threads(1, 1)
+            .build()
+            .expect("native runtime with one blocking worker");
+        runtime.block_on(async move {
+            let _release = ReleaseProbe(Arc::clone(&probe));
+            poll_fn(|cx| {
+                assert!(Pin::new(&mut file).poll_write(cx, b"hello").is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            assert!(
+                probe.wait_until_first_blocked(Duration::from_secs(5)),
+                "the original write owns the cursor gate before the replacement"
+            );
+            assert_eq!(probe.acquisition_count(), 1);
+            {
+                let mut replacement: Pin<Box<dyn Future<Output = std::io::Result<()>> + '_>> =
+                    match operation {
+                        "seek" => Box::pin(async {
+                            file.seek(SeekFrom::Start(2)).await.map(|_| ())
+                        }),
+                        "rewind" => Box::pin(file.rewind()),
+                        "resize" => Box::pin(file.set_len(20)),
+                        "trait_seek" => Box::pin(async {
+                            poll_fn(|cx| {
+                                Pin::new(&mut file).poll_seek(cx, SeekFrom::Start(2))
+                            })
+                            .await
+                            .map(|_| ())
+                        }),
+                        "write" => Box::pin(async {
+                            file.write(b"different").await.map(|_| ())
+                        }),
+                        _ => unreachable!(),
+                    };
+                poll_fn(|cx| {
+                    assert!(
+                        replacement.as_mut().poll(cx).is_pending(),
+                        "the replacement waits for the blocked original write"
+                    );
+                    Poll::Ready(())
+                })
+                .await;
+            }
+            assert_eq!(probe.acquisition_count(), 1);
+            assert_eq!(
+                std::fs::read(&path).expect("bytes while write is blocked"),
+                b"abcdefghijklmnop"
+            );
+
+            probe.release_first();
+            file.flush().await.expect("collect original write");
+            assert_eq!(
+                std::fs::read(&path).expect("first committed bytes"),
+                b"hellofghijklmnop"
+            );
+            assert_eq!(file.stream_position().await.expect("first cursor"), 5);
+
+            assert_eq!(file.write(b"hello").await.expect("new identical write"), 5);
+            file.flush().await.expect("flush new write");
+            assert_eq!(
+                file.stream_position().await.expect("second cursor"),
+                10,
+                "dropping {operation} cannot silently discard the new write"
+            );
+            assert_eq!(
+                std::fs::read(&path).expect("both committed writes"),
+                b"hellohelloklmnop"
+            );
+        });
+        assert!(runtime.shutdown_timeout(Duration::from_secs(10)));
+    }
+}
+
 fn check_poll_seek_after_abandoned_read(
     name: &str,
     seek: SeekFrom,

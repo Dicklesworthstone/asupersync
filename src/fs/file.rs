@@ -211,6 +211,8 @@ enum PendingIo {
         future: PollIoFuture<usize>,
         /// The submitted bytes; a retry's buffer starts with them.
         chunk: Arc<Vec<u8>>,
+        /// A replacement write or cursor operation permanently ends this retry.
+        retryable: bool,
         /// Read-ahead of a combined rewind-then-write job.
         restore: Option<RewindRestore>,
     },
@@ -435,7 +437,10 @@ impl File {
         let mut pending = self.pending.lock();
         self.settled_write.lock().take();
         self.settled_seek.lock().take();
-        if let Some(PendingIo::Seek { retryable, .. }) = pending.as_mut() {
+        if let Some(
+            PendingIo::Write { retryable, .. } | PendingIo::Seek { retryable, .. },
+        ) = pending.as_mut()
+        {
             // Keep the invalidation even if the replacement is dropped while
             // the old syscall is pending and a later observer collects it.
             *retryable = false;
@@ -944,34 +949,42 @@ impl File {
             Some(PendingIo::Write {
                 mut future,
                 chunk,
+                retryable,
                 restore,
-            }) => match future.as_mut().poll(poll_cx) {
-                Poll::Pending => {
-                    *pending = Some(PendingIo::Write {
-                        future,
-                        chunk,
-                        restore,
-                    });
-                    Poll::Pending
-                }
-                // The bytes were committed to the file, which is the documented
-                // "started syscall commits" behaviour. A read, flush or owned
-                // operation keeps the count for the write's caller: under
-                // copy_bidirectional or split it is still polling and would
-                // otherwise submit the same bytes again (br-asupersync-pxg07b).
-                Poll::Ready(result) => {
-                    if let (Ok(written), Some(slot)) = (&result, retain_write) {
-                        *slot = Some(SettledWrite {
+            }) => {
+                // Losing a replacement while it waits cannot restore the
+                // superseded write's eligibility for completion credit.
+                let retryable = retryable && retain_write.is_some();
+                match future.as_mut().poll(poll_cx) {
+                    Poll::Pending => {
+                        *pending = Some(PendingIo::Write {
+                            future,
                             chunk,
-                            written: *written,
+                            retryable,
+                            restore,
                         });
+                        Poll::Pending
                     }
-                    if let (Err(_), Some(restore)) = (&result, restore) {
-                        restore.restore_unless_rewound(pending);
+                    // A read, flush or owned observer preserves a live writer's
+                    // result so an interleaved retry does not duplicate bytes.
+                    // Explicit cursor changes and different writes end that
+                    // retry even when their borrowing future is dropped.
+                    Poll::Ready(result) => {
+                        if retryable
+                            && let (Ok(written), Some(slot)) = (&result, retain_write)
+                        {
+                            *slot = Some(SettledWrite {
+                                chunk,
+                                written: *written,
+                            });
+                        }
+                        if let (Err(_), Some(restore)) = (&result, restore) {
+                            restore.restore_unless_rewound(pending);
+                        }
+                        Poll::Ready(result.map(|_| ()))
                     }
-                    Poll::Ready(result.map(|_| ()))
                 }
-            },
+            }
             Some(PendingIo::Flush { mut future }) => match future.as_mut().poll(poll_cx) {
                 Poll::Pending => {
                     *pending = Some(PendingIo::Flush { future });
@@ -1184,12 +1197,14 @@ impl File {
                 Some(PendingIo::Write {
                     mut future,
                     chunk,
+                    retryable,
                     restore,
-                }) if buf.starts_with(&chunk) => match future.as_mut().poll(poll_cx) {
+                }) if retryable && buf.starts_with(&chunk) => match future.as_mut().poll(poll_cx) {
                     Poll::Pending => {
                         *pending = Some(PendingIo::Write {
                             future,
                             chunk,
+                            retryable,
                             restore,
                         });
                         return Poll::Pending;
@@ -1214,6 +1229,7 @@ impl File {
                     *pending = Some(PendingIo::Write {
                         future,
                         chunk,
+                        retryable: true,
                         restore: None,
                     });
                 }
@@ -1241,6 +1257,7 @@ impl File {
                     *pending = Some(PendingIo::Write {
                         future,
                         chunk,
+                        retryable: true,
                         restore: Some(RewindRestore {
                             bytes,
                             consumed,
