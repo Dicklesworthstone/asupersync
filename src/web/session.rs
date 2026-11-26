@@ -789,8 +789,10 @@ pub struct SessionConfig {
     ///
     /// The token is checked only for requests that carry a stored session.
     /// A state-changing request without one (a login form posted
-    /// cross-site) is not checked; set [`Self::allowed_origins`] so its
-    /// `Origin` is (br-asupersync-a1q12q).
+    /// cross-site) is not checked by the legacy policy. Enable
+    /// [`SessionLayer::require_existing_session_for_csrf`] to require a
+    /// stored pre-session and token, or set [`Self::allowed_origins`] to
+    /// check its `Origin` (br-asupersync-a1q12q).
     pub csrf_protection: bool,
     /// br-asupersync-czbj90 — Allowed `Origin` values for state-changing
     /// requests. Each entry is a scheme+host[+port] string matched
@@ -856,6 +858,7 @@ pub struct SessionLayer<S: SessionStore> {
     config: SessionConfig,
     absolute_ttl_seconds: Option<u64>,
     concurrency_protection: bool,
+    require_existing_session_for_csrf: bool,
 }
 
 impl<S: SessionStore> SessionLayer<S> {
@@ -878,6 +881,7 @@ impl<S: SessionStore> SessionLayer<S> {
             config,
             absolute_ttl_seconds: None,
             concurrency_protection: false,
+            require_existing_session_for_csrf: false,
         }
     }
 
@@ -1004,6 +1008,34 @@ impl<S: SessionStore> SessionLayer<S> {
         self
     }
 
+    /// Require a stored, unexpired session before accepting a CSRF-protected
+    /// request, including the first login submission.
+    ///
+    /// With this policy and CSRF protection enabled, every method except the
+    /// exact tokens GET, HEAD, OPTIONS, and TRACE requires an existing session
+    /// and its matching `X-CSRF-Token`. Unknown extension methods, including
+    /// differently cased spellings of safe methods, are protected too.
+    /// Configured Origin checks remain an additional requirement. The safe
+    /// method classification does not enable TRACE routes or protect handlers
+    /// that perform state-changing work through GET or another safe method.
+    ///
+    /// A login page or token endpoint should first call [`Session::csrf_token`]
+    /// during a safe request. That creates the stored pre-session and cookie;
+    /// the client then submits that token with the login request. Missing,
+    /// invalid, unknown, or expired sessions receive 403 before the handler
+    /// runs, without creating a replacement session or issuing a cookie.
+    ///
+    /// This is opt-in for compatibility. The default retains the existing
+    /// four-method policy and permits a first request without a stored session.
+    /// Calling [`Self::csrf_protection`] with `false` disables both policies,
+    /// for endpoints using independent authentication such as bearer tokens.
+    /// This setting composes with [`Self::try_concurrency_protection`].
+    #[must_use]
+    pub fn require_existing_session_for_csrf(mut self, required: bool) -> Self {
+        self.require_existing_session_for_csrf = required;
+        self
+    }
+
     /// Toggle CSRF protection. Default is enabled — disable only for
     /// API-only endpoints that authenticate every request via a bearer
     /// token unrelated to the session cookie. (br-asupersync-7udumi)
@@ -1026,6 +1058,7 @@ impl<S: SessionStore> SessionLayer<S> {
             config: self.config,
             absolute_ttl_seconds: self.absolute_ttl_seconds,
             concurrency_protection: self.concurrency_protection,
+            require_existing_session_for_csrf: self.require_existing_session_for_csrf,
         }
     }
 }
@@ -1050,6 +1083,7 @@ impl<S: SessionStore, H: Handler> crate::service::Layer<H> for SessionLayer<S> {
             config: self.config.clone(),
             absolute_ttl_seconds: self.absolute_ttl_seconds,
             concurrency_protection: self.concurrency_protection,
+            require_existing_session_for_csrf: self.require_existing_session_for_csrf,
         }
     }
 }
@@ -1060,6 +1094,10 @@ impl<S: SessionStore> fmt::Debug for SessionLayer<S> {
             .field("config", &self.config)
             .field("absolute_ttl_seconds", &self.absolute_ttl_seconds)
             .field("concurrency_protection", &self.concurrency_protection)
+            .field(
+                "require_existing_session_for_csrf",
+                &self.require_existing_session_for_csrf,
+            )
             .finish_non_exhaustive()
     }
 }
@@ -1073,6 +1111,7 @@ pub struct SessionMiddleware<S: SessionStore, H: Handler> {
     config: SessionConfig,
     absolute_ttl_seconds: Option<u64>,
     concurrency_protection: bool,
+    require_existing_session_for_csrf: bool,
 }
 
 impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
@@ -1167,6 +1206,16 @@ impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
                 SessionData::new()
             };
 
+            let requires_csrf = self.requires_csrf(&req.method);
+            if requires_csrf && self.require_existing_session_for_csrf && is_new {
+                return Response::new(
+                    StatusCode::FORBIDDEN,
+                    "CSRF: stored session required before state-changing request",
+                )
+                .header("content-type", "text/plain; charset=utf-8")
+                .header("cache-control", "no-store");
+            }
+
             // 2b. Touch existing sessions only. Brand-new, otherwise
             //     untouched safe requests must not allocate a backing store
             //     entry or emit a cookie; handlers that actually use the
@@ -1205,10 +1254,7 @@ impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
             //     the X-CSRF-Token check has a chance to compensate. If both
             //     Origin and Referer are absent on a state-changing request
             //     and origin checking is configured, reject as 403.
-            if self.config.csrf_protection
-                && is_state_changing_method(&req.method)
-                && !self.config.allowed_origins.is_empty()
-            {
+            if requires_csrf && !self.config.allowed_origins.is_empty() {
                 match request_origin(&req) {
                     None => {
                         return Response::new(
@@ -1233,13 +1279,10 @@ impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
                 }
             }
 
-            if self.config.csrf_protection && is_state_changing_method(&req.method) {
-                // Brand-new sessions on the first request can't have shipped
-                // a token to the client yet, so we don't reject them — but
-                // they have no authenticated state either, so the CSRF
-                // window is empty anyway. Reject only when the session was
-                // loaded from storage (i.e. the client should know the
-                // token).
+            if requires_csrf {
+                // Strict policy already refused requests without a stored
+                // session above. Legacy policy still permits those requests;
+                // existing sessions must present their synchronizer token.
                 if !is_new {
                     let header_token = req
                         .headers
@@ -1432,6 +1475,19 @@ fn session_conflict_response() -> Response {
 }
 
 impl<S: SessionStore, H: Handler> SessionMiddleware<S, H> {
+    fn requires_csrf(&self, method: &str) -> bool {
+        if !self.config.csrf_protection {
+            return false;
+        }
+        if self.require_existing_session_for_csrf {
+            // Method tokens are case-sensitive. A handler can give "get"
+            // different semantics from GET; protect such extension methods.
+            !matches!(method, "GET" | "HEAD" | "OPTIONS" | "TRACE")
+        } else {
+            is_state_changing_method(method)
+        }
+    }
+
     /// Returns true if the configured idle TTL has elapsed since the
     /// session's `LAST_ACCESSED_KEY` timestamp. Sessions without the
     /// timestamp (pre-7udumi sessions) are treated as fresh on the
@@ -1637,3 +1693,7 @@ impl fmt::Debug for Session {
 #[cfg(test)]
 #[path = "session_inline_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "session_csrf_policy_tests.rs"]
+mod csrf_policy_tests;
