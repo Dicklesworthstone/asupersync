@@ -45,6 +45,11 @@ pub use managed_execution::{
 };
 
 #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
+mod actors;
+#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
+pub use actors::ManagedAppActorGeneration;
+
+#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
 mod resources;
 #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
 pub use resources::{
@@ -63,6 +68,7 @@ pub use observability::{
 /// state-threaded lowering so existing application contracts remain intact.
 #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
 mod managed_execution {
+    use super::actors::ActorFactory;
     use super::observability::ObservationCatalog;
     use super::resources::ResourceCatalog;
     use super::{
@@ -77,7 +83,7 @@ mod managed_execution {
         ManagedAppObservabilityBinding, ManagedAppObservabilityStats, ManagedAppResourceBinding,
         ManagedAppResourceError, ManagedAppResourceRequirement, ManagedAppResources,
     };
-    use crate::channel::mpsc;
+    use crate::channel::{mpsc, watch};
     use crate::cx::{ChildRegion, ChildRegionSpec, cap};
     use crate::runtime::{JoinError, SpawnError, TaskHandle};
     use crate::supervision::{
@@ -308,6 +314,7 @@ mod managed_execution {
 
     enum BindingKind<E> {
         Route(Arc<dyn Handler>),
+        Actor(ManagedRestartMode, Arc<ActorFactory<E>>),
         Worker(
             ManagedRestartMode,
             Arc<dyn ManagedChildFactory<E>>,
@@ -356,7 +363,7 @@ mod managed_execution {
             match self {
                 Self::ResourceRoute { requirements, .. }
                 | Self::ResourceWorker { requirements, .. } => requirements,
-                Self::Route(_) | Self::Worker(..) => &[],
+                Self::Route(_) | Self::Worker(..) | Self::Actor(..) => &[],
             }
         }
 
@@ -391,6 +398,52 @@ mod managed_execution {
     }
 
     impl<E> ManagedAppBinding<E> {
+        /// Bind a typed actor to the manifest's actual bounded mailbox.
+        ///
+        /// The actor declaration must explicitly require `Spawn`. Its mailbox
+        /// capacity is read during binding; an absent capacity uses
+        /// [`crate::actor::DEFAULT_MAILBOX_CAPACITY`], and zero is refused before
+        /// startup. The factory and actor inherit the managed invocation's
+        /// restricted capabilities and budgets. No additional authority is given.
+        ///
+        /// Each supervised generation constructs one ordinary actor; the managed
+        /// supervisor alone decides restarts. The returned watch starts at `None`,
+        /// publishes the generation's real mailbox after task submission, and
+        /// returns to `None` when that instance retires. Publication does not mean
+        /// runtime admission or `Actor::on_start` has completed. Clone a watch
+        /// snapshot before awaiting; retaining its read guard blocks publication.
+        /// Old references never reroute to a replacement. The watch coalesces
+        /// changes, so it is an availability view, not a lifecycle event log.
+        ///
+        /// Dropping the receiver does not stop the actor. Application cancellation
+        /// cancels its region and waits for actor retirement and `on_stop` cleanup.
+        /// Actor state is dropped after join; use messages for application results.
+        /// Named resource requirements continue to need explicit typed adapters;
+        /// the plain actor adapter does not create or infer resource handles.
+        #[must_use]
+        pub fn actor<A, F>(
+            name: impl Into<String>,
+            mode: ManagedRestartMode,
+            factory: F,
+        ) -> (
+            Self,
+            watch::Receiver<Option<super::ManagedAppActorGeneration<A::Message>>>,
+        )
+        where
+            E: Send + 'static,
+            A: crate::actor::Actor,
+            F: Fn(Cx, ManagedGeneration) -> A + Send + Sync + 'static,
+        {
+            let (factory, receiver) = super::actors::factory(factory);
+            (
+                Self {
+                    name: name.into(),
+                    kind: BindingKind::Actor(mode, factory),
+                },
+                receiver,
+            )
+        }
+
         /// Bind an HTTP handler to the method and path declared by a route.
         #[must_use]
         pub fn route(name: impl Into<String>, handler: impl Handler) -> Self {
@@ -1277,7 +1330,7 @@ mod managed_execution {
         owner: Cx,
         generation: ManagedGeneration,
         policy: Arc<WorkPolicy>,
-        factory: Arc<dyn ManagedChildFactory<E>>,
+        factory: AppFactory<E>,
     ) -> Outcome<(), ManagedAppWorkError<E>> {
         loop {
             if let Some(signal) = &policy.signal {
@@ -1374,7 +1427,7 @@ mod managed_execution {
             let mut outcome = match task {
                 Ok(mut task) => match join_work(&mut task, &region, &owner).await {
                     Ok(Outcome::Ok(())) => Outcome::Ok(()),
-                    Ok(Outcome::Err(error)) => Outcome::Err(ManagedAppWorkError::Domain(error)),
+                    Ok(Outcome::Err(error)) => Outcome::Err(error),
                     Ok(Outcome::Cancelled(reason)) | Err(JoinError::Cancelled(reason)) => {
                         Outcome::Cancelled(reason)
                     }
@@ -1453,6 +1506,36 @@ mod managed_execution {
             timer.as_mut().poll_deadline(task)
         })
         .await;
+    }
+
+    fn bind_worker<E: Send + 'static>(
+        template: &mut AppGroupTemplate<E>,
+        name: String,
+        mode: ManagedRestartMode,
+        policy: &Arc<WorkPolicy>,
+        factory: AppFactory<E>,
+    ) {
+        let work_policy = Arc::clone(policy);
+        let cleanup = Arc::clone(&policy.cleanup);
+        template.push(
+            name,
+            mode,
+            move |cx, generation| {
+                run_worker(
+                    cx,
+                    generation,
+                    Arc::clone(&work_policy),
+                    Arc::clone(&factory),
+                )
+            },
+            Some(Arc::new(move |generation| {
+                cleanup
+                    .lock()
+                    .as_ref()
+                    .filter(|(observed, _)| *observed == generation)
+                    .map(|(_, outcome)| outcome.clone())
+            })),
+        );
     }
 
     /// Prepared, executing AppSpec with real routes and managed workers.
@@ -1996,6 +2079,20 @@ mod managed_execution {
                 .iter()
                 .map(|service| (service.name.clone(), service.resources.clone()))
                 .collect();
+            // Keep the legacy public compiler-plan struct unchanged. Only the
+            // typed actor binding consumes this original manifest declaration.
+            let actor_mailboxes: BTreeMap<_, _> = self
+                .services
+                .iter()
+                .flat_map(|service| {
+                    service.actors.iter().map(move |actor| {
+                        (
+                            format!("{}.actor.{}", service.name, actor.name),
+                            actor.mailbox_capacity,
+                        )
+                    })
+                })
+                .collect();
             let observability = observability_bindings
                 .map(|bindings| {
                     ObservationCatalog::bind(
@@ -2163,7 +2260,7 @@ mod managed_execution {
                 }
                 let supplied_signal = match &kind {
                     BindingKind::Worker(_, _, signal) => signal.as_ref(),
-                    BindingKind::Route(_) => None,
+                    BindingKind::Route(_) | BindingKind::Actor(..) => None,
                     BindingKind::ResourceRoute { .. } | BindingKind::ResourceWorker { .. } => {
                         unreachable!("typed resource adapters have been bound")
                     }
@@ -2275,26 +2372,38 @@ mod managed_execution {
                         AppSpecV1WorkUnitKind::Actor | AppSpecV1WorkUnitKind::BackgroundJob,
                         BindingKind::Worker(mode, factory, _),
                     ) => {
-                        let work_policy = Arc::clone(&policy);
-                        let cleanup = Arc::clone(&policy.cleanup);
-                        template.push(
+                        let factory: AppFactory<E> = Arc::new(move |cx, generation| {
+                            let future = factory.start(cx, generation);
+                            async move { future.await.map_err(ManagedAppWorkError::Domain) }
+                        });
+                        bind_worker(template, child.name, mode, &policy, factory);
+                    }
+                    (AppSpecV1WorkUnitKind::Actor, BindingKind::Actor(mode, factory)) => {
+                        if !policy
+                            .required
+                            .cx_capabilities
+                            .contains(&AppCxCapabilityV1::Spawn)
+                        {
+                            return Err(ManagedAppBindError::Capability {
+                                unit: child.name,
+                                capability: AppCxCapabilityV1::Spawn,
+                            });
+                        }
+                        let capacity = actor_mailboxes[&child.name]
+                            .map_or(Some(crate::actor::DEFAULT_MAILBOX_CAPACITY), |capacity| {
+                                usize::try_from(capacity).ok()
+                            })
+                            .filter(|capacity| *capacity > 0)
+                            .ok_or_else(|| ManagedAppBindError::Unsupported {
+                                unit: child.name.clone(),
+                                reason: "typed actor mailbox capacity must be nonzero and representable",
+                            })?;
+                        bind_worker(
+                            template,
                             child.name,
                             mode,
-                            move |cx, generation| {
-                                run_worker(
-                                    cx,
-                                    generation,
-                                    Arc::clone(&work_policy),
-                                    Arc::clone(&factory),
-                                )
-                            },
-                            Some(Arc::new(move |generation| {
-                                cleanup
-                                    .lock()
-                                    .as_ref()
-                                    .filter(|(observed, _)| *observed == generation)
-                                    .map(|(_, outcome)| outcome.clone())
-                            })),
+                            &policy,
+                            Arc::new(move |cx, generation| factory(cx, generation, capacity)),
                         );
                     }
                     _ => return Err(ManagedAppBindError::KindMismatch(child.name)),

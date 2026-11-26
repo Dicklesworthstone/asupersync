@@ -97,6 +97,383 @@ where
     assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
 }
 
+mod typed_actors {
+    use super::*;
+    use asupersync::actor::Actor;
+    use asupersync::app::ManagedAppActorGeneration;
+    use asupersync::channel::{mpsc, watch};
+    use std::pin::Pin;
+    use std::sync::Mutex;
+
+    // Deliberately not Clone: watching a mailbox must not require cloning its
+    // messages or silently duplicate a send across a managed restart.
+    #[derive(Debug, PartialEq)]
+    enum Message {
+        Value(u32),
+        Crash,
+        Park,
+    }
+
+    #[derive(Default)]
+    struct State {
+        factories: AtomicUsize,
+        starts: AtomicUsize,
+        stops: AtomicUsize,
+        drops: AtomicUsize,
+        values: Mutex<Vec<(u64, u32)>>,
+        changed: Notify,
+        start_parked: Notify,
+        start_release: Notify,
+        handler_parked: Notify,
+        stop_parked: Notify,
+        stop_release: Notify,
+    }
+
+    struct BoundActor {
+        state: Arc<State>,
+        generation: ManagedGeneration,
+        pause_start: bool,
+        pause_stop: bool,
+    }
+
+    fn assert_actor_authority(cx: &Cx) {
+        let caps = cx.capabilities();
+        assert!(caps.spawn);
+        assert!(!caps.time && !caps.entropy && !caps.io && !caps.remote);
+        assert!(cx.registry_handle().is_none());
+        assert!(cx.blocking_pool_handle().is_none());
+        assert!(cx.budget().poll_quota <= 8192);
+        assert_eq!(cx.capability_budget().io_bytes, Some(128));
+        assert_eq!(cx.capability_budget().memory_bytes, Some(256));
+        let ambient = Cx::current().unwrap();
+        assert_eq!(ambient.task_id(), cx.task_id());
+        assert!(!ambient.capabilities().remote);
+    }
+
+    async fn witness_pending<F: Future>(future: F, witness: &Notify) -> F::Output {
+        let mut future = std::pin::pin!(future);
+        let mut announced = false;
+        poll_fn(|task| {
+            let result = future.as_mut().poll(task);
+            if result.is_pending() && !announced {
+                announced = true;
+                witness.notify_one();
+            }
+            result
+        })
+        .await
+    }
+
+    impl Actor for BoundActor {
+        type Message = Message;
+
+        fn on_start(&mut self, cx: &Cx) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            let cx = cx.clone();
+            Box::pin(async move {
+                assert_actor_authority(&cx);
+                assert_eq!(cx.region_id(), self.generation.region);
+                assert_ne!(cx.task_id(), self.generation.task);
+                self.state.starts.fetch_add(1, Ordering::AcqRel);
+                self.state.changed.notify_waiters();
+                if self.pause_start {
+                    witness_pending(
+                        self.state.start_release.notified(),
+                        &self.state.start_parked,
+                    )
+                    .await;
+                }
+            })
+        }
+
+        fn handle(
+            &mut self,
+            cx: &Cx,
+            message: Message,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            let cx = cx.clone();
+            Box::pin(async move {
+                assert_actor_authority(&cx);
+                match message {
+                    Message::Value(value) => {
+                        self.state
+                            .values
+                            .lock()
+                            .unwrap()
+                            .push((self.generation.number, value));
+                        self.state.changed.notify_waiters();
+                    }
+                    Message::Crash => panic!("managed typed actor restart"),
+                    Message::Park => {
+                        witness_pending(cx.cancelled(), &self.state.handler_parked).await;
+                        assert!(cx.checkpoint().is_err());
+                    }
+                }
+            })
+        }
+
+        fn on_stop(&mut self, cx: &Cx) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            let cx = cx.clone();
+            Box::pin(async move {
+                assert_actor_authority(&cx);
+                if self.pause_stop {
+                    assert!(cx.cancel_reason().is_some());
+                    witness_pending(self.state.stop_release.notified(), &self.state.stop_parked)
+                        .await;
+                }
+                self.state.stops.fetch_add(1, Ordering::AcqRel);
+            })
+        }
+    }
+
+    impl Drop for BoundActor {
+        fn drop(&mut self) {
+            self.state.drops.fetch_add(1, Ordering::AcqRel);
+            self.state.changed.notify_waiters();
+        }
+    }
+
+    fn manifest(capacity: Option<u32>) -> Value {
+        let mut value = manifest_json();
+        value["services"][0]["routes"] = json!([]);
+        value["services"][0]["actors"][0]["mailbox_capacity"] = json!(capacity);
+        value["services"][0]["actors"][0]["required_capabilities"]["cx_capabilities"] =
+            json!(["spawn"]);
+        value["budgets"][0]["poll_quota"] = json!(8192);
+        value
+    }
+
+    fn binding(
+        state: &Arc<State>,
+        pause_start: bool,
+        pause_stop: bool,
+    ) -> (
+        ManagedAppBinding<()>,
+        watch::Receiver<Option<ManagedAppActorGeneration<Message>>>,
+    ) {
+        let state = Arc::clone(state);
+        ManagedAppBinding::actor(
+            "api.actor.cache",
+            ManagedRestartMode::Transient,
+            move |cx: Cx, generation| {
+                assert_actor_authority(&cx);
+                assert_eq!(cx.task_id(), generation.task);
+                assert_eq!(cx.region_id(), generation.region);
+                let attempt = state.factories.fetch_add(1, Ordering::AcqRel);
+                assert_eq!(
+                    state.drops.load(Ordering::Acquire),
+                    attempt,
+                    "replacement factory overtook the previous actor's retirement"
+                );
+                BoundActor {
+                    state: Arc::clone(&state),
+                    generation,
+                    pause_start: pause_start && attempt == 0,
+                    pause_stop,
+                }
+            },
+        )
+    }
+
+    fn parent_spec() -> ChildRegionSpec {
+        let mut spec = ChildRegionSpec::inherit();
+        spec.capability_budget = Some(CapabilityBudget {
+            io_bytes: Some(128),
+            memory_bytes: Some(256),
+            ..CapabilityBudget::UNSPECIFIED
+        });
+        spec
+    }
+
+    async fn next_generation(
+        receiver: &mut watch::Receiver<Option<ManagedAppActorGeneration<Message>>>,
+        cx: &Cx,
+        after: u64,
+    ) -> ManagedAppActorGeneration<Message> {
+        loop {
+            if let Some(snapshot) = receiver.borrow_and_update_clone()
+                && snapshot.generation.number > after
+            {
+                return snapshot;
+            }
+            receiver.changed(cx).await.unwrap();
+        }
+    }
+
+    async fn mailbox_and_restart(cx: Cx, capacity: Option<u32>) {
+        let parent = cx.open_child_region(parent_spec()).await.unwrap();
+        let state = Arc::new(State::default());
+        let (binding, mut receiver) = binding(&state, true, false);
+        let app = parse(manifest(capacity))
+            .bind_managed(vec![binding], config())
+            .unwrap();
+        assert!(receiver.borrow_and_clone().is_none());
+        assert_eq!(state.factories.load(Ordering::Acquire), 0);
+        let mut app = app.start(parent.cx()).unwrap();
+        let first = next_generation(&mut receiver, &cx, 0).await;
+        state.start_parked.notified().await;
+        let capacity = capacity.map_or(asupersync::actor::DEFAULT_MAILBOX_CAPACITY, |n| {
+            usize::try_from(n).unwrap()
+        });
+        for value in 0..capacity {
+            first
+                .actor
+                .try_send(Message::Value(u32::try_from(value).unwrap()))
+                .unwrap();
+        }
+        assert_eq!(
+            first.actor.try_send(Message::Value(999)),
+            Err(mpsc::SendError::Full(Message::Value(999)))
+        );
+        assert!(state.values.lock().unwrap().is_empty());
+        state.start_release.notify_one();
+        state
+            .changed
+            .wait_until(|| state.values.lock().unwrap().len() == capacity)
+            .await;
+        assert!(matches!(
+            first.actor.send(&cx, Message::Crash).await,
+            Outcome::Ok(())
+        ));
+        let second = next_generation(&mut receiver, &cx, first.generation.number).await;
+        assert_eq!(second.generation.number, first.generation.number + 1);
+        assert_ne!(second.generation.region, first.generation.region);
+        assert_ne!(second.actor.actor_id(), first.actor.actor_id());
+        assert_eq!(
+            first.actor.try_send(Message::Value(1001)),
+            Err(mpsc::SendError::Disconnected(Message::Value(1001)))
+        );
+        assert!(matches!(
+            second.actor.send(&cx, Message::Value(1003)).await,
+            Outcome::Ok(())
+        ));
+        state
+            .changed
+            .wait_until(|| state.values.lock().unwrap().len() == capacity + 1)
+            .await;
+        {
+            let values = state.values.lock().unwrap();
+            let expected: Vec<_> = (0..capacity)
+                .map(|value| (first.generation.number, u32::try_from(value).unwrap()))
+                .chain(std::iter::once((second.generation.number, 1003)))
+                .collect();
+            assert_eq!(*values, expected);
+        }
+        app.abort();
+        let report = app.join().await.unwrap();
+        assert_eq!(report.started, 2);
+        assert_eq!(report.joined, 2);
+        assert_eq!(report.restart_batches, 1);
+        assert_eq!(
+            report.children.len(),
+            1,
+            "one latest completion per managed child"
+        );
+        assert_eq!(
+            report.children[0].generation.number,
+            second.generation.number
+        );
+        assert!(matches!(report.children[0].outcome, Outcome::Cancelled(_)));
+        assert!(receiver.borrow_and_clone().is_none());
+        assert!(second.actor.is_closed());
+        assert_eq!(state.factories.load(Ordering::Acquire), 2);
+        assert_eq!(state.starts.load(Ordering::Acquire), 2);
+        assert_eq!(state.drops.load(Ordering::Acquire), 2);
+        parent.close().await.unwrap();
+    }
+
+    async fn cancellation_drains_actor(cx: Cx) {
+        let parent = cx.open_child_region(parent_spec()).await.unwrap();
+        let state = Arc::new(State::default());
+        let (binding, mut receiver) = binding(&state, false, true);
+        let mut app = parse(manifest(Some(1)))
+            .bind_managed(vec![binding], config())
+            .unwrap()
+            .start(parent.cx())
+            .unwrap();
+        let instance = next_generation(&mut receiver, &cx, 0).await;
+        assert!(matches!(
+            instance.actor.send(&cx, Message::Park).await,
+            Outcome::Ok(())
+        ));
+        state.handler_parked.notified().await;
+        app.abort();
+        state.stop_parked.notified().await;
+        let mut join = std::pin::pin!(app.join());
+        poll_fn(|task| {
+            assert!(
+                join.as_mut().poll(task).is_pending(),
+                "actor cleanup is still parked"
+            );
+            Poll::Ready(())
+        })
+        .await;
+        assert_eq!(
+            receiver.borrow_and_clone().unwrap().generation,
+            instance.generation,
+            "publication retirement must wait for actual actor retirement"
+        );
+        assert!(instance.actor.is_closed());
+        assert_eq!(state.drops.load(Ordering::Acquire), 0);
+        assert_eq!(state.stops.load(Ordering::Acquire), 0);
+        state.stop_release.notify_one();
+        let report = join.await.unwrap();
+        assert_eq!(report.started, 1);
+        assert_eq!(report.joined, 1);
+        assert_eq!(report.restart_batches, 0);
+        assert!(matches!(report.outcome, Outcome::Cancelled(_)));
+        assert!(receiver.borrow_and_clone().is_none());
+        assert_eq!(state.stops.load(Ordering::Acquire), 1);
+        assert_eq!(state.drops.load(Ordering::Acquire), 1);
+        parent.close().await.unwrap();
+    }
+
+    #[test]
+    fn managed_typed_actor_applies_capacity_and_restarts_without_rerouting_old_refs() {
+        for workers in [1, 2] {
+            for capacity in [None, Some(1)] {
+                native(workers, move |cx| mailbox_and_restart(cx, capacity));
+            }
+        }
+    }
+
+    #[test]
+    fn managed_typed_actor_abort_waits_for_parked_handler_and_on_stop_cleanup() {
+        for workers in [1, 2] {
+            native(workers, cancellation_drains_actor);
+        }
+    }
+
+    #[test]
+    fn managed_typed_actor_refuses_invalid_capacity_and_missing_spawn_before_publication() {
+        for missing_spawn in [false, true] {
+            let state = Arc::new(State::default());
+            let (binding, receiver) = binding(&state, false, false);
+            let mut declaration = manifest(Some(if missing_spawn { 1 } else { 0 }));
+            if missing_spawn {
+                declaration["services"][0]["actors"][0]["required_capabilities"]["cx_capabilities"] =
+                    json!(["pure"]);
+            }
+            let error = parse(declaration)
+                .bind_managed(vec![binding], config())
+                .err()
+                .expect("typed actor preflight must refuse");
+            if missing_spawn {
+                assert!(matches!(
+                    error,
+                    ManagedAppBindError::Capability {
+                        capability: asupersync::app::AppCxCapabilityV1::Spawn,
+                        ..
+                    }
+                ));
+            } else {
+                assert!(matches!(error, ManagedAppBindError::Unsupported { .. }));
+            }
+            assert_eq!(state.factories.load(Ordering::Acquire), 0);
+            assert!(receiver.borrow_and_clone().is_none());
+        }
+    }
+}
+
 fn assert_pure_work_context(cx: &Cx) {
     let caps = cx.capabilities();
     assert!(!caps.spawn && !caps.time && !caps.entropy && !caps.io && !caps.remote);
