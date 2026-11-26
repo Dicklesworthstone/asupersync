@@ -5076,11 +5076,11 @@ impl Runtime {
     ///
     /// Ordinary `Runtime` drop from outside its workers performs a blocking
     /// teardown: it signals the scheduler, then joins every worker thread with
-    /// no bound. A final owner dropped by an async worker transfers those joins
-    /// and the retained runtime state to a teardown thread so that its own poll
-    /// can finish. A future that blocks inside `poll` (in violation of the
-    /// cooperative contract) keeps
-    /// its worker from returning, so plain drop can wait forever ([#60]).
+    /// no bound. A final owner dropped by an async or blocking-pool worker
+    /// transfers those joins and the retained runtime state to a teardown
+    /// thread so that its own poll or blocking closure can finish. A future
+    /// that blocks inside `poll` (in violation of the cooperative contract)
+    /// keeps its worker from returning, so plain drop can wait forever ([#60]).
     ///
     /// This method is the bounded alternative. It synchronously closes every
     /// runtime-owned spawn gateway, then a background reaper waits for any
@@ -7770,7 +7770,8 @@ impl Drop for RuntimeInner {
         }
 
         // Signal consumers before transferring their join handles. In the
-        // worker-owned case the current poll must return before it can join.
+        // worker-owned case the current poll or blocking closure must return
+        // before it can join.
         let deadline_monitor_shutdown = self.deadline_monitor_shutdown.take();
         if let Some(driver) = &self.io_service {
             driver.revoke_runtime_service();
@@ -7798,7 +7799,11 @@ impl Drop for RuntimeInner {
         let current_thread = std::thread::current().id();
         let on_worker = handles
             .iter()
-            .any(|handle| handle.thread().id() == current_thread);
+            .any(|handle| handle.thread().id() == current_thread)
+            || self
+                .blocking_pool
+                .as_ref()
+                .is_some_and(crate::runtime::blocking_pool::BlockingPool::is_current_worker);
         let deadline_monitor = self.deadline_monitor_thread.take();
         #[cfg(not(target_arch = "wasm32"))]
         let resource_sampler = self.resource_sampler.take();

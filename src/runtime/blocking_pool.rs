@@ -79,6 +79,34 @@ use priority::BlockingTaskQueue;
 /// Default idle timeout before retiring excess threads.
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 
+thread_local! {
+    /// Identifies the owning pool without locking its thread-handle registry.
+    /// A worker can run before its JoinHandle is inserted into that registry.
+    static CURRENT_BLOCKING_POOL: std::cell::Cell<*const BlockingPoolInner> =
+        const { std::cell::Cell::new(std::ptr::null()) };
+}
+
+/// Keeps pool identity installed through start/stop hooks and unwinding.
+///
+/// The worker owns an Arc for this entire scope, so its address cannot be
+/// reused. The pointer is compared only; it is never dereferenced.
+struct BlockingWorkerIdentity {
+    previous: *const BlockingPoolInner,
+}
+
+impl BlockingWorkerIdentity {
+    fn enter(inner: &Arc<BlockingPoolInner>) -> Self {
+        let previous = CURRENT_BLOCKING_POOL.with(|current| current.replace(Arc::as_ptr(inner)));
+        Self { previous }
+    }
+}
+
+impl Drop for BlockingWorkerIdentity {
+    fn drop(&mut self) {
+        let _ = CURRENT_BLOCKING_POOL.try_with(|current| current.set(self.previous));
+    }
+}
+
 /// Time source hook used by timeout accounting paths.
 pub type TimeGetter = fn() -> Instant;
 
@@ -1014,6 +1042,16 @@ impl BlockingPool {
         self.inner.admission.notify();
     }
 
+    /// Whether this thread is running a worker owned by this exact pool.
+    ///
+    /// Runtime teardown must leave that worker before joining the pool, just
+    /// as it does for a scheduler worker (br-asupersync-1pi7ne L1).
+    pub(crate) fn is_current_worker(&self) -> bool {
+        CURRENT_BLOCKING_POOL
+            .try_with(|current| std::ptr::eq(current.get(), Arc::as_ptr(&self.inner)))
+            .unwrap_or(false)
+    }
+
     /// Shuts down and waits for all threads to exit.
     ///
     /// # Arguments
@@ -1718,6 +1756,9 @@ fn spawn_thread_on_inner(inner: &Arc<BlockingPoolInner>) {
             }
         }
 
+        // Declare identity first so ThreadExitGuard's stop callback still sees
+        // it, even while unwinding. The captured Arc outlives both guards.
+        let _identity = BlockingWorkerIdentity::enter(&inner_clone);
         let mut guard = ThreadExitGuard {
             inner: &inner_clone,
             retired_with_claim: false,

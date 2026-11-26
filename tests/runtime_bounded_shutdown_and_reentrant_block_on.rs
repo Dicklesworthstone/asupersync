@@ -14,7 +14,8 @@
 //!
 //! 3. Last-owner teardown: a worker may release the last `Runtime` or strong
 //!    `RuntimeHandle`, including while unwinding. Teardown must retain and join
-//!    both workers without joining the current thread inside its own poll.
+//!    every worker without waiting for the current thread inside its own poll
+//!    or blocking closure.
 //!
 //! The blocked-worker tests intentionally leak a detached worker thread (it
 //! is parked on a channel that never receives); that is the exact scenario
@@ -677,60 +678,7 @@ fn last_runtime_handle_owner_dropped_on_blocking_worker_finishes_teardown() {
     const NAME: &str = "last_runtime_handle_owner_dropped_on_blocking_worker_finishes_teardown";
     const CHILD: &str = "ASUPERSYNC_LAST_BLOCKING_OWNER_TEARDOWN_CHILD";
     if std::env::var_os(CHILD).is_some() {
-        let (stopped_tx, stopped_rx) = mpsc::channel();
-        let runtime = RuntimeBuilder::new()
-            .worker_threads(2)
-            .blocking_threads(1, 1)
-            .on_thread_stop(move || {
-                stopped_tx
-                    .send(std::thread::current().id())
-                    .expect("teardown observer remains alive");
-            })
-            .build()
-            .expect("build runtime with one blocking worker");
-        let retained_state = std::sync::Arc::downgrade(&runtime.resource_monitor());
-        let owner = runtime.handle();
-        let (release_tx, release_rx) = mpsc::sync_channel(0);
-        let (parked_tx, parked_rx) = mpsc::channel();
-        let (result_tx, result_rx) = mpsc::channel();
-        let join = runtime
-            .spawn_blocking(move || {
-                assert_eq!(release_rx.try_recv(), Err(mpsc::TryRecvError::Empty));
-                parked_tx
-                    .send(std::thread::current().id())
-                    .expect("parent observes the held blocking owner");
-                release_rx
-                    .recv()
-                    .expect("parent releases the blocking owner");
-                drop(owner);
-                result_tx.send(42_u32).expect("report completed owner drop");
-            })
-            .expect("blocking pool is enabled");
-        let worker = parked_rx
-            .recv_timeout(Duration::from_secs(10))
-            .expect("blocking closure holds the final owner behind its release gate");
-        assert_ne!(worker, std::thread::current().id());
-        println!("last-blocking-owner: held release gate on {worker:?}");
-        drop(runtime);
-        release_tx.send(()).expect("release owned blocking task");
-        assert_eq!(
-            result_rx.recv_timeout(Duration::from_secs(15)),
-            Ok(42),
-            "blocking-pool teardown must return without a self-join panic"
-        );
-        assert!(join.wait_timeout(Duration::from_secs(10)));
-        assert!(!join.is_cancelled());
-        let stopped: std::collections::HashSet<_> = (0..3)
-            .map(|_| {
-                stopped_rx
-                    .recv_timeout(Duration::from_secs(10))
-                    .expect("async and blocking workers all stop")
-            })
-            .collect();
-        assert_eq!(stopped.len(), 3);
-        assert!(stopped.contains(&worker));
-        assert_runtime_state_released(&retained_state);
-        println!("last-blocking-owner: result=42; stopped workers=3; state released");
+        assert_blocking_worker_last_owner_teardown(false);
         return;
     }
 
@@ -740,6 +688,134 @@ fn last_runtime_handle_owner_dropped_on_blocking_worker_finishes_teardown() {
         "last-blocking-owner: held release gate on ",
         "last-blocking-owner: result=42; stopped workers=3; state released",
     );
+}
+
+#[test]
+fn last_runtime_handle_owner_dropped_during_blocking_unwind_finishes_teardown() {
+    const NAME: &str = "last_runtime_handle_owner_dropped_during_blocking_unwind_finishes_teardown";
+    const CHILD: &str = "ASUPERSYNC_LAST_BLOCKING_UNWIND_TEARDOWN_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        assert_blocking_worker_last_owner_teardown(true);
+        return;
+    }
+
+    run_teardown_child(
+        NAME,
+        CHILD,
+        "last-blocking-owner: held release gate on ",
+        "last-blocking-owner: unwind completed; stopped workers=3; state released",
+    );
+}
+
+fn assert_blocking_worker_last_owner_teardown(unwind: bool) {
+    struct LastOwner {
+        handle: Option<asupersync::runtime::RuntimeHandle>,
+        dropped: mpsc::Sender<(std::thread::ThreadId, bool)>,
+    }
+
+    impl Drop for LastOwner {
+        fn drop(&mut self) {
+            drop(self.handle.take());
+            self.dropped
+                .send((std::thread::current().id(), std::thread::panicking()))
+                .expect("report owner drop before worker teardown completes");
+        }
+    }
+
+    let stop_gate = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let worker_stop_gate = std::sync::Arc::clone(&stop_gate);
+    let (stopped_tx, stopped_rx) = mpsc::channel();
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .blocking_threads(1, 1)
+        .on_thread_stop(move || {
+            stopped_tx
+                .send(std::thread::current().id())
+                .expect("teardown observer remains alive");
+            let (lock, changed) = &*worker_stop_gate;
+            let mut released = lock.lock().unwrap();
+            while !*released {
+                released = changed.wait(released).unwrap();
+            }
+        })
+        .build()
+        .expect("build runtime with one blocking worker");
+    let retained_state = std::sync::Arc::downgrade(&runtime.resource_monitor());
+    let (dropped_tx, dropped_rx) = mpsc::channel();
+    let owner = LastOwner {
+        handle: Some(runtime.handle()),
+        dropped: dropped_tx,
+    };
+    let (release_tx, release_rx) = mpsc::sync_channel(0);
+    let (parked_tx, parked_rx) = mpsc::channel();
+    let (result_tx, result_rx) = mpsc::channel();
+    let join = runtime
+        .spawn_blocking(move || {
+            let owner = owner;
+            assert_eq!(release_rx.try_recv(), Err(mpsc::TryRecvError::Empty));
+            parked_tx
+                .send(std::thread::current().id())
+                .expect("parent observes the held blocking owner");
+            release_rx
+                .recv()
+                .expect("parent releases the blocking owner");
+            if unwind {
+                panic!("intentional last runtime handle unwind on blocking worker");
+            }
+            drop(owner);
+            result_tx.send(42_u32).expect("report completed owner drop");
+        })
+        .expect("blocking pool is enabled");
+    let worker = parked_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("blocking closure holds the final owner behind its release gate");
+    assert_ne!(worker, std::thread::current().id());
+    println!("last-blocking-owner: held release gate on {worker:?}; unwind={unwind}");
+    drop(runtime);
+    release_tx.send(()).expect("release owned blocking task");
+
+    // Prove teardown is in progress but no worker can finish its stop hook.
+    // Inline teardown cannot return through drop(owner) in this state: it
+    // waits to join those workers. This detects the dependency cycle without
+    // a timing threshold tied to BlockingPool's five-second drop timeout.
+    let first_stopped = stopped_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("a worker reaches the held stop hook");
+    let dropped = dropped_rx.recv_timeout(Duration::from_secs(10));
+    let state_retained = retained_state.strong_count() != 0;
+    // Release before asserting so a failing oracle cannot strand the hooks.
+    let (lock, changed) = &*stop_gate;
+    *lock.lock().unwrap() = true;
+    changed.notify_all();
+    assert_eq!(
+        dropped,
+        Ok((worker, unwind)),
+        "the final blocking owner must drop while worker stop hooks are still held"
+    );
+    assert!(state_retained, "teardown retains state until workers exit");
+    assert!(join.wait_timeout(Duration::from_secs(10)));
+    assert!(!join.is_cancelled());
+    if unwind {
+        assert_eq!(result_rx.try_recv(), Err(mpsc::TryRecvError::Disconnected));
+    } else {
+        assert_eq!(result_rx.try_recv(), Ok(42));
+    }
+    let mut stopped = std::collections::HashSet::from([first_stopped]);
+    for _ in 0..2 {
+        stopped.insert(
+            stopped_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("async and blocking workers all stop"),
+        );
+    }
+    assert_eq!(stopped.len(), 3);
+    assert!(stopped.contains(&worker));
+    assert_runtime_state_released(&retained_state);
+    if unwind {
+        println!("last-blocking-owner: unwind completed; stopped workers=3; state released");
+    } else {
+        println!("last-blocking-owner: result=42; stopped workers=3; state released");
+    }
 }
 
 /// Run `f` on a helper thread and wait at most `limit` for its result.

@@ -129,6 +129,52 @@ fn basic_spawn_and_wait() {
 }
 
 #[test]
+fn worker_identity_covers_hooks_and_work_without_matching_another_pool() {
+    let owned = Arc::new(StdMutex::new(std::sync::Weak::<BlockingPool>::new()));
+    let other = Arc::new(BlockingPool::new(0, 1));
+    let (observed_tx, observed_rx) = std::sync::mpsc::channel();
+    let observe = |phase: &'static str| {
+        let owned = Arc::clone(&owned);
+        let other = Arc::clone(&other);
+        let observed_tx = observed_tx.clone();
+        Arc::new(move || {
+            let owned = owned.lock().unwrap().upgrade().unwrap();
+            observed_tx
+                .send((phase, owned.is_current_worker(), other.is_current_worker()))
+                .unwrap();
+        }) as Arc<dyn Fn() + Send + Sync>
+    };
+    let pool = Arc::new(BlockingPool::with_config(
+        0,
+        1,
+        BlockingPoolOptions {
+            on_thread_start: Some(observe("start")),
+            on_thread_stop: Some(observe("stop")),
+            ..Default::default()
+        },
+    ));
+    *owned.lock().unwrap() = Arc::downgrade(&pool);
+    assert!(!pool.is_current_worker(), "the caller is not a pool worker");
+    assert!(!other.is_current_worker());
+
+    let observe_work = observe("work");
+    let job = pool.spawn(move || observe_work());
+    assert!(job.wait_timeout(Duration::from_secs(5)));
+    assert!(pool.shutdown_and_wait(Duration::from_secs(5)));
+    let observations: Vec<_> = observed_rx.try_iter().collect();
+    assert_eq!(
+        observations,
+        vec![
+            ("start", true, false),
+            ("work", true, false),
+            ("stop", true, false),
+        ],
+        "start/stop callbacks and jobs retain only their own pool's identity"
+    );
+    assert!(!pool.is_current_worker());
+}
+
+#[test]
 fn set_max_threads_never_strands_work_at_zero() {
     // Regression: the live spawn cap must floor at 1 for a constructed pool
     // (max_threads >= 1). Driving the cap to 0 on a min=0 elastic pool used
