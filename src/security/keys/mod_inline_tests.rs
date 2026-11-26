@@ -408,6 +408,329 @@ fn ver_a1_asupersync_dep_p4_nkeys_poc60v_1_3_5e81559b363d_lab_lifecycle() {
 }
 
 #[test]
+fn transcript_signing_roundtrips_exact_bytes_and_public_verifiers() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("identity.json");
+    let store = IdentityKeyStore::create(&path, strong_seed(20), 100).expect("create store");
+    let profile = TranscriptSigningProfile::Ed25519Sha256V1;
+    let domain = b"frankengraphdb:checkpoint:v1";
+    let transcript = b"\0checkpoint\xff\n{\"epoch\":7,\"root\":\"abc\"}";
+    let signature = store
+        .sign_transcript(profile, domain, transcript)
+        .expect("sign exact bytes");
+    let public = store.export_public().expect("public identity");
+    // Independent wire vector: Python cryptography 50's Ed25519 plus
+    // hashlib.sha256 and binascii.crc_hqx for the NKey public encoding.
+    assert_eq!(
+        public.public_key,
+        "UDLMG66HZDPUNEEGMQFYMSVJU3L6FEDIMGFA6WNYR7E5QBGVSBIWAZLC"
+    );
+    const EXPECTED: [u8; IDENTITY_TRANSCRIPT_SIGNATURE_BYTES] = [
+        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x2f, 0x32, 0x47,
+        0x02, 0xdf, 0xcb, 0x1b, 0x36, 0xa1, 0x0e, 0x0c, 0x5a, 0xf0, 0x53, 0xde,
+        0x68, 0x64, 0x83, 0xdc, 0xf9, 0x20, 0xee, 0xa3, 0x4c, 0x90, 0x48, 0x2d,
+        0x40, 0x25, 0xc3, 0x31, 0xae, 0x8d, 0x27, 0x68, 0xd9, 0x60, 0x5c, 0x40,
+        0xc1, 0x26, 0x79, 0xea, 0x81, 0x67, 0xb4, 0x5e, 0x7c, 0x8c, 0x80, 0x1b,
+        0x31, 0xbb, 0x23, 0x63, 0x0c, 0x23, 0x74, 0x49, 0xae, 0x7d, 0x33, 0x03,
+        0xfa, 0x03, 0x00, 0xcf, 0xc8, 0x43, 0x4a, 0x4e, 0x71, 0xc3, 0x55, 0xc0,
+        0x51, 0x06, 0x65, 0x3b, 0x6e, 0xf0, 0x62, 0x27, 0xcc, 0xc4, 0x65, 0x30,
+        0xe3, 0x49, 0x29, 0xfa, 0x5e, 0x42, 0xbd, 0xce, 0x07,
+    ];
+    assert_eq!(signature.to_bytes(), EXPECTED);
+    let verifier = IdentityTranscriptVerificationKey::from_public_identity(
+        profile,
+        &public,
+        store.active_generation(),
+    )
+    .expect("import trusted public identity");
+
+    assert_eq!(signature.profile(), profile);
+    assert_eq!(signature.generation(), public.generation);
+    assert_eq!(signature.fingerprint(), public.fingerprint);
+    assert_eq!(verifier.public_identity(), &public);
+    assert_eq!(
+        verifier.verify_transcript(domain, transcript, &signature),
+        Ok(())
+    );
+    assert_eq!(
+        store.verify_transcript(domain, transcript, &signature),
+        Ok(())
+    );
+    let decoded = IdentityTranscriptSignature::from_bytes(&EXPECTED)
+        .expect("decode independent public signature");
+    assert_eq!(decoded, signature);
+    assert_eq!(
+        verifier.verify_transcript(domain, transcript, &decoded),
+        Ok(())
+    );
+
+    let loaded = IdentityKeyStore::load(&path).expect("reload store");
+    assert_eq!(
+        loaded
+            .sign_transcript(profile, domain, transcript)
+            .expect("sign after reload"),
+        signature,
+        "the explicit profile and same durable identity produce a stable signature"
+    );
+    let seed = &store.record.keys[0].seed;
+    assert!(!format!("{signature:?}").contains(seed));
+    assert!(!format!("{verifier:?}").contains(seed));
+}
+
+#[test]
+fn transcript_signatures_bind_domain_boundaries_and_exact_payload_bytes() {
+    let dir = tempdir().expect("tempdir");
+    let store =
+        IdentityKeyStore::create(dir.path().join("identity.json"), strong_seed(21), 100)
+            .expect("create store");
+    let profile = TranscriptSigningProfile::Ed25519Sha256V1;
+    let signature = store
+        .sign_transcript(profile, b"ab", b"c\0")
+        .expect("sign");
+    for (domain, transcript) in [
+        (b"a".as_slice(), b"bc\0".as_slice()),
+        (b"ab".as_slice(), b"c".as_slice()),
+        (b"ab\0".as_slice(), b"c\0".as_slice()),
+        (b"ab".as_slice(), b"C\0".as_slice()),
+    ] {
+        assert_eq!(
+            store.verify_transcript(domain, transcript, &signature),
+            Err(IdentityTranscriptError::Verification)
+        );
+    }
+
+    let max_domain = [0xff; 255];
+    let empty = store
+        .sign_transcript(profile, &max_domain, b"")
+        .expect("empty transcript");
+    assert_eq!(store.verify_transcript(&max_domain, b"", &empty), Ok(()));
+    assert_eq!(
+        store.sign_transcript(profile, b"", b"payload"),
+        Err(IdentityTranscriptError::Domain)
+    );
+    assert_eq!(
+        store.sign_transcript(profile, &[0; 256], b"payload"),
+        Err(IdentityTranscriptError::Domain)
+    );
+    assert_eq!(
+        store.verify_transcript(b"", b"c\0", &signature),
+        Err(IdentityTranscriptError::Domain)
+    );
+}
+
+#[test]
+fn transcript_signature_envelopes_reject_malformed_and_unknown_profiles() {
+    for actual in [0, 1, 64, 104, 106, 128] {
+        assert_eq!(
+            IdentityTranscriptSignature::from_bytes(&vec![0; actual]),
+            Err(IdentityTranscriptError::SignatureLength { actual })
+        );
+    }
+    let mut wire = [0; IDENTITY_TRANSCRIPT_SIGNATURE_BYTES];
+    wire[8] = 1;
+    for profile in [0, 2, 255] {
+        wire[0] = profile;
+        assert_eq!(
+            IdentityTranscriptSignature::from_bytes(&wire),
+            Err(IdentityTranscriptError::UnknownProfile(profile))
+        );
+    }
+    wire[0] = TranscriptSigningProfile::Ed25519Sha256V1.wire_id();
+    wire[8] = 0;
+    assert_eq!(
+        IdentityTranscriptSignature::from_bytes(&wire),
+        Err(IdentityTranscriptError::InvalidGeneration)
+    );
+}
+
+#[test]
+fn transcript_signatures_reject_key_generation_and_signature_substitution() {
+    let dir = tempdir().expect("tempdir");
+    let first = IdentityKeyStore::create(dir.path().join("first.json"), strong_seed(22), 100)
+        .expect("first store");
+    let second = IdentityKeyStore::create(dir.path().join("second.json"), strong_seed(23), 100)
+        .expect("second store");
+    let profile = TranscriptSigningProfile::Ed25519Sha256V1;
+    let signature = first
+        .sign_transcript(profile, b"test:v1", b"payload")
+        .expect("sign");
+    let verifier = first
+        .transcript_verification_key(profile)
+        .expect("verifier");
+    assert_eq!(
+        second.verify_transcript(b"test:v1", b"payload", &signature),
+        Err(IdentityTranscriptError::IdentityMismatch)
+    );
+
+    let mut wire = signature.to_bytes();
+    wire[1..9].copy_from_slice(&2_u64.to_be_bytes());
+    let retagged = IdentityTranscriptSignature::from_bytes(&wire).expect("retag generation");
+    assert_eq!(
+        verifier.verify_transcript(b"test:v1", b"payload", &retagged),
+        Err(IdentityTranscriptError::IdentityMismatch)
+    );
+    assert_eq!(
+        first.verify_transcript(b"test:v1", b"payload", &retagged),
+        Err(IdentityTranscriptError::InactiveGeneration)
+    );
+
+    let mut wire = signature.to_bytes();
+    let other_public = second.export_public().expect("second identity");
+    wire[9..41].copy_from_slice(&other_public.fingerprint.as_bytes());
+    let retagged = IdentityTranscriptSignature::from_bytes(&wire).expect("retag fingerprint");
+    assert_eq!(
+        second.verify_transcript(b"test:v1", b"payload", &retagged),
+        Err(IdentityTranscriptError::Verification),
+        "rewriting the envelope cannot transfer a signature to another key"
+    );
+
+    let mut wire = signature.to_bytes();
+    wire[41..].fill(0);
+    let forged = IdentityTranscriptSignature::from_bytes(&wire).expect("framed forgery");
+    assert_eq!(
+        verifier.verify_transcript(b"test:v1", b"payload", &forged),
+        Err(IdentityTranscriptError::Verification)
+    );
+}
+
+#[test]
+fn transcript_verifier_import_rejects_untrusted_or_malformed_identity_metadata() {
+    let dir = tempdir().expect("tempdir");
+    let store = IdentityKeyStore::create(dir.path().join("identity.json"), strong_seed(24), 100)
+        .expect("create store");
+    let profile = TranscriptSigningProfile::Ed25519Sha256V1;
+    let public = store.export_public().expect("public identity");
+    let import = |identity: &PublicIdentityKey, active| {
+        IdentityTranscriptVerificationKey::from_public_identity(profile, identity, active)
+            .expect_err("invalid identity must fail closed")
+    };
+    assert_eq!(
+        import(&public, 0),
+        IdentityTranscriptError::InvalidGeneration
+    );
+    assert_eq!(
+        import(&public, 2),
+        IdentityTranscriptError::InactiveGeneration
+    );
+    let mut invalid = public.clone();
+    invalid.revoked = true;
+    assert_eq!(import(&invalid, 1), IdentityTranscriptError::Revoked);
+    let mut invalid = public.clone();
+    invalid.fingerprint = KeyFingerprint([0; 32]);
+    assert_eq!(
+        import(&invalid, 1),
+        IdentityTranscriptError::FingerprintMismatch
+    );
+    let mut invalid = public.clone();
+    invalid.public_key = KeyPair::new_from_raw(KeyPairType::Account, strong_seed(25))
+        .expect("account key")
+        .public_key();
+    assert_eq!(import(&invalid, 1), IdentityTranscriptError::PublicKey);
+    let mut invalid = public.clone();
+    invalid.public_key.make_ascii_lowercase();
+    assert_eq!(import(&invalid, 1), IdentityTranscriptError::PublicKey);
+    let mut invalid = public;
+    invalid.public_key.clone_from(&store.record.keys[0].seed);
+    let error = import(&invalid, 1);
+    assert_eq!(error, IdentityTranscriptError::PublicKey);
+    assert!(!error.to_string().contains(&invalid.public_key));
+    assert!(!format!("{error:?}").contains(&invalid.public_key));
+}
+
+#[test]
+fn transcript_verification_tracks_rotation_and_revocation_in_current_store() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("identity.json");
+    let mut store = IdentityKeyStore::create(&path, strong_seed(26), 100).expect("create store");
+    let profile = TranscriptSigningProfile::Ed25519Sha256V1;
+    let old_public = store.export_public().expect("old identity");
+    let old_verifier = store
+        .transcript_verification_key(profile)
+        .expect("old verifier");
+    let old_signature = store
+        .sign_transcript(profile, b"test:v1", b"payload")
+        .expect("sign");
+    let new_public = store.rotate(strong_seed(27), 200).expect("rotate");
+    assert_eq!(
+        store.verify_transcript(b"test:v1", b"payload", &old_signature),
+        Err(IdentityTranscriptError::InactiveGeneration)
+    );
+    assert_eq!(
+        IdentityTranscriptVerificationKey::from_public_identity(
+            profile,
+            &old_public,
+            new_public.generation,
+        )
+        .expect_err("retired key cannot become a current verifier"),
+        IdentityTranscriptError::InactiveGeneration
+    );
+    assert_eq!(
+        old_verifier.verify_transcript(b"test:v1", b"payload", &old_signature),
+        Ok(()),
+        "detached verifiers are explicitly public trust snapshots"
+    );
+    let current = store
+        .sign_transcript(profile, b"test:v1", b"payload")
+        .expect("sign after rotation");
+    assert_eq!(current.generation(), new_public.generation);
+    assert_eq!(current.fingerprint(), new_public.fingerprint);
+    assert_ne!(current, old_signature);
+    assert_eq!(
+        store.verify_transcript(b"test:v1", b"payload", &current),
+        Ok(())
+    );
+
+    let revoked = store
+        .revoke(old_public.fingerprint, 300)
+        .expect("revoke old identity");
+    assert_eq!(
+        IdentityTranscriptVerificationKey::from_public_identity(profile, &revoked, revoked.generation)
+            .expect_err("revoked public record is rejected"),
+        IdentityTranscriptError::Revoked
+    );
+    let loaded = IdentityKeyStore::load(&path).expect("load rotated store");
+    for current_store in [&store, &loaded] {
+        assert_eq!(
+            current_store.verify_transcript(b"test:v1", b"payload", &old_signature),
+            Err(IdentityTranscriptError::Revoked)
+        );
+        assert_eq!(
+            current_store.verify_transcript(b"test:v1", b"payload", &current),
+            Ok(())
+        );
+    }
+}
+
+#[test]
+fn transcript_signing_keeps_the_durable_identity_after_failed_rotation() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("identity.json");
+    let mut store = IdentityKeyStore::create(&path, strong_seed(28), 100).expect("create store");
+    let profile = TranscriptSigningProfile::Ed25519Sha256V1;
+    let signature = store
+        .sign_transcript(profile, b"test:v1", b"payload")
+        .expect("sign");
+    let pending = pending_path(&path).expect("pending path");
+    fs::create_dir(&pending).expect("block persistence");
+    assert!(store.rotate(strong_seed(29), 200).is_err());
+    assert_eq!(
+        store
+            .sign_transcript(profile, b"test:v1", b"payload")
+            .expect("sign after failed rotation"),
+        signature
+    );
+    assert_eq!(
+        store.verify_transcript(b"test:v1", b"payload", &signature),
+        Ok(())
+    );
+    let loaded = IdentityKeyStore::load(&path).expect("load unchanged identity");
+    assert_eq!(
+        loaded.verify_transcript(b"test:v1", b"payload", &signature),
+        Ok(())
+    );
+}
+
+#[test]
 fn create_load_and_export_public_identity_key() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("identity.json");

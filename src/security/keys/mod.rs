@@ -725,6 +725,289 @@ pub struct PublicIdentityKey {
     pub revoked: bool,
 }
 
+/// Wire width of an [`IdentityTranscriptSignature`].
+pub const IDENTITY_TRANSCRIPT_SIGNATURE_BYTES: usize = 105;
+
+const IDENTITY_TRANSCRIPT_DOMAIN: &[u8] = b"ASUPERSYNC-IDENTITY-TRANSCRIPT-V1\0";
+const MAX_TRANSCRIPT_DOMAIN_BYTES: usize = 255;
+
+/// An explicit, versioned identity-transcript signing algorithm.
+///
+/// The implementation uses the existing NKey Ed25519 primitive. This additive
+/// interface does not replace the NKey codec or authorize a JWT issuer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TranscriptSigningProfile {
+    /// Ed25519 over the SHA-256 digest of the framed identity transcript.
+    /// This is an application-level digest profile, not RFC 8032 Ed25519ph.
+    Ed25519Sha256V1,
+}
+
+impl TranscriptSigningProfile {
+    /// Return the stable wire identifier.
+    #[must_use]
+    pub const fn wire_id(self) -> u8 {
+        match self {
+            Self::Ed25519Sha256V1 => 1,
+        }
+    }
+
+    /// Parse an exact profile identifier without an algorithm fallback.
+    pub fn from_wire_id(id: u8) -> Result<Self, IdentityTranscriptError> {
+        match id {
+            1 => Ok(Self::Ed25519Sha256V1),
+            _ => Err(IdentityTranscriptError::UnknownProfile(id)),
+        }
+    }
+}
+
+/// Redacted failures at the identity-transcript boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum IdentityTranscriptError {
+    /// No implementation is registered for the supplied wire profile.
+    #[error("unsupported identity transcript signing profile: {0}")]
+    UnknownProfile(u8),
+    /// The signature envelope does not have its exact fixed width.
+    #[error("identity transcript signature has {actual} bytes, expected 105")]
+    SignatureLength {
+        /// Supplied envelope length; the bytes themselves are never echoed.
+        actual: usize,
+    },
+    /// Generation zero is never issued by an identity key store.
+    #[error("identity transcript key generation must be nonzero")]
+    InvalidGeneration,
+    /// The supplied key is not a canonical public User NKey.
+    #[error("invalid identity transcript public key")]
+    PublicKey,
+    /// Public key bytes and the supplied fingerprint do not agree.
+    #[error("identity transcript public-key fingerprint mismatch")]
+    FingerprintMismatch,
+    /// This key generation has been explicitly revoked.
+    #[error("identity transcript key generation is revoked")]
+    Revoked,
+    /// The supplied generation is not the currently trusted generation.
+    #[error("identity transcript key generation is retired or not currently trusted")]
+    InactiveGeneration,
+    /// The signature names another pinned key or generation.
+    #[error("identity transcript signature does not match the pinned identity")]
+    IdentityMismatch,
+    /// The signature names another pinned algorithm profile.
+    #[error("identity transcript signature profile mismatch")]
+    ProfileMismatch,
+    /// Application domains must be nonempty and at most 255 bytes.
+    #[error("identity transcript domain must contain 1 to 255 bytes")]
+    Domain,
+    /// The transcript cannot be represented by the profile's length field.
+    #[error("identity transcript length exceeds the signing profile")]
+    TranscriptLength,
+    /// The loaded key store could not provide its active signing identity.
+    #[error("identity transcript signing key is unavailable")]
+    KeyUnavailable,
+    /// The incumbent primitive could not produce a signature.
+    #[error("identity transcript signing failed")]
+    Signing,
+    /// The signature does not authenticate the exact supplied transcript.
+    #[error("identity transcript signature verification failed")]
+    Verification,
+}
+
+/// An opaque, public signature bound to a profile and identity generation.
+///
+/// The wire format is exactly: one profile byte, a big-endian u64
+/// generation, 32 fingerprint bytes, and 64 Ed25519 signature bytes.
+/// Parsing establishes framing only; call a trusted verification key or the
+/// current [`IdentityKeyStore`] to authenticate the envelope and transcript.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct IdentityTranscriptSignature {
+    profile: TranscriptSigningProfile,
+    generation: u64,
+    fingerprint: KeyFingerprint,
+    signature: [u8; 64],
+}
+
+impl IdentityTranscriptSignature {
+    /// Decode an exact-width signature, refusing unknown algorithm profiles.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, IdentityTranscriptError> {
+        let bytes: &[u8; IDENTITY_TRANSCRIPT_SIGNATURE_BYTES] = bytes
+            .try_into()
+            .map_err(|_| IdentityTranscriptError::SignatureLength { actual: bytes.len() })?;
+        let profile = TranscriptSigningProfile::from_wire_id(bytes[0])?;
+        let mut generation = [0; 8];
+        generation.copy_from_slice(&bytes[1..9]);
+        let generation = u64::from_be_bytes(generation);
+        if generation == 0 {
+            return Err(IdentityTranscriptError::InvalidGeneration);
+        }
+        let mut fingerprint = [0; 32];
+        fingerprint.copy_from_slice(&bytes[9..41]);
+        let mut signature = [0; 64];
+        signature.copy_from_slice(&bytes[41..]);
+        Ok(Self {
+            profile,
+            generation,
+            fingerprint: KeyFingerprint(fingerprint),
+            signature,
+        })
+    }
+
+    /// Encode the complete public signature without exposing key material.
+    #[must_use]
+    pub fn to_bytes(self) -> [u8; IDENTITY_TRANSCRIPT_SIGNATURE_BYTES] {
+        let mut bytes = [0; IDENTITY_TRANSCRIPT_SIGNATURE_BYTES];
+        bytes[0] = self.profile.wire_id();
+        bytes[1..9].copy_from_slice(&self.generation.to_be_bytes());
+        bytes[9..41].copy_from_slice(&self.fingerprint.as_bytes());
+        bytes[41..].copy_from_slice(&self.signature);
+        bytes
+    }
+
+    /// Return the exact signing profile.
+    #[must_use]
+    pub const fn profile(&self) -> TranscriptSigningProfile {
+        self.profile
+    }
+
+    /// Return the authenticated generation claim, pending verification.
+    #[must_use]
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Return the authenticated key claim, pending verification.
+    #[must_use]
+    pub const fn fingerprint(&self) -> KeyFingerprint {
+        self.fingerprint
+    }
+}
+
+impl fmt::Debug for IdentityTranscriptSignature {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("IdentityTranscriptSignature")
+            .field("profile", &self.profile)
+            .field("generation", &self.generation)
+            .field("fingerprint", &self.fingerprint)
+            .finish_non_exhaustive()
+    }
+}
+
+/// An opaque snapshot of one explicitly trusted public signing identity.
+///
+/// Import this from a trusted identity source, never from an untrusted
+/// signature's claimed key. The caller supplies the independently trusted
+/// active generation; revoked and retired records cannot be imported.
+/// A detached snapshot cannot discover subsequent rotations or revocations.
+/// Refresh it when trust changes, or use [`IdentityKeyStore::verify_transcript`]
+/// to consult the current state of the loaded store on every verification.
+#[derive(Debug, Clone)]
+pub struct IdentityTranscriptVerificationKey {
+    profile: TranscriptSigningProfile,
+    identity: PublicIdentityKey,
+}
+
+impl IdentityTranscriptVerificationKey {
+    /// Pin a canonical public User NKey and its active generation.
+    ///
+    /// Cryptographic verification retains the incumbent NKey primitive's
+    /// semantics. Pin keys generated by an authoritative identity store;
+    /// this is not a new strict Ed25519 public-key admission policy.
+    pub fn from_public_identity(
+        profile: TranscriptSigningProfile,
+        identity: &PublicIdentityKey,
+        active_generation: u64,
+    ) -> Result<Self, IdentityTranscriptError> {
+        if identity.generation == 0 || active_generation == 0 {
+            return Err(IdentityTranscriptError::InvalidGeneration);
+        }
+        if identity.revoked {
+            return Err(IdentityTranscriptError::Revoked);
+        }
+        if identity.generation != active_generation {
+            return Err(IdentityTranscriptError::InactiveGeneration);
+        }
+        if identity.public_key.len() != 56 {
+            return Err(IdentityTranscriptError::PublicKey);
+        }
+        let key = KeyPair::from_public_key(&identity.public_key)
+            .map_err(|_| IdentityTranscriptError::PublicKey)?;
+        if key.key_pair_type() != KeyPairType::User || key.public_key() != identity.public_key {
+            return Err(IdentityTranscriptError::PublicKey);
+        }
+        let fingerprint = KeyFingerprint::from_public_key(identity.public_key.as_bytes())
+            .map_err(|_| IdentityTranscriptError::PublicKey)?;
+        if fingerprint != identity.fingerprint {
+            return Err(IdentityTranscriptError::FingerprintMismatch);
+        }
+        Ok(Self {
+            profile,
+            identity: identity.clone(),
+        })
+    }
+
+    /// Return the non-secret identity snapshot that was pinned.
+    #[must_use]
+    pub fn public_identity(&self) -> &PublicIdentityKey {
+        &self.identity
+    }
+
+    /// Verify the exact domain and transcript against this pinned identity.
+    ///
+    /// No JSON, text, or application-level canonicalization is performed.
+    /// Authentication does not imply authorization or replay protection.
+    pub fn verify_transcript(
+        &self,
+        domain: &[u8],
+        transcript: &[u8],
+        signature: &IdentityTranscriptSignature,
+    ) -> Result<(), IdentityTranscriptError> {
+        if signature.profile != self.profile {
+            return Err(IdentityTranscriptError::ProfileMismatch);
+        }
+        if signature.generation != self.identity.generation
+            || signature.fingerprint != self.identity.fingerprint
+        {
+            return Err(IdentityTranscriptError::IdentityMismatch);
+        }
+        let digest = identity_transcript_digest(
+            self.profile,
+            self.identity.generation,
+            self.identity.fingerprint,
+            domain,
+            transcript,
+        )?;
+        KeyPair::from_public_key(&self.identity.public_key)
+            .map_err(|_| IdentityTranscriptError::PublicKey)?
+            .verify(&digest, &signature.signature)
+            .map_err(|_| IdentityTranscriptError::Verification)
+    }
+}
+
+fn identity_transcript_digest(
+    profile: TranscriptSigningProfile,
+    generation: u64,
+    fingerprint: KeyFingerprint,
+    domain: &[u8],
+    transcript: &[u8],
+) -> Result<[u8; 32], IdentityTranscriptError> {
+    if domain.is_empty() || domain.len() > MAX_TRANSCRIPT_DOMAIN_BYTES {
+        return Err(IdentityTranscriptError::Domain);
+    }
+    let domain_len = u8::try_from(domain.len()).map_err(|_| IdentityTranscriptError::Domain)?;
+    let transcript_len =
+        u64::try_from(transcript.len()).map_err(|_| IdentityTranscriptError::TranscriptLength)?;
+    let mut digest = Sha256::new();
+    digest.update(IDENTITY_TRANSCRIPT_DOMAIN);
+    digest.update([profile.wire_id()]);
+    digest.update(generation.to_be_bytes());
+    digest.update(fingerprint.as_bytes());
+    digest.update([domain_len]);
+    digest.update(domain);
+    digest.update(transcript_len.to_be_bytes());
+    digest.update(transcript);
+    Ok(digest.finalize().into())
+}
+
 /// Platform-specific key-file hardening strategy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyStorePlatform {
@@ -834,6 +1117,103 @@ impl IdentityKeyStore {
     /// Return the active NKey key pair for signing.
     pub fn active_key_pair(&self) -> Result<KeyPair, KeyStoreError> {
         self.key_pair_for(self.active_key_record()?)
+    }
+
+    /// Export an opaque verifier for the active identity and explicit profile.
+    ///
+    /// This contains only public material. It is a snapshot: another store
+    /// instance or clone can rotate independently, so applications must reload
+    /// their store and refresh exported verifiers when authoritative trust
+    /// changes. No disk access or ambient time is used by this operation.
+    pub fn transcript_verification_key(
+        &self,
+        profile: TranscriptSigningProfile,
+    ) -> Result<IdentityTranscriptVerificationKey, IdentityTranscriptError> {
+        let identity = self
+            .export_public()
+            .map_err(|_| IdentityTranscriptError::KeyUnavailable)?;
+        IdentityTranscriptVerificationKey::from_public_identity(
+            profile,
+            &identity,
+            self.record.active_generation,
+        )
+    }
+
+    /// Sign exact caller-supplied canonical bytes under an application domain.
+    ///
+    /// The profile signs the SHA-256 digest of this unambiguous byte sequence:
+    /// ASUPERSYNC-IDENTITY-TRANSCRIPT-V1\0, profile (u8), generation
+    /// (u64 big-endian), fingerprint (32 bytes), domain length (u8), domain,
+    /// transcript length (u64 big-endian), transcript. Domains must contain
+    /// 1 to 255 bytes. Empty transcripts are allowed. Hashing borrows the input
+    /// and does not allocate a second transcript-sized buffer.
+    ///
+    /// The active public identity and signing key come from the same immutable
+    /// store record. The existing NKey primitive signs the digest; no secret
+    /// material or external key type crosses this API. Secret erasure retains
+    /// the existing store/primitive guarantees; this does not erase the legacy
+    /// persisted seed, store clones, or caller-created copies.
+    pub fn sign_transcript(
+        &self,
+        profile: TranscriptSigningProfile,
+        domain: &[u8],
+        transcript: &[u8],
+    ) -> Result<IdentityTranscriptSignature, IdentityTranscriptError> {
+        let active = self
+            .active_key_record()
+            .map_err(|_| IdentityTranscriptError::KeyUnavailable)?;
+        let identity = active
+            .public_view()
+            .map_err(|_| IdentityTranscriptError::KeyUnavailable)?;
+        let digest = identity_transcript_digest(
+            profile,
+            identity.generation,
+            identity.fingerprint,
+            domain,
+            transcript,
+        )?;
+        let key = self
+            .key_pair_for(active)
+            .map_err(|_| IdentityTranscriptError::KeyUnavailable)?;
+        let signature = key
+            .sign(&digest)
+            .map_err(|_| IdentityTranscriptError::Signing)?
+            .try_into()
+            .map_err(|_| IdentityTranscriptError::Signing)?;
+        Ok(IdentityTranscriptSignature {
+            profile,
+            generation: identity.generation,
+            fingerprint: identity.fingerprint,
+            signature,
+        })
+    }
+
+    /// Verify using the active generation of this loaded store.
+    ///
+    /// Retired, unknown and revoked generations fail before cryptographic
+    /// verification. Unlike a detached verifier, this observes rotations and
+    /// revocations performed through this instance. Independently loaded or
+    /// cloned stores retain snapshots and must be refreshed by the caller.
+    pub fn verify_transcript(
+        &self,
+        domain: &[u8],
+        transcript: &[u8],
+        signature: &IdentityTranscriptSignature,
+    ) -> Result<(), IdentityTranscriptError> {
+        let key = self
+            .record
+            .keys
+            .iter()
+            .find(|key| key.generation == signature.generation)
+            .ok_or(IdentityTranscriptError::InactiveGeneration)?;
+        if key.revoked {
+            return Err(IdentityTranscriptError::Revoked);
+        }
+        if key.generation != self.record.active_generation {
+            return Err(IdentityTranscriptError::InactiveGeneration);
+        }
+        self.transcript_verification_key(signature.profile)?
+            .verify_transcript(domain, transcript, signature)
     }
 
     /// Rotate to a new active key generation.
