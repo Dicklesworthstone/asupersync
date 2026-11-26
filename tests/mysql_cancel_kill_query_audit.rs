@@ -57,6 +57,29 @@ enum KillPeer {
     SilentReply,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum ExplicitCancellation {
+    Acknowledged,
+    Rejected,
+    Cancelled,
+    Abandoned,
+}
+
+#[test]
+fn mysql_explicit_cancel_retires_only_acknowledged_kill_ownership() {
+    let _serial = SERIAL.lock().unwrap();
+    for workers in [0, 2] {
+        for completion in [
+            ExplicitCancellation::Acknowledged,
+            ExplicitCancellation::Rejected,
+            ExplicitCancellation::Cancelled,
+            ExplicitCancellation::Abandoned,
+        ] {
+            explicit_cancellation_case(workers, completion);
+        }
+    }
+}
+
 #[test]
 fn mysql_cancel_sends_kill_query_audit() {
     let _serial = SERIAL.lock().unwrap();
@@ -278,6 +301,156 @@ fn stream_header(socket: &mut std::net::TcpStream) {
     column.extend_from_slice(&[12, 33, 0, 11, 0, 0, 0, 3, 0, 0, 0, 0, 0]);
     write_packet(socket, 2, &column);
     write_packet(socket, 3, &[0xfe, 0, 0, 2, 0]);
+}
+
+fn explicit_cancellation_case(workers: usize, completion: ExplicitCancellation) {
+    assert_eq!(test_active_mysql_drop_kills(), 0);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let query_seen = Arc::new(asupersync::sync::Notify::new());
+    let peer_query_seen = Arc::clone(&query_seen);
+    let kill_seen = Arc::new(asupersync::sync::Notify::new());
+    let peer_kill_seen = Arc::clone(&kill_seen);
+    let (dropped_tx, dropped_rx) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let mut main = accept(&listener);
+        authenticate(&mut main, 42, true);
+        assert_eq!(
+            read_packet(&mut main),
+            (0, b"\x03SELECT SLEEP(30)".to_vec())
+        );
+        peer_query_seen.notify_one();
+
+        let mut explicit = accept(&listener);
+        authenticate(&mut explicit, 43, true);
+        assert_eq!(
+            read_packet(&mut explicit),
+            (0, b"\x03KILL QUERY 42".to_vec())
+        );
+        peer_kill_seen.notify_one();
+        match completion {
+            ExplicitCancellation::Acknowledged => write_packet(&mut explicit, 1, OK),
+            ExplicitCancellation::Rejected => {
+                // ER_KILL_DENIED_ERROR (1095), with a protocol-4.1 SQLSTATE.
+                write_packet(
+                    &mut explicit,
+                    1,
+                    b"\xff\x47\x04#HY000KILL denied by audit peer",
+                );
+            }
+            ExplicitCancellation::Cancelled | ExplicitCancellation::Abandoned => {
+                // Withhold the final reply until the client cancels or drops
+                // this actually pending, already transmitted KILL exchange.
+            }
+        }
+        assert_eof(&mut explicit);
+        if !matches!(completion, ExplicitCancellation::Acknowledged) {
+            let mut fallback = accept(&listener);
+            authenticate(&mut fallback, 44, true);
+            assert_eq!(
+                read_packet(&mut fallback),
+                (0, b"\x03KILL QUERY 42".to_vec())
+            );
+            write_packet(&mut fallback, 1, OK);
+            assert_eof(&mut fallback);
+        }
+        assert_eof(&mut main);
+        // Drop acquires any cleanup permit synchronously. Waiting for its
+        // completion marker and then every permit prevents a delayed duplicate
+        // connection from escaping the negative wire assertion.
+        dropped_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while test_active_mysql_drop_kills() != 0 {
+            assert!(
+                Instant::now() < deadline,
+                "explicit cancellation retained a cleanup thread"
+            );
+            thread::park_timeout(Duration::from_millis(1));
+        }
+        assert!(
+            matches!(listener.accept(), Err(ref error) if error.kind() == std::io::ErrorKind::WouldBlock),
+            "completion={completion:?}: unexpected extra KILL connection"
+        );
+    });
+    let builder = if workers == 0 {
+        RuntimeBuilder::current_thread()
+    } else {
+        RuntimeBuilder::multi_thread().worker_threads(workers)
+    };
+    let runtime = builder.build().unwrap();
+    let cleanup_cx = runtime.request_cx_with_budget(Budget::INFINITE);
+    let join = runtime.handle().spawn(async move {
+        let cx = Cx::current().unwrap();
+        asupersync::time::timeout(cx.now(), Duration::from_secs(10), async {
+            let mut connection = match MySqlConnection::connect(
+                &cx,
+                &format!("mysql://test:test@{address}/test"),
+            )
+            .await
+            {
+                Outcome::Ok(connection) => connection,
+                other => panic!("main connect: {other:?}"),
+            };
+            let mut query = Box::pin(connection.query_static_sql(&cx, "SELECT SLEEP(30)"));
+            let observed = query_seen.notified();
+            let mut observed = std::pin::pin!(observed);
+            poll_fn(|task_cx| {
+                assert!(query.as_mut().poll(task_cx).is_pending());
+                observed.as_mut().poll(task_cx)
+            })
+            .await;
+            drop(query);
+
+            let mut cancellation = Box::pin(connection.cancel_in_flight_query(&cleanup_cx));
+            match completion {
+                ExplicitCancellation::Acknowledged => cancellation.await.unwrap(),
+                ExplicitCancellation::Rejected => assert!(matches!(
+                    cancellation.await,
+                    Err(MySqlError::Server { code: 1095, .. })
+                )),
+                ExplicitCancellation::Cancelled | ExplicitCancellation::Abandoned => {
+                    let observed = kill_seen.notified();
+                    let mut observed = std::pin::pin!(observed);
+                    poll_fn(|task_cx| {
+                        assert!(cancellation.as_mut().poll(task_cx).is_pending());
+                        observed.as_mut().poll(task_cx)
+                    })
+                    .await;
+                    if matches!(completion, ExplicitCancellation::Cancelled) {
+                        let reason = CancelReason::user("explicit KILL cancellation");
+                        cleanup_cx.cancel_with_reason(reason.clone());
+                        assert!(
+                            matches!(cancellation.await, Err(MySqlError::Cancelled(actual)) if actual == reason)
+                        );
+                        assert!(cx.checkpoint().is_ok());
+                    } else {
+                        drop(cancellation);
+                    }
+                }
+            }
+            // Successful KILL acknowledgement retires cleanup ownership, not
+            // the abandoned original exchange's poison. A failed reuse must
+            // also preserve the fallback for every unacknowledged case.
+            assert!(matches!(
+                connection.query_static_sql(&cx, "SELECT 1").await,
+                Outcome::Err(MySqlError::ConnectionClosed)
+            ));
+            drop(connection);
+            dropped_tx.send(()).unwrap();
+        })
+        .await
+        .expect("bounded explicit MySQL cancellation journey");
+    });
+    runtime.block_on(join);
+    server.join().unwrap();
+    let report = runtime.shutdown_drained(Duration::from_secs(2));
+    assert_eq!(report.outcome, RootDrainOutcome::Quiescent, "{report:?}");
+    assert_eq!(test_active_mysql_drop_kills(), 0);
+    eprintln!(
+        "event=mysql_explicit_cancel workers={workers} completion={completion:?} \
+         parked=true original_reuse=false cleanup_threads=0"
+    );
 }
 
 fn cancellation_case(workers: usize, cancel: bool, operation: Operation, peer: KillPeer) {

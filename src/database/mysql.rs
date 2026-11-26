@@ -2636,6 +2636,8 @@ struct MySqlConnectionInner {
     /// dispatches a best-effort `KILL QUERY <connection_id>` on a
     /// separate thread to stop the server from continuing to execute
     /// the abandoned query — locks released, throughput restored.
+    /// An acknowledged explicit cancellation also clears this flag,
+    /// retiring Drop's cleanup without clearing the protocol poison.
     /// `AtomicBool` rather than plain `bool` because the inner
     /// MySqlConnectionInner is moved through Drop and we want a
     /// release/acquire fence between the last query method and Drop
@@ -3640,10 +3642,11 @@ impl MySqlConnection {
     /// * An I/O timeout if the complete connect/auth/KILL exchange exceeds
     ///   500ms (or the configured connect timeout, when smaller).
     ///
-    /// After this returns successfully, the original connection (`self`)
-    /// should be dropped — the server has already stopped processing
-    /// the in-flight query, but the original socket is still open and
-    /// out of sync. The caller is responsible for the drop.
+    /// Success means the server acknowledged the cancellation request; the
+    /// target query may still be completing its cancellation and cleanup.
+    /// Drop the original connection (`self`): its reply has not been drained,
+    /// and this method does not restore its usability. Acknowledgement retires
+    /// Drop's fallback KILL, while failed or abandoned cleanup leaves it armed.
     ///
     /// br-asupersync-og4pm6.
     pub async fn cancel_in_flight_query(&self, cx: &Cx) -> Result<(), MySqlError> {
@@ -3664,7 +3667,13 @@ impl MySqlConnection {
             #[cfg(feature = "tls")]
             self.inner.stream.connector(),
         )
-        .await
+        .await?;
+        // Retire only the cleanup responsibility, not the protocol poison.
+        // Failed or abandoned cleanup retains Drop's fallback.
+        self.inner
+            .query_in_flight
+            .store(false, std::sync::atomic::Ordering::Release);
+        Ok(())
     }
 
     /// One bounded cleanup exchange, shared by explicit, drain, and Drop paths.

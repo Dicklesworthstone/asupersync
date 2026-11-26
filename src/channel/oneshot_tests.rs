@@ -299,7 +299,10 @@ mod tests {
         assert!(handle.try_join().unwrap().is_some());
         let stats = mailbox.stats();
         assert_eq!(stats.reserved, 0);
-        assert_eq!(stats.committed + stats.aborted + stats.leaked + stats.refused, 0);
+        assert_eq!(
+            stats.committed + stats.aborted + stats.leaked + stats.refused,
+            0
+        );
         assert_eq!(stats.posted, stats.applied);
         assert_eq!(mailbox.open_tickets(), 0);
         assert_eq!(lab.state.pending_obligation_count(), 0);

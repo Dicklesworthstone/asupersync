@@ -804,7 +804,10 @@ fn native_recoverable_oneshot_reservation_preserves_a_parked_receiver_until_quot
 
     for (flavor, builder) in [
         ("current-thread", RuntimeBuilder::current_thread()),
-        ("two-workers", RuntimeBuilder::multi_thread().worker_threads(2)),
+        (
+            "two-workers",
+            RuntimeBuilder::multi_thread().worker_threads(2),
+        ),
     ] {
         let runtime = builder
             .root_region_limits(RegionLimits {
@@ -818,7 +821,9 @@ fn native_recoverable_oneshot_reservation_preserves_a_parked_receiver_until_quot
             let cx = Cx::current().expect("native root context");
             asupersync::time::timeout(cx.now(), Duration::from_secs(10), async {
                 let (blocker, _blocker_rx) = oneshot::channel::<u32>();
-                let blocker = blocker.reserve_checked(&cx).expect("occupy the only credit");
+                let blocker = blocker
+                    .reserve_checked(&cx)
+                    .expect("occupy the only credit");
                 let (mut sender, mut receiver) = oneshot::channel::<u32>();
                 let (parked, mut witness) = oneshot::channel();
                 let mut receiving = cx
@@ -855,7 +860,10 @@ fn native_recoverable_oneshot_reservation_preserves_a_parked_receiver_until_quot
                     assert_eq!(sender.telemetry_snapshot(1), before, "{flavor}");
                 }
                 assert!(
-                    receiving.try_join().expect("receiver remains alive").is_none(),
+                    receiving
+                        .try_join()
+                        .expect("receiver remains alive")
+                        .is_none(),
                     "{flavor}: a refused reservation must not close the receiver"
                 );
 
@@ -873,8 +881,9 @@ fn native_recoverable_oneshot_reservation_preserves_a_parked_receiver_until_quot
                     "{flavor}"
                 );
                 assert!(
-                    yield_until(|| live(&diagnostics, cx.task_id(), ObligationKind::SendPermit)
-                        .is_empty())
+                    yield_until(
+                        || live(&diagnostics, cx.task_id(), ObligationKind::SendPermit).is_empty()
+                    )
                     .await,
                     "{flavor}: every admitted permit settles"
                 );
@@ -886,7 +895,10 @@ fn native_recoverable_oneshot_reservation_preserves_a_parked_receiver_until_quot
             .await
             .expect("native recovery journey must finish");
         });
-        assert!(runtime.is_quiescent(), "{flavor}: no retained task or obligation");
+        assert!(
+            runtime.is_quiescent(),
+            "{flavor}: no retained task or obligation"
+        );
     }
 }
 
@@ -945,8 +957,9 @@ fn native_cancelled_oneshot_owner_returns_sender_for_a_live_owner_to_retry() {
                     .expect("publish after handoff");
                 assert_eq!(receiver.recv(&cx).await, Ok(2718), "{flavor}");
                 assert!(
-                    yield_until(|| live(&diagnostics, cx.task_id(), ObligationKind::SendPermit)
-                        .is_empty())
+                    yield_until(
+                        || live(&diagnostics, cx.task_id(), ObligationKind::SendPermit).is_empty()
+                    )
                     .await,
                     "{flavor}: retry's obligation settles"
                 );
@@ -957,6 +970,9 @@ fn native_cancelled_oneshot_owner_returns_sender_for_a_live_owner_to_retry() {
             .await
             .expect("native cancelled-owner journey must finish");
         });
-        assert!(runtime.is_quiescent(), "{flavor}: no retained task or obligation");
+        assert!(
+            runtime.is_quiescent(),
+            "{flavor}: no retained task or obligation"
+        );
     }
 }
