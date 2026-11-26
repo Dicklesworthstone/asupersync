@@ -131,11 +131,20 @@ interface Host {
   abort: WritableStreamDefaultWriter<Uint8Array>["abort"];
   releaseWriter: WritableStreamDefaultWriter<Uint8Array>["releaseLock"];
   writerClosed: (this: WritableStreamDefaultWriter<Uint8Array>) => Promise<void>;
-  yieldTurn: () => Promise<void>;
+  scheduleTurn: (callback: () => void) => unknown;
+  cancelTurn: (handle: unknown) => void;
   signal?: AbortSignal;
   aborted?: (this: AbortSignal) => boolean;
   add?: EventTarget["addEventListener"];
   remove?: EventTarget["removeEventListener"];
+}
+
+interface HostTurn {
+  handle: unknown;
+  armed: boolean;
+  cancelled: boolean;
+  fire: (() => void) | null;
+  resume(): void;
 }
 
 function limit(value: number, minimum: number, maximum: number): number {
@@ -152,8 +161,8 @@ function prepare(host: Record<string, unknown> | undefined, source: ReadableStre
   const Reader = host?.ReadableStreamDefaultReader as typeof ReadableStreamDefaultReader | undefined;
   const Writable = host?.WritableStream as typeof WritableStream | undefined;
   const Writer = host?.WritableStreamDefaultWriter as typeof WritableStreamDefaultWriter | undefined;
-  const schedule = host?.setTimeout;
-  if (!Readable || !Reader || !Writable || !Writer || typeof schedule !== "function"
+  const schedule = host?.setTimeout, unschedule = host?.clearTimeout;
+  if (!Readable || !Reader || !Writable || !Writer || typeof schedule !== "function" || typeof unschedule !== "function"
       || Object.getPrototypeOf(source) !== Readable.prototype || Object.getPrototypeOf(destination) !== Writable.prototype) {
     throw new TypeError("Expected same-realm native streams");
   }
@@ -167,7 +176,8 @@ function prepare(host: Record<string, unknown> | undefined, source: ReadableStre
     write: Writer.prototype.write, close: Writer.prototype.close, abort: Writer.prototype.abort,
     releaseWriter: Writer.prototype.releaseLock,
     writerClosed: Object.getOwnPropertyDescriptor(Writer.prototype, "closed")?.get!,
-    yieldTurn: () => new Promise(resolve => { Reflect.apply(schedule, host, [resolve, 0]); }),
+    scheduleTurn: callback => Reflect.apply(schedule, host, [callback, 0]),
+    cancelTurn: handle => { Reflect.apply(unschedule, host, [handle]); },
   };
   if (Object.values(native).some(value => typeof value !== "function")) throw new TypeError("Incomplete native streams");
   const maxChunkBytes = limit(options.maxChunkBytes ?? BROWSER_BYTE_PIPE_LIMITS.maxChunkBytes, 1, 16_777_216);
@@ -231,6 +241,8 @@ export function createBrowserBytePipeManager(dependencies: {
     bytesWritten = 0;
     chunksWritten = 0;
     attempt: Promise<Outcome<void>> | null = null;
+    hostTurn: HostTurn | null = null;
+    hostTurnFailure: Failure | null = null;
 
     constructor(readonly scopeKey: string, readonly task: BrowserBytePipeTask,
       readonly source: ReadableStream<Uint8Array>, readonly destination: WritableStream<Uint8Array>,
@@ -248,7 +260,56 @@ export function createBrowserBytePipeManager(dependencies: {
     stop(terminal: Failure): void {
       if (this.released || this.publishing || this.operation !== null) return;
       this.operation = terminal;
+      this.clearHostTurn();
       void this.joinRetirement();
+    }
+
+    cancelTimer(wait: HostTurn): void {
+      if (!wait.armed) return;
+      wait.armed = false;
+      try { this.prepared.native.cancelTurn(wait.handle); }
+      catch { this.hostTurnFailure ??= fail("Stream transfer host scheduling cleanup failed; ownership is retained"); }
+    }
+    clearHostTurn(): void {
+      const wait = this.hostTurn;
+      this.hostTurn = null;
+      if (!wait) return;
+      // Invalidate the callback before host cleanup can reenter. A suspended
+      // timer must not keep pump()/scope drain pending once the transfer stops.
+      wait.cancelled = true;
+      wait.fire = null;
+      this.cancelTimer(wait);
+      wait.resume();
+    }
+    yieldToHost(): Promise<void> {
+      const done = deferred<void>();
+      const wait: HostTurn = { handle: undefined, armed: false, cancelled: false,
+        fire: null, resume: done.resolve };
+      wait.fire = () => {
+        if (this.hostTurn !== wait) return;
+        this.hostTurn = null;
+        wait.resume();
+      };
+      this.hostTurn = wait;
+      try {
+        // The callback retains only this cell. Cancellation clears fire so an
+        // already queued callback cannot retain or resume the stopped pump.
+        wait.handle = this.prepared.native.scheduleTurn(() => {
+          const fire = wait.fire;
+          wait.fire = null;
+          fire?.();
+        });
+        wait.armed = true;
+        // A scheduler hook can synchronously cancel before returning its
+        // handle. The stop fence is already installed; retire the late handle.
+        if (wait.cancelled) this.cancelTimer(wait);
+      } catch {
+        if (this.hostTurn === wait) this.hostTurn = null;
+        wait.fire = null;
+        wait.resume();
+        this.stop(fail("Stream transfer host scheduling failed"));
+      }
+      return done.promise;
     }
     signalAborted(): boolean {
       const { native } = this.prepared;
@@ -371,7 +432,7 @@ export function createBrowserBytePipeManager(dependencies: {
           // Infinite in-memory sources must not starve timer/event aborts by
           // monopolizing the microtask queue. This is a host turn, not a timer
           // deadline or an assertion that arbitrary callbacks will terminate.
-          await native.yieldTurn();
+          await this.yieldToHost();
         }
       }
     }
@@ -413,7 +474,7 @@ export function createBrowserBytePipeManager(dependencies: {
           // records an ambiguous acquisition. Observe that sticky failure only
           // after activation has finished, so the first attempt cannot retire
           // a task while an unreturned reader/writer may still own its lock.
-          issue = this.acquisitionFailure;
+          issue = this.acquisitionFailure ?? this.hostTurnFailure;
           const terminal = this.operation;
           if (terminal?.outcome === "cancelled" && !this.cancelAccepted && !this.ownerReleased) {
             try {
@@ -425,6 +486,7 @@ export function createBrowserBytePipeManager(dependencies: {
           const cleanup = terminal?.outcome === "ok" ? Promise.resolve(ok(undefined)) : this.cleanup();
           const [cleaned] = await Promise.all([cleanup, this.work.promise]);
           if (cleaned.outcome !== "ok") issue ??= cleaned;
+          issue ??= this.hostTurnFailure;
           const { native } = this.prepared;
           if (this.signalListener && native.signal) {
             try {

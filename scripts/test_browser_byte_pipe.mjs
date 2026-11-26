@@ -153,6 +153,15 @@ test("module import needs no stream host; unavailable host refuses without task 
   assert.equal(streams.output.locked, false);
 });
 
+for (const missing of ["setTimeout", "clearTimeout"]) test(`missing ${missing} refuses before acquiring stream or task ownership`, t => {
+  const f = fixture(t, {}, { [missing]: undefined }), streams = f.pair();
+  assert.equal(f.start(streams).outcome, "err");
+  assert.equal(f.calls.spawn.length, 0);
+  assert.equal(streams.input.locked || streams.output.locked, false);
+  assert.equal(streams.events.reads, 0);
+  assert.equal(streams.events.writes.length, 0);
+});
+
 for (const options of [null, 42, "invalid", [], { maxChunkBytes: 0 }, { maxChunkBytes: 16_777_217 },
   { maxChunkBytes: 1.5 }, { maxBytes: -1 }, { maxBytes: Infinity },
   { maxBytes: Number.MAX_SAFE_INTEGER + 1 }, { signal: {} }]) {
@@ -644,4 +653,164 @@ test("synchronously ready empty chunks yield to a timer-triggered cancellation",
   assert.equal((await bounded(handle.completed)).outcome, "cancelled");
   assert.ok(streams.events.reads < 10_000, "host cancellation runs before the finite starvation guard");
   assert.equal(f.tasks.size, 0);
+});
+
+for (const origin of ["handle", "signal", "scope", "task", "source", "destination"]) {
+  test(`${origin} stop retires a witnessed host-turn wait without firing its timer`, async t => {
+    const scheduled = deferred(), timers = new Map(), cleared = [];
+    let nextTimer = 0;
+    const f = fixture(t, {}, {
+      setTimeout(callback) {
+        const id = ++nextTimer;
+        timers.set(id, callback);
+        scheduled.resolve(id);
+        return id;
+      },
+      clearTimeout(id) { cleared.push(id); timers.delete(id); },
+    });
+    const controller = new AbortController();
+    const streams = f.pair({ pull(source) { source.enqueue(Uint8Array.of(7)); } });
+    const handle = value(f.start(streams, { signal: controller.signal }));
+    let stopped;
+    try {
+      const id = await bounded(scheduled.promise);
+      const lateCallback = timers.get(id);
+      assert.equal(typeof lateCallback, "function", "the scheduler really owns an unfired timer");
+      assert.equal(streams.events.writes.length, 64);
+      assert.equal(streams.events.reads, 64);
+      await pending(handle.completed);
+      if (origin === "handle") stopped = handle.cancel("stop scheduled byte pipe");
+      else if (origin === "signal") controller.abort("external stop");
+      else if (origin === "scope") stopped = f.manager.drainScopes(new Set(["region:1:1:PRIVATE_OWNER_TOKEN"]), "scope_close");
+      else if (origin === "task") f.manager.cancelTask([...f.tasks][0], "external_task_cancel", "external stop");
+      else if (origin === "source") streams.readController.error(new Error("source failed while scheduling"));
+      else streams.writeController.error(new Error("destination failed while scheduling"));
+      let completion;
+      void handle.completed.then(outcome => { completion = outcome; });
+      await turn();
+      assert.equal(completion?.outcome, origin === "source" || origin === "destination" ? "err" : "cancelled",
+        "owned cleanup must settle without waiting for a suspended host timer");
+      if (stopped) assert.equal((await bounded(stopped)).outcome, "ok");
+      assert.deepEqual(cleared, [id]);
+      assert.equal(timers.size, 0);
+      assert.equal(f.tasks.size, 0);
+      assert.equal(f.calls.join.length, 1);
+      assert.equal(streams.input.locked || streams.output.locked, false);
+      assert.deepEqual({ ...handle.progress() }, { bytesWritten: 64, chunksWritten: 64 });
+      lateCallback();
+      await turn();
+      assert.equal(streams.events.reads, 64, "an already queued callback cannot restart the stopped transfer");
+      assert.equal(streams.events.writes.length, 64);
+      assert.equal(f.calls.join.length, 1);
+    } finally {
+      // Release old-code work after a failed assertion; the regression itself
+      // must not strand the fixture or make a timeout stand in for its oracle.
+      for (const callback of timers.values()) callback();
+    }
+  });
+}
+
+test("cancellation reentered by host scheduling retires the late timer handle", async t => {
+  let handle, stopped, callback;
+  const cleared = [], token = Object.freeze({ timer: 1 });
+  const f = fixture(t, {}, {
+    setTimeout(next) {
+      callback = next;
+      stopped = handle.cancel("cancel inside host scheduler");
+      assert.equal(cleared.length, 0, "the timer handle has not been returned yet");
+      return token;
+    },
+    clearTimeout(id) { cleared.push(id); },
+  });
+  const streams = f.pair({ pull(source) { source.enqueue(Uint8Array.of(5)); } });
+  handle = value(f.start(streams));
+  assert.equal((await bounded(handle.completed)).outcome, "cancelled");
+  assert.equal((await bounded(stopped)).outcome, "ok");
+  assert.deepEqual(cleared, [token]);
+  assert.equal(streams.events.reads, 64);
+  assert.equal(streams.events.writes.length, 64);
+  assert.equal(f.tasks.size, 0);
+  callback();
+  await turn();
+  assert.equal(streams.events.reads, 64);
+  assert.equal(f.calls.join.length, 1);
+});
+
+test("a synchronous scheduling callback preserves finite transfer progress without clearing a fired turn", async t => {
+  let scheduled = 0;
+  const f = fixture(t, {}, {
+    setTimeout(callback) { scheduled += 1; callback(); return scheduled; },
+    clearTimeout() { assert.fail("a completed host turn no longer owns a timer"); },
+  });
+  const streams = f.pair({ pull(source, index) {
+    if (index <= 130) source.enqueue(Uint8Array.of(index));
+    else source.close();
+  } });
+  const handle = value(f.start(streams));
+  assert.deepEqual({ ...value(await bounded(handle.completed)) }, { bytesWritten: 130, chunksWritten: 130 });
+  assert.equal(scheduled, 2);
+  assert.deepEqual(streams.events.writes.map(chunk => chunk[0]), Array.from({ length: 130 }, (_, index) => index + 1));
+  assert.equal(streams.events.closes, 1);
+  assert.equal(f.calls.join.length, 1);
+  assert.equal(f.tasks.size, 0);
+});
+
+test("host scheduling failure stops and drains both native endpoints without losing committed progress", async t => {
+  let callback;
+  const f = fixture(t, {}, {
+    setTimeout(next) { callback = next; throw new Error("PRIVATE_OWNER_TOKEN: host scheduling failed"); },
+  });
+  const streams = f.pair({ pull(source) { source.enqueue(Uint8Array.of(4)); } });
+  const handle = value(f.start(streams));
+  const result = await bounded(handle.completed);
+  assert.equal(result.outcome, "err");
+  assert.equal(result.failure.message, "Stream transfer host scheduling failed");
+  assert.doesNotMatch(JSON.stringify(result), /PRIVATE_OWNER_TOKEN/);
+  assert.equal(streams.events.reads, 64);
+  assert.equal(streams.events.writes.length, 64);
+  assert.equal(streams.events.cancels.length, 1);
+  assert.equal(streams.events.aborts.length, 1);
+  assert.equal(streams.input.locked || streams.output.locked, false);
+  assert.deepEqual({ ...handle.progress() }, { bytesWritten: 64, chunksWritten: 64 });
+  assert.equal(f.tasks.size, 0);
+  assert.equal((await bounded(handle.retire())).outcome, "ok");
+  callback();
+  await turn();
+  assert.equal(streams.events.reads, 64);
+  assert.equal(f.calls.join.length, 1);
+});
+
+test("failed host timer cleanup releases the pump but retains a sticky retirement failure", async t => {
+  const scheduled = deferred();
+  let callback, clears = 0;
+  const f = fixture(t, {}, {
+    setTimeout(next) { callback = next; scheduled.resolve(); return 17; },
+    clearTimeout(id) {
+      assert.equal(id, 17);
+      clears += 1;
+      throw new Error("PRIVATE_OWNER_TOKEN: host timer cleanup failed");
+    },
+  });
+  const streams = f.pair({ pull(source) { source.enqueue(Uint8Array.of(8)); } });
+  const handle = value(f.start(streams));
+  await bounded(scheduled.promise);
+  const retired = await bounded(handle.cancel());
+  assert.equal(retired.outcome, "err");
+  assert.equal(retired.failure.message, "Stream transfer host scheduling cleanup failed; ownership is retained");
+  assert.doesNotMatch(JSON.stringify(retired), /PRIVATE_OWNER_TOKEN/);
+  assert.equal((await bounded(handle.completed)).outcome, "err");
+  assert.equal(streams.input.locked || streams.output.locked, false);
+  assert.equal(streams.events.cancels.length, 1);
+  assert.equal(streams.events.aborts.length, 1);
+  assert.equal(f.calls.join.length, 0);
+  assert.equal(f.tasks.size, 1);
+  callback();
+  await turn();
+  assert.equal((await bounded(handle.retire())).outcome, "err");
+  assert.equal((await bounded(f.manager.drainScopes(new Set(["region:1:1:PRIVATE_OWNER_TOKEN"]), "scope_close"))).outcome, "err");
+  assert.equal(clears, 1, "a later native success must not erase the refused cleanup receipt");
+  assert.equal(streams.events.reads, 64);
+  assert.equal(streams.events.writes.length, 64);
+  assert.equal(f.calls.join.length, 0);
+  assert.equal(f.tasks.size, 1);
 });
