@@ -593,12 +593,11 @@ impl DynamicTable {
         }
     }
 
-    /// The RFC 7541 size of the entry at `index` (1-based), without copying it.
-    fn entry_size(&self, index: usize) -> Option<usize> {
+    /// Borrow an entry without materializing either of its strings.
+    fn entry(&self, index: usize) -> Option<&DynamicTableEntry> {
         index
             .checked_sub(1)
             .and_then(|position| self.entries.get(position))
-            .map(DynamicTableEntry::size)
     }
 
     /// Find an entry by name and value, returning the index if found.
@@ -1104,10 +1103,10 @@ impl Decoder {
             // Indexed header field. A dynamic entry is refused before it is
             // copied when it alone would overrun the list budget.
             let index = decode_integer(src, 7)?;
-            if let Some(size) = index
+            if let Some(entry) = index
                 .checked_sub(STATIC_TABLE.len())
-                .and_then(|dynamic| self.dynamic_table.entry_size(dynamic))
-                && size > remaining_budget
+                .and_then(|dynamic| self.dynamic_table.entry(dynamic))
+                && entry.name.len() + entry.value.len() + 32 > remaining_budget
             {
                 return Err(H2Error::compression("header list too large"));
             }
@@ -1168,17 +1167,21 @@ impl Decoder {
         validate_fields: bool,
     ) -> Result<(String, String, usize), H2Error> {
         let index = decode_integer(src, prefix_bits)?;
+        // Account for the per-field overhead before allocating either string.
+        let string_budget = remaining_budget
+            .checked_sub(32)
+            .ok_or_else(|| H2Error::compression("header list too large"))?;
 
         let name = if index == 0 {
-            decode_string_bounded(src, remaining_budget)?
+            decode_string_bounded(src, string_budget)?
         } else {
-            self.get_indexed_name(index)?
+            self.get_indexed_name(index, string_budget)?
         };
         if validate_fields {
             validate_header_name(&name)?;
         }
 
-        let value_budget = remaining_budget.saturating_sub(name.len());
+        let value_budget = string_budget.saturating_sub(name.len());
         // Pseudo-header values (a method, scheme, authority, path or
         // status) have no obs-text form; they stay UTF-8 only.
         let (value, value_octets) = if name.starts_with(':') {
@@ -1215,22 +1218,26 @@ impl Decoder {
     /// Get only the header name by index from static or dynamic table.
     ///
     /// This avoids cloning full header values on indexed-name literal fields.
-    fn get_indexed_name(&self, index: usize) -> Result<String, H2Error> {
+    fn get_indexed_name(&self, index: usize, max_len: usize) -> Result<String, H2Error> {
         if index == 0 {
             return Err(H2Error::compression("invalid index 0"));
         }
 
-        if index <= STATIC_TABLE.len() {
+        let name = if index <= STATIC_TABLE.len() {
             let (name, _) =
                 get_static(index).ok_or_else(|| H2Error::compression("invalid static index"))?;
-            Ok(name.to_string())
+            name
         } else {
             let dyn_index = index - STATIC_TABLE.len();
             self.dynamic_table
-                .get(dyn_index)
-                .map(|h| h.name)
-                .ok_or_else(|| H2Error::compression("invalid dynamic index"))
+                .entry(dyn_index)
+                .map(|entry| entry.name.as_ref())
+                .ok_or_else(|| H2Error::compression("invalid dynamic index"))?
+        };
+        if name.len() > max_len {
+            return Err(H2Error::compression("string length exceeds budget"));
         }
+        Ok(name.to_owned())
     }
 }
 
@@ -1454,14 +1461,17 @@ fn decode_string(src: &mut Bytes) -> Result<String, H2Error> {
 /// Decode an HPACK string primitive, bounding the allocation to at most
 /// `max_len` bytes (further capped by the hard `MAX_STRING_LENGTH` ceiling).
 ///
-/// The length prefix is checked against `max_len` BEFORE any bytes are split
-/// off or copied, so an attacker cannot force a large allocation by claiming
-/// a length that would later be rejected by `max_header_list_size`.
+/// Plain strings are bounded before copying; Huffman strings are bounded
+/// while decoding. The wire length counts encoded octets, not output octets.
 fn decode_string_bounded(src: &mut Bytes, max_len: usize) -> Result<String, H2Error> {
     let (huffman, data) = split_string_literal(src, max_len)?;
 
     if huffman {
-        decode_huffman(&data)
+        String::from_utf8(decode_huffman_octets_bounded(
+            &data,
+            max_len.min(MAX_STRING_LENGTH),
+        )?)
+        .map_err(|_| H2Error::compression("invalid UTF-8 in huffman"))
     } else {
         // br-asupersync-73dak3 — validate UTF-8 on the borrowed slice and
         // allocate exactly once. The previous shape was
@@ -1484,28 +1494,41 @@ fn decode_string_bounded(src: &mut Bytes, max_len: usize) -> Result<String, H2Er
 /// length the dynamic table counts (RFC 7541 §4.1).
 fn decode_field_value_bounded(src: &mut Bytes, max_len: usize) -> Result<(String, usize), H2Error> {
     let (huffman, data) = split_string_literal(src, max_len)?;
+    let max_len = max_len.min(MAX_STRING_LENGTH);
     let octets = if huffman {
-        decode_huffman_octets(&data)?
+        decode_huffman_octets_bounded(&data, max_len)?
     } else {
         data.to_vec()
     };
     let value_octets = octets.len();
-    let value = String::from_utf8(octets).unwrap_or_else(|not_utf8| {
-        not_utf8
-            .as_bytes()
-            .iter()
-            .map(|&octet| char::from(octet))
-            .collect()
-    });
+    let value = match String::from_utf8(octets) {
+        Ok(value) => value,
+        Err(not_utf8) => {
+            // Obs-text becomes Latin-1 represented in UTF-8. Bound that
+            // expansion before allocating, while preserving wire-octet
+            // accounting for dynamic-table eviction.
+            let bytes = not_utf8.as_bytes();
+            let utf8_len = bytes.len() + bytes.iter().filter(|byte| **byte >= 0x80).count();
+            if utf8_len > max_len {
+                return Err(H2Error::compression("string length exceeds budget"));
+            }
+            let mut value = String::with_capacity(utf8_len);
+            for &octet in bytes {
+                value.push(char::from(octet));
+            }
+            value
+        }
+    };
     Ok((value, value_octets))
 }
 
 /// Split one HPACK string literal off `src`: its Huffman flag and its
 /// octets as sent.
 ///
-/// The length prefix is checked against `max_len` BEFORE any bytes are split
-/// off or copied, so an attacker cannot force a large allocation by claiming
-/// a length that would later be rejected by `max_header_list_size`.
+/// Plain literals must fit `max_len` before copying. Huffman literals retain
+/// the hard encoded-size ceiling here; their decoded budget is checked for
+/// every emitted symbol, since encoded length can be larger or smaller than
+/// the decoded string (RFC 7541 section 5.2).
 fn split_string_literal(src: &mut Bytes, max_len: usize) -> Result<(bool, Bytes), H2Error> {
     if src.is_empty() {
         return Err(H2Error::compression("unexpected end of string"));
@@ -1514,7 +1537,11 @@ fn split_string_literal(src: &mut Bytes, max_len: usize) -> Result<(bool, Bytes)
     let huffman = src[0] & 0x80 != 0;
     let length = decode_integer(src, 7)?;
 
-    let effective_max = max_len.min(MAX_STRING_LENGTH);
+    let effective_max = if huffman {
+        MAX_STRING_LENGTH
+    } else {
+        max_len.min(MAX_STRING_LENGTH)
+    };
     if length > effective_max {
         return Err(H2Error::compression("string length exceeds budget"));
     }
@@ -1822,10 +1849,15 @@ pub(crate) fn decode_huffman(src: &Bytes) -> Result<String, H2Error> {
 
 /// Decode a Huffman-coded string to its octets, which need not be UTF-8.
 pub(crate) fn decode_huffman_octets(src: &Bytes) -> Result<Vec<u8>, H2Error> {
+    decode_huffman_octets_bounded(src, usize::MAX)
+}
+
+/// Decode without allocating or emitting more than the caller's output budget.
+fn decode_huffman_octets_bounded(src: &Bytes, max_len: usize) -> Result<Vec<u8>, H2Error> {
     // Shortest HPACK code is 5 bits; preallocate to upper bound to avoid
-    // growth reallocs on the common case where decoded > encoded length.
+    // growth reallocs, but never reserve beyond the decoded-output budget.
     let estimated_symbols = src.len().saturating_mul(8).saturating_add(4) / 5;
-    let mut result = Vec::with_capacity(estimated_symbols);
+    let mut result = Vec::with_capacity(estimated_symbols.min(max_len));
     let table: &[[HuffmanDecodeEntry; 16]; 256] = &HUFFMAN_DECODE_TABLE;
     let mut state: u8 = 0;
     let mut accepted = true;
@@ -1839,6 +1871,9 @@ pub(crate) fn decode_huffman_octets(src: &Bytes) -> Result<Vec<u8>, H2Error> {
             return Err(H2Error::compression("invalid huffman code"));
         }
         if entry.flags & HUFF_SYM != 0 {
+            if result.len() == max_len {
+                return Err(H2Error::compression("string length exceeds budget"));
+            }
             result.push(entry.sym);
         }
         state = entry.next_state;
@@ -1848,6 +1883,9 @@ pub(crate) fn decode_huffman_octets(src: &Bytes) -> Result<Vec<u8>, H2Error> {
             return Err(H2Error::compression("invalid huffman code"));
         }
         if entry.flags & HUFF_SYM != 0 {
+            if result.len() == max_len {
+                return Err(H2Error::compression("string length exceeds budget"));
+            }
             result.push(entry.sym);
         }
         state = entry.next_state;

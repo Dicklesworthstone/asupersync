@@ -1727,6 +1727,156 @@ fn test_string_length_at_maximum_boundary() {
 }
 
 #[test]
+fn huffman_decoded_output_obeys_the_remaining_string_budget() {
+    // 'a' uses five bits: the encoded bytes fit while the decoded value does
+    // not. Checking only the wire length used to return all 64 bytes.
+    let value = "a".repeat(64);
+    let mut encoded = BytesMut::new();
+    encode_string(&mut encoded, &value, true);
+    let encoded = encoded.freeze();
+    assert!(encoded.len() < 48);
+
+    assert_compression_error(decode_string_bounded(&mut encoded.clone(), 48));
+    assert_compression_error(decode_field_value_bounded(&mut encoded.clone(), 48));
+    assert_eq!(
+        decode_string_bounded(&mut encoded.clone(), value.len()).unwrap(),
+        value
+    );
+    assert_eq!(
+        decode_field_value_bounded(&mut encoded.clone(), value.len()).unwrap(),
+        (value, 64)
+    );
+}
+
+#[test]
+fn huffman_wire_length_does_not_reject_a_fitting_decoded_string() {
+    // Backslash takes 19 bits, so a valid encoded string can be larger than
+    // its decoded budget. Both name and field-value paths must use output
+    // octets for that budget (RFC 7541 section 5.2).
+    let value = "\\".repeat(32);
+    let mut encoded = BytesMut::new();
+    encode_string(&mut encoded, &value, true);
+    let encoded = encoded.freeze();
+    assert!(encoded.len() > value.len());
+    assert_eq!(
+        decode_string_bounded(&mut encoded.clone(), value.len()).unwrap(),
+        value
+    );
+    assert_eq!(
+        decode_field_value_bounded(&mut encoded.clone(), value.len()).unwrap(),
+        (value, 32)
+    );
+}
+
+#[test]
+fn huffman_decoded_string_cannot_exceed_the_hard_ceiling() {
+    for length in [MAX_STRING_LENGTH, MAX_STRING_LENGTH + 1] {
+        let mut encoded = BytesMut::new();
+        encode_string(&mut encoded, &"a".repeat(length), true);
+        assert!(encoded.len() < MAX_STRING_LENGTH);
+        let result = decode_string_bounded(&mut encoded.freeze(), usize::MAX);
+        if length == MAX_STRING_LENGTH {
+            assert_eq!(result.unwrap().len(), length);
+        } else {
+            assert_compression_error(result);
+        }
+    }
+}
+
+#[test]
+fn oversized_incremental_huffman_field_is_not_materialized_in_the_table() {
+    for stream_id in [None, Some(1)] {
+        let mut decoder = Decoder::new();
+        decoder.set_max_header_list_size(64);
+        let mut block = BytesMut::new();
+        block.put_u8(0x40);
+        encode_string(&mut block, "x", false);
+        encode_string(&mut block, &"a".repeat(64), true);
+        let mut block = block.freeze();
+        let result = match stream_id {
+            None => decoder.decode(&mut block),
+            Some(id) => decoder.decode_for_stream(&mut block, id),
+        };
+        assert_compression_error(result);
+        assert_eq!(decoder.dynamic_table_size(), 0);
+    }
+}
+
+#[test]
+fn indexed_literal_name_budget_is_checked_before_reading_its_value() {
+    let mut decoder = Decoder::new();
+    decoder
+        .dynamic_table
+        .insert(Header::new("x".repeat(128), "retained"));
+    let table_size = decoder.dynamic_table_size();
+    decoder.set_max_header_list_size(64);
+    let mut block = BytesMut::new();
+    encode_integer(&mut block, STATIC_TABLE.len() + 1, 4, 0);
+    encode_string(&mut block, "v", false);
+    let mut block = block.freeze();
+
+    assert_compression_error(decoder.decode(&mut block));
+    assert_eq!(block.as_ref(), &[1, b'v']);
+    assert_eq!(decoder.dynamic_table_size(), table_size);
+}
+
+#[test]
+fn indexed_literal_names_do_not_depend_on_the_indexed_values_size() {
+    let mut decoder = Decoder::with_max_size(MAX_ALLOWED_TABLE_SIZE);
+    decoder
+        .dynamic_table
+        .insert(Header::new("x", "v".repeat(MAX_STRING_LENGTH)));
+    decoder.set_max_header_list_size(35);
+    let mut block = BytesMut::new();
+    encode_integer(&mut block, STATIC_TABLE.len() + 1, 4, 0);
+    encode_string(&mut block, "ok", false);
+
+    assert_eq!(
+        decoder.decode(&mut block.freeze()).unwrap(),
+        vec![Header::new("x", "ok")]
+    );
+}
+
+#[test]
+fn obs_text_expansion_obeys_the_decoded_string_budget() {
+    for huffman in [false, true] {
+        let octets = vec![0xff; 32];
+        let data = if huffman {
+            encode_huffman(&octets)
+        } else {
+            octets
+        };
+        let mut encoded = BytesMut::new();
+        encode_integer(&mut encoded, data.len(), 7, if huffman { 0x80 } else { 0 });
+        encoded.extend_from_slice(&data);
+        let encoded = encoded.freeze();
+
+        assert_compression_error(decode_field_value_bounded(&mut encoded.clone(), 32));
+        assert_eq!(
+            decode_field_value_bounded(&mut encoded.clone(), 64).unwrap(),
+            ("\u{ff}".repeat(32), 32)
+        );
+    }
+}
+
+#[test]
+fn bounded_huffman_still_checks_terminal_padding_and_eos() {
+    let valid = Bytes::from(encode_huffman(b"a"));
+    assert_eq!(decode_huffman_octets_bounded(&valid, 1).unwrap(), b"a");
+    assert_compression_error(decode_huffman_octets_bounded(&valid, 0));
+    // 'a' is 00011; the three padding bits must all be one.
+    assert_compression_error(decode_huffman_octets_bounded(
+        &Bytes::from_static(&[0x18]),
+        1,
+    ));
+    assert_compression_error(decode_huffman_octets_bounded(
+        &Bytes::from_static(&[0xff, 0xff, 0xff, 0xff]),
+        1,
+    ));
+    assert!(decode_huffman_octets_bounded(&Bytes::new(), 0).unwrap().is_empty());
+}
+
+#[test]
 fn header_debug_clone_eq() {
     let h = Header::new("content-type", "application/json");
     let dbg = format!("{h:?}");
