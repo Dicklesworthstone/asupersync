@@ -26,6 +26,29 @@ use crate::record::{
 use crate::types::{ObligationId, RegionId, TaskId, Time};
 use crate::util::ArenaIndex;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::atomic::{AtomicU32, Ordering};
+
+// Only ledgers that opt into process-scoped identities use this allocator.
+// Ordinary ledgers retain their deterministic, ledger-local generations.
+static NEXT_PROCESS_LEDGER_GENERATION: AtomicU32 = AtomicU32::new(1);
+
+fn reserve_process_generation(counter: &AtomicU32) -> Result<u32, LedgerError> {
+    let mut generation = counter.load(Ordering::Relaxed);
+    loop {
+        let next = generation
+            .checked_add(1)
+            .ok_or(LedgerError::GenerationOverflow)?;
+        match counter.compare_exchange_weak(
+            generation,
+            next,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return Ok(generation),
+            Err(current) => generation = current,
+        }
+    }
+}
 
 /// Error returned when a fallible ledger transition arrives after region finalization.
 ///
@@ -445,6 +468,8 @@ pub struct ObligationLedger {
     next_index: u32,
     /// Current generation for obligation IDs issued by this ledger epoch.
     generation: u32,
+    /// Allocate disjoint generations among opted-in ledgers in this process.
+    process_unique_ids: bool,
     /// Running statistics.
     stats: LedgerStats,
     /// br-asupersync-qyf37e: regions that have been marked
@@ -599,6 +624,7 @@ impl ObligationLedger {
             obligations: BTreeMap::new(),
             next_index: 0,
             generation: 0,
+            process_unique_ids: false,
             stats: LedgerStats::default(),
             finalized_regions: BTreeSet::new(),
             resolved_retention: None,
@@ -631,6 +657,34 @@ impl ObligationLedger {
         Self {
             resolved_retention: Some(limit),
             ..Self::new()
+        }
+    }
+
+    /// Creates a bounded ledger with identities disjoint from every other
+    /// ledger using this constructor in this process, including after resets
+    /// and index rollover. FABRIC uses this to keep one consumer's delivery
+    /// certificate from resolving another consumer's obligation.
+    ///
+    /// These opaque IDs are not stable across process restarts or replay runs
+    /// and are not authentication tokens. Ordinary ledger constructors keep
+    /// their deterministic local allocation policy.
+    #[cfg(any(test, feature = "messaging-fabric"))]
+    pub(crate) fn with_process_unique_ids_and_resolved_retention(limit: usize) -> Self {
+        Self {
+            generation: reserve_process_generation(&NEXT_PROCESS_LEDGER_GENERATION)
+                .expect("process obligation ledger generation space exhausted"),
+            process_unique_ids: true,
+            ..Self::with_resolved_retention(limit)
+        }
+    }
+
+    fn next_generation(&self) -> Result<u32, LedgerError> {
+        if self.process_unique_ids {
+            reserve_process_generation(&NEXT_PROCESS_LEDGER_GENERATION)
+        } else {
+            self.generation
+                .checked_add(1)
+                .ok_or(LedgerError::GenerationOverflow)
         }
     }
 
@@ -789,10 +843,7 @@ impl ObligationLedger {
         // space runs out; it no longer holds every id it issued, so it must not
         // stop working after u32::MAX acquisitions (br-asupersync-rrtgoy).
         if self.next_index == u32::MAX && self.resolved_retention.is_some() {
-            self.generation = self
-                .generation
-                .checked_add(1)
-                .ok_or(LedgerError::GenerationOverflow)?;
+            self.generation = self.next_generation()?;
             self.next_index = 0;
         }
 
@@ -1429,15 +1480,17 @@ impl ObligationLedger {
             !self.obligations.values().any(ObligationRecord::is_leaked),
             "cannot reset obligation ledger with leaked obligations"
         );
+        // Reserve the next identity domain before changing any state. A
+        // process-scoped ledger must not increment into a sibling's domain.
+        let generation = self
+            .next_generation()
+            .expect("obligation ledger generation overflow");
         self.obligations.clear();
         self.resolved_order.clear();
         self.finalized_regions.clear();
         self.stats = LedgerStats::default();
         self.next_index = 0;
-        self.generation = self
-            .generation
-            .checked_add(1)
-            .expect("obligation ledger generation overflow");
+        self.generation = generation;
     }
 
     /// Iterates over all obligations in deterministic order.

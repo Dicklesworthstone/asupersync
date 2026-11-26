@@ -2049,3 +2049,259 @@ fn consumer_actor_mutable_consumer_access() {
     let consumer_ref = actor.consumer_mut();
     assert_eq!(consumer_ref.state().delivered_count, 0);
 }
+
+/// Reject an unissued certificate before any ack, retry, or dead-letter mutation.
+/// Fixed subject-cell fixture; no scheduler or wall-clock input is required.
+fn assert_unissued_attempt_preserves_consumer(
+    consumer: &mut FabricConsumer,
+    attempt: &AttemptCertificate,
+    capsule: &RecoverableCapsule,
+) {
+    let state = consumer.state().clone();
+    let stats = consumer.obligation_stats();
+    let token_count = consumer.pending_ack_tokens.len();
+    let event_time = consumer.next_event_nanos;
+    let decision_count = consumer.decision_log().len();
+
+    assert!(
+        matches!(
+            consumer.acknowledge_delivery(attempt),
+            Ok(AckResolution::StaleNoOp { .. })
+        ),
+        "foreign or altered acknowledgement must be inert: {attempt:?}"
+    );
+    assert!(
+        matches!(
+            consumer.nack_delivery(attempt, ConsumerNackReason::Cancel),
+            Ok(NackResolution::StaleNoOp { .. })
+        ),
+        "foreign or altered nack must be inert: {attempt:?}"
+    );
+    assert_eq!(
+        consumer.redeliver_delivery(attempt, capsule, None),
+        Err(FabricConsumerError::PendingAckNotFound {
+            obligation_id: attempt.obligation_id,
+        }),
+        "foreign or altered retry must preserve the original delivery"
+    );
+    assert_eq!(
+        consumer.dead_letter_delivery(attempt, "foreign certificate"),
+        Err(FabricConsumerError::PendingAckNotFound {
+            obligation_id: attempt.obligation_id,
+        }),
+        "foreign or altered dead-letter must preserve the original delivery"
+    );
+    assert_eq!(consumer.state(), &state);
+    assert_eq!(consumer.obligation_stats(), stats);
+    assert_eq!(consumer.pending_ack_tokens.len(), token_count);
+    assert_eq!(consumer.next_event_nanos, event_time);
+    assert_eq!(consumer.decision_log().len(), decision_count);
+}
+
+/// br-asupersync-rrtgoy M2: matching owner/cell/request metadata must not make
+/// independently issued delivery certificates interchangeable.
+#[test]
+fn rrtgoy_identical_consumers_reject_each_others_certificates() {
+    let cell = test_cell();
+    let owner = FabricConsumerOwner {
+        holder: TaskId::new_for_test(41, 0),
+        region: RegionId::new_for_test(7, 0),
+    };
+    let mut first = FabricConsumer::new_owned_with_process_unique_ids(
+        &cell,
+        FabricConsumerConfig::default(),
+        owner,
+    )
+    .expect("first");
+    let mut second = FabricConsumer::new_owned_with_process_unique_ids(
+        &cell,
+        FabricConsumerConfig::default(),
+        owner,
+    )
+    .expect("second");
+    let window = SequenceWindow::new(5, 6).expect("window");
+    let capsule = RecoverableCapsule::default().with_window(NodeId::new("node-a"), window);
+    let first_delivery = first
+        .dispatch_push(window, &capsule, None)
+        .expect("first delivery");
+    let second_delivery = second
+        .dispatch_push(window, &capsule, None)
+        .expect("second delivery");
+
+    // Exercise the destructive boundary before asserting the identity shape:
+    // the old implementation committed the receiver's pending message here.
+    assert_unissued_attempt_preserves_consumer(&mut second, &first_delivery.attempt, &capsule);
+    assert_unissued_attempt_preserves_consumer(&mut first, &second_delivery.attempt, &capsule);
+    assert_ne!(
+        first_delivery.attempt.obligation_id,
+        second_delivery.attempt.obligation_id
+    );
+
+    assert!(matches!(
+        first.acknowledge_delivery(&first_delivery.attempt.clone()),
+        Ok(AckResolution::Committed { .. })
+    ));
+    assert!(matches!(
+        second.nack_delivery(&second_delivery.attempt.clone(), ConsumerNackReason::Explicit),
+        Ok(NackResolution::Aborted { .. })
+    ));
+    assert_eq!(first.state().pending_count, 0);
+    assert_eq!(second.state().pending_count, 0);
+    assert!(first.obligation_stats().is_clean());
+    assert!(second.obligation_stats().is_clean());
+    assert!(first.pending_attempts.is_empty());
+    assert!(second.pending_attempts.is_empty());
+}
+
+/// br-asupersync-rrtgoy: dropping a consumer must not let a later consumer
+/// accidentally accept a certificate whose numeric ledger slot was reused.
+#[test]
+fn rrtgoy_recreated_consumer_does_not_reissue_retired_attempt_identity() {
+    let cell = test_cell();
+    let owner = FabricConsumerOwner {
+        holder: TaskId::new_for_test(41, 0),
+        region: RegionId::new_for_test(7, 0),
+    };
+    let window = SequenceWindow::new(5, 6).expect("window");
+    let capsule = RecoverableCapsule::default().with_window(NodeId::new("node-a"), window);
+    let retired_attempt = {
+        let mut original = FabricConsumer::new_owned_with_process_unique_ids(
+            &cell,
+            FabricConsumerConfig::default(),
+            owner,
+        )
+        .expect("original");
+        let delivery = original
+            .dispatch_push(window, &capsule, None)
+            .expect("original delivery");
+        let receipt = original.finalize_region();
+        assert_eq!(receipt.aborted_obligations, 1);
+        assert!(original.pending_attempts.is_empty());
+        delivery.attempt
+    };
+    let mut replacement = FabricConsumer::new_owned_with_process_unique_ids(
+        &cell,
+        FabricConsumerConfig::default(),
+        owner,
+    )
+    .expect("replacement");
+    let delivery = replacement
+        .dispatch_push(window, &capsule, None)
+        .expect("replacement delivery");
+
+    assert_unissued_attempt_preserves_consumer(&mut replacement, &retired_attempt, &capsule);
+    assert!(matches!(
+        replacement.acknowledge_delivery(&delivery.attempt.clone()),
+        Ok(AckResolution::Committed { .. })
+    ));
+    assert!(replacement.obligation_stats().is_clean());
+}
+
+/// br-asupersync-rrtgoy: possession of a pending ID does not authorize changing
+/// the original window, authority, or attempt metadata.
+#[test]
+fn rrtgoy_altered_certificates_cannot_settle_or_replace_pending_deliveries() {
+    let cell = test_cell();
+    let mut consumer = FabricConsumer::new(
+        &cell,
+        FabricConsumerConfig {
+            max_deliver: 3,
+            ..FabricConsumerConfig::default()
+        },
+    )
+    .expect("consumer");
+    let window = SequenceWindow::new(8, 9).expect("window");
+    let capsule = RecoverableCapsule::default().with_window(NodeId::new("node-a"), window);
+    let delivery = consumer
+        .dispatch_push(window, &capsule, None)
+        .expect("delivery");
+    let mutations: [fn(&mut AttemptCertificate); 9] = [
+        |attempt| attempt.delivery_attempt += 1,
+        |attempt| attempt.epoch = CellEpoch::new(8, 12),
+        |attempt| attempt.cursor_authority_lease.epoch = CellEpoch::new(8, 12),
+        |attempt| attempt.cursor_authority_lease.lease_generation += 1,
+        |attempt| attempt.cursor_authority_lease.policy_revision += 1,
+        |attempt| {
+            attempt.cursor_authority_lease.holder =
+                CursorLeaseHolder::Steward(NodeId::new("foreign"));
+        },
+        |attempt| {
+            attempt.cursor_authority_lease.scope =
+                CursorLeaseScope::DelegatedCursorPartition { partition: 7 };
+        },
+        |attempt| {
+            attempt.delivery_mode = CursorDeliveryMode::Push {
+                window: SequenceWindow::new(80, 90).expect("altered window"),
+            };
+        },
+        |attempt| attempt.supersedes_obligation_id = Some(attempt.obligation_id),
+    ];
+
+    for mutate in mutations {
+        let mut altered = delivery.attempt.clone();
+        mutate(&mut altered);
+        assert_unissued_attempt_preserves_consumer(&mut consumer, &altered, &capsule);
+    }
+
+    // An unchanged clone still owns the original attempt, and a redelivery
+    // retires only that certificate while preserving the successor's credit.
+    let redelivery = consumer
+        .redeliver_delivery(&delivery.attempt.clone(), &capsule, None)
+        .expect("legitimate cloned redelivery");
+    assert_eq!(consumer.obligation_stats().pending, 1);
+    assert_eq!(consumer.pending_attempts.len(), 1);
+    assert_unissued_attempt_preserves_consumer(&mut consumer, &delivery.attempt, &capsule);
+    let transfer = consumer
+        .dead_letter_delivery(&redelivery.attempt.clone(), "delivery failed")
+        .expect("legitimate cloned dead-letter");
+    assert_eq!(transfer.obligation_id, redelivery.attempt.obligation_id);
+    assert_eq!(consumer.state().pending_count, 0);
+    assert!(consumer.pending_ack_tokens.is_empty());
+    assert!(consumer.pending_attempts.is_empty());
+    assert!(consumer.obligation_stats().is_clean());
+}
+
+/// The legacy constructor keeps its deterministic ID allocation. Even when
+/// numeric IDs coincide, a certificate for a different window is not authority
+/// to settle this consumer's pending delivery (br-asupersync-rrtgoy).
+#[test]
+fn rrtgoy_legacy_ids_stay_deterministic_and_foreign_window_is_rejected() {
+    let cell = test_cell();
+    let owner = FabricConsumerOwner {
+        holder: TaskId::new_for_test(41, 0),
+        region: RegionId::new_for_test(7, 0),
+    };
+    let mut first = FabricConsumer::new_owned(&cell, FabricConsumerConfig::default(), owner)
+        .expect("first legacy");
+    let mut second = FabricConsumer::new_owned(&cell, FabricConsumerConfig::default(), owner)
+        .expect("second legacy");
+    let first_window = SequenceWindow::new(5, 6).expect("first window");
+    let second_window = SequenceWindow::new(7, 8).expect("second window");
+    let capsule = RecoverableCapsule::default().with_window(
+        NodeId::new("node-a"),
+        SequenceWindow::new(5, 8).expect("capsule window"),
+    );
+    let first_delivery = first
+        .dispatch_push(first_window, &capsule, None)
+        .expect("first legacy");
+    let second_delivery = second
+        .dispatch_push(second_window, &capsule, None)
+        .expect("second legacy");
+    assert_eq!(
+        first_delivery.attempt.obligation_id,
+        second_delivery.attempt.obligation_id
+    );
+
+    assert_unissued_attempt_preserves_consumer(&mut second, &first_delivery.attempt, &capsule);
+    assert_unissued_attempt_preserves_consumer(&mut first, &second_delivery.attempt, &capsule);
+    assert!(matches!(
+        first.acknowledge_delivery(&first_delivery.attempt),
+        Ok(AckResolution::Committed { .. })
+    ));
+    assert!(matches!(
+        second.acknowledge_delivery(&second_delivery.attempt),
+        Ok(AckResolution::Committed { .. })
+    ));
+    assert!(first.obligation_stats().is_clean());
+    assert!(second.obligation_stats().is_clean());
+}

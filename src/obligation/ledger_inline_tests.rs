@@ -3059,3 +3059,82 @@ fn try_commit_and_try_abort_return_resolution_errors_instead_of_panicking() {
     assert!(ledger.stats().is_clean());
     crate::test_complete!("try_commit_and_try_abort_return_resolution_errors_instead_of_panicking");
 }
+
+
+// br-asupersync-rrtgoy: owners and local slot numbers can be identical in
+// independent consumers. A foreign token must not resolve a live sibling.
+#[test]
+fn process_scoped_ledgers_reject_sibling_tokens_with_identical_owners() {
+    init_test("process_scoped_ledgers_reject_sibling_tokens_with_identical_owners");
+    let mut first = ObligationLedger::with_process_unique_ids_and_resolved_retention(2);
+    let mut second = ObligationLedger::with_process_unique_ids_and_resolved_retention(2);
+    let a = first.acquire(ObligationKind::Ack, make_task(), make_region(), Time::ZERO);
+    let b = second.acquire(ObligationKind::Ack, make_task(), make_region(), Time::ZERO);
+    assert_eq!(a.id().arena_index().index(), b.id().arena_index().index());
+    assert_ne!(a.id(), b.id());
+    let foreign = ObligationToken {
+        id: a.id,
+        kind: a.kind,
+        holder: a.holder,
+        region: a.region,
+    };
+    let before = second.stats();
+    assert!(matches!(
+        second.try_commit(foreign, Time::from_nanos(1)),
+        Err(LedgerError::NotFound { .. })
+    ));
+    assert_eq!(second.stats(), before);
+    assert_eq!(second.obligation_state(b.id()), Some(ObligationState::Reserved));
+    first.commit(a, Time::from_nanos(2));
+    second.commit(b, Time::from_nanos(2));
+    assert!(first.stats().is_clean());
+    assert!(second.stats().is_clean());
+}
+
+// Both rollover and reset must obtain a fresh process domain. Incrementing a
+// local generation can reuse the domain already held by the next consumer.
+#[test]
+fn process_scoped_ledger_rollover_and_reset_preserve_disjoint_ids() {
+    init_test("process_scoped_ledger_rollover_and_reset_preserve_disjoint_ids");
+    let mut first = ObligationLedger::with_process_unique_ids_and_resolved_retention(0);
+    let mut second = ObligationLedger::with_process_unique_ids_and_resolved_retention(0);
+    let original = first.acquire(ObligationKind::Ack, make_task(), make_region(), Time::ZERO);
+    let sibling = second.acquire(ObligationKind::Ack, make_task(), make_region(), Time::ZERO);
+    let original_id = original.id();
+    let sibling_id = sibling.id();
+
+    first.next_index = u32::MAX;
+    let rolled = first.acquire(ObligationKind::Ack, make_task(), make_region(), Time::ZERO);
+    let rolled_id = rolled.id();
+    assert_eq!(rolled_id.arena_index().index(), 0);
+    assert_ne!(rolled_id, original_id);
+    assert_ne!(rolled_id, sibling_id);
+    assert_eq!(first.pending_count(), 2);
+    assert_eq!(first.obligation_state(original_id), Some(ObligationState::Reserved));
+    first.commit(original, Time::from_nanos(1));
+    first.commit(rolled, Time::from_nanos(1));
+    assert!(first.is_empty(), "retention must not keep issued IDs alive");
+
+    first.reset();
+    let reset = first.acquire(ObligationKind::Ack, make_task(), make_region(), Time::ZERO);
+    assert_eq!(reset.id().arena_index().index(), 0);
+    assert!(![original_id, sibling_id, rolled_id].contains(&reset.id()));
+    assert_eq!(second.obligation_state(sibling_id), Some(ObligationState::Reserved));
+    first.commit(reset, Time::from_nanos(2));
+    second.commit(sibling, Time::from_nanos(2));
+    assert!(first.stats().is_clean());
+    assert!(second.stats().is_clean());
+}
+
+#[test]
+fn process_generation_exhaustion_never_wraps_or_reuses_a_domain() {
+    let counter = AtomicU32::new(u32::MAX - 1);
+    assert_eq!(reserve_process_generation(&counter), Ok(u32::MAX - 1));
+    for _ in 0..2 {
+        assert_eq!(
+            reserve_process_generation(&counter),
+            Err(LedgerError::GenerationOverflow)
+        );
+        assert_eq!(counter.load(Ordering::Relaxed), u32::MAX);
+    }
+}

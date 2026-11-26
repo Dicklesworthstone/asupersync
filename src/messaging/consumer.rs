@@ -1647,6 +1647,17 @@ fn evaluate_consumer_decision(
 const FABRIC_CONSUMER_RESOLVED_OBLIGATIONS: usize = 4096;
 
 /// High-level policy-driven consumer engine layered on top of cursor leases.
+///
+/// Settlement requires the complete certificate originally issued by this
+/// consumer; cloning that certificate preserves its validity. The ordinary
+/// constructors retain deterministic, ledger-local IDs and require callers to
+/// route certificates to their issuing consumer: identical attempts from
+/// separate ordinary consumers cannot be distinguished by their public fields.
+///
+/// Use [`Self::new_with_process_unique_ids`] or
+/// [`Self::new_owned_with_process_unique_ids`] when certificates may be routed
+/// between consumers in one process. Those consumers allocate disjoint IDs
+/// among themselves, even with identical owner, cell, and request metadata.
 #[derive(Debug)]
 pub struct FabricConsumer {
     cursor: FabricConsumerCursor,
@@ -1656,6 +1667,8 @@ pub struct FabricConsumer {
     policy: FabricConsumerDeliveryPolicy,
     state: FabricConsumerState,
     pending_ack_tokens: BTreeMap<ObligationId, ObligationToken>,
+    /// Authoritative certificates for live attempts (br-asupersync-rrtgoy).
+    pending_attempts: BTreeMap<ObligationId, AttemptCertificate>,
     decision_log: Vec<ConsumerDecisionRecord>,
     /// Maximum number of decision log entries retained.  Oldest entries are
     /// evicted when the cap is reached.
@@ -1667,6 +1680,10 @@ pub struct FabricConsumer {
 
 impl FabricConsumer {
     /// Construct a new consumer engine from the current subject cell.
+    ///
+    /// IDs remain ledger-local. The caller must route certificates to the
+    /// issuing consumer; see [`Self::new_with_process_unique_ids`] for opt-in
+    /// isolation among consumers within one process.
     pub fn new(
         cell: &SubjectCell,
         config: FabricConsumerConfig,
@@ -1675,6 +1692,10 @@ impl FabricConsumer {
     }
 
     /// Construct a new consumer engine with explicit runtime ownership metadata.
+    ///
+    /// Preserves deterministic, ledger-local obligation IDs. The caller must
+    /// route certificates to their issuing instance. For isolation among
+    /// opted-in consumers, use [`Self::new_owned_with_process_unique_ids`].
     pub fn new_owned(
         cell: &SubjectCell,
         config: FabricConsumerConfig,
@@ -1689,12 +1710,59 @@ impl FabricConsumer {
             policy: FabricConsumerDeliveryPolicy::default(),
             state: FabricConsumerState::default(),
             pending_ack_tokens: BTreeMap::new(),
+            pending_attempts: BTreeMap::new(),
             decision_log: Vec::new(),
             decision_log_capacity: 4096,
             next_event_nanos: 0,
             next_pull_enqueue_order: 0,
             waiting_pull_requests: Vec::new(),
         })
+    }
+
+    /// Construct a consumer with process-scoped obligation IDs.
+    ///
+    /// This is the default-owner form of
+    /// [`Self::new_owned_with_process_unique_ids`]; its identity scope and
+    /// replay limitations are the same.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the process-wide obligation generation space is exhausted.
+    pub fn new_with_process_unique_ids(
+        cell: &SubjectCell,
+        config: FabricConsumerConfig,
+    ) -> Result<Self, FabricConsumerError> {
+        Self::new_owned_with_process_unique_ids(cell, config, FabricConsumerOwner::default())
+    }
+
+    /// Construct an owned consumer with IDs disjoint from other opted-in consumers.
+    ///
+    /// Unlike [`Self::new_owned`], this allocates an opaque generation from a
+    /// process-wide counter. Identical cells, owners, and requests in consumers
+    /// using either process-unique constructor cannot produce interchangeable
+    /// delivery certificates. Completed attempts and dropped consumers never
+    /// return their generations for reuse.
+    ///
+    /// This isolation holds only among opted-in consumers in the same process.
+    /// Legacy ledger-local IDs may overlap; do not mix the two modes without
+    /// retaining the issuing consumer's identity in the routing layer. These
+    /// IDs are not stable replay identifiers, durable cross-process credentials,
+    /// or authentication tokens. Use [`Self::new_owned`] for deterministic
+    /// ledger-local IDs and route its certificates by consumer instance.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the process-wide obligation generation space is exhausted.
+    pub fn new_owned_with_process_unique_ids(
+        cell: &SubjectCell,
+        config: FabricConsumerConfig,
+        owner: FabricConsumerOwner,
+    ) -> Result<Self, FabricConsumerError> {
+        let mut consumer = Self::new_owned(cell, config, owner)?;
+        consumer.ledger = ObligationLedger::with_process_unique_ids_and_resolved_retention(
+            FABRIC_CONSUMER_RESOLVED_OBLIGATIONS,
+        );
+        Ok(consumer)
     }
 
     /// Return the static consumer configuration.
@@ -1892,11 +1960,17 @@ impl FabricConsumer {
     }
 
     /// Apply an acknowledgement attempt and update pending state on success.
+    ///
+    /// Certificates that do not match a recorded pending attempt are stale
+    /// no-ops. Cross-consumer isolation also requires the process-unique ID
+    /// constructors or instance-aware routing, as described on [`Self`].
     pub fn acknowledge_delivery(
         &mut self,
         attempt: &AttemptCertificate,
     ) -> Result<AckResolution, FabricConsumerError> {
-        if !self.state.pending_acks.contains_key(&attempt.obligation_id) {
+        if !self.matches_pending_attempt(attempt)
+            || !self.state.pending_acks.contains_key(&attempt.obligation_id)
+        {
             return Ok(self.stale_attempt_noop(attempt.obligation_id));
         }
         let resolution = self.cursor.acknowledge(attempt)?;
@@ -1909,6 +1983,7 @@ impl FabricConsumer {
                         .ok_or(FabricConsumerError::MissingPendingAckToken {
                             obligation_id: attempt.obligation_id,
                         })?;
+                    self.pending_attempts.remove(&attempt.obligation_id);
                     let resolved_at = self.next_event_time();
                     self.ledger.commit(token, resolved_at);
                     self.state.pending_count = self
@@ -1930,6 +2005,7 @@ impl FabricConsumer {
                         .ok_or(FabricConsumerError::MissingPendingAckToken {
                             obligation_id: attempt.obligation_id,
                         })?;
+                    self.pending_attempts.remove(&attempt.obligation_id);
                     let aborted_at = self.next_event_time();
                     self.ledger
                         .abort(token, aborted_at, ObligationAbortReason::Cancel);
@@ -1944,11 +2020,17 @@ impl FabricConsumer {
     }
 
     /// Abort a pending delivery attempt without committing it.
+    ///
+    /// Certificates that do not match a recorded pending attempt are stale
+    /// no-ops. The identity scope is the same as [`Self::acknowledge_delivery`].
     pub fn nack_delivery(
         &mut self,
         attempt: &AttemptCertificate,
         reason: ConsumerNackReason,
     ) -> Result<NackResolution, FabricConsumerError> {
+        if !self.matches_pending_attempt(attempt) {
+            return Ok(self.stale_nack_noop(attempt.obligation_id));
+        }
         let Some(pending) = self.state.pending_acks.remove(&attempt.obligation_id) else {
             return Ok(self.stale_nack_noop(attempt.obligation_id));
         };
@@ -1958,6 +2040,7 @@ impl FabricConsumer {
             .ok_or(FabricConsumerError::MissingPendingAckToken {
                 obligation_id: attempt.obligation_id,
             })?;
+        self.pending_attempts.remove(&attempt.obligation_id);
         let aborted_at = self.next_event_time();
         self.ledger.abort(token, aborted_at, reason.abort_reason());
         self.state.pending_count = self
@@ -1972,6 +2055,9 @@ impl FabricConsumer {
     }
 
     /// Reissue a pending delivery attempt under a fresh obligation id.
+    ///
+    /// Only the original pending certificate (or an unchanged clone) may
+    /// request redelivery. Other certificates return `PendingAckNotFound`.
     #[track_caller]
     pub fn redeliver_delivery(
         &mut self,
@@ -1980,6 +2066,11 @@ impl FabricConsumer {
         ticket: Option<&ReadDelegationTicket>,
     ) -> Result<ScheduledConsumerDelivery, FabricConsumerError> {
         self.ensure_region_open()?;
+        if !self.matches_pending_attempt(attempt) {
+            return Err(FabricConsumerError::PendingAckNotFound {
+                obligation_id: attempt.obligation_id,
+            });
+        }
         let Some(pending) = self.state.pending_acks.get(&attempt.obligation_id).cloned() else {
             return Err(FabricConsumerError::PendingAckNotFound {
                 obligation_id: attempt.obligation_id,
@@ -2023,6 +2114,7 @@ impl FabricConsumer {
             .ok_or(FabricConsumerError::MissingPendingAckToken {
                 obligation_id: attempt.obligation_id,
             })?;
+        self.pending_attempts.remove(&attempt.obligation_id);
         let aborted_at = self.next_event_time();
         self.ledger
             .abort(token, aborted_at, ObligationAbortReason::Explicit);
@@ -2042,6 +2134,10 @@ impl FabricConsumer {
     }
 
     /// Transfer a pending attempt into a dead-letter record with an explicit reason.
+    ///
+    /// Certificates that do not match a recorded pending attempt return
+    /// `PendingAckNotFound` without consuming a pending delivery. The identity
+    /// scope is the same as [`Self::acknowledge_delivery`].
     pub fn dead_letter_delivery(
         &mut self,
         attempt: &AttemptCertificate,
@@ -2051,6 +2147,11 @@ impl FabricConsumer {
         let reason = reason.into();
         if reason.trim().is_empty() {
             return Err(FabricConsumerError::EmptyDeadLetterReason);
+        }
+        if !self.matches_pending_attempt(attempt) {
+            return Err(FabricConsumerError::PendingAckNotFound {
+                obligation_id: attempt.obligation_id,
+            });
         }
 
         let pending = self
@@ -2066,6 +2167,7 @@ impl FabricConsumer {
             .ok_or(FabricConsumerError::MissingPendingAckToken {
                 obligation_id: attempt.obligation_id,
             })?;
+        self.pending_attempts.remove(&attempt.obligation_id);
         let dead_lettered_at = self.next_event_time();
         self.ledger
             .abort(token, dead_lettered_at, ObligationAbortReason::Error);
@@ -2088,6 +2190,7 @@ impl FabricConsumer {
         let finalized_now = !self.ledger.is_region_finalized(region);
         let pending_acks = std::mem::take(&mut self.state.pending_acks);
         let pending_ack_tokens = std::mem::take(&mut self.pending_ack_tokens);
+        self.pending_attempts.clear();
         let released_messages = pending_acks
             .values()
             .map(|pending| window_len(pending.window))
@@ -2334,6 +2437,10 @@ impl FabricConsumer {
         }
     }
 
+    fn matches_pending_attempt(&self, attempt: &AttemptCertificate) -> bool {
+        self.pending_attempts.get(&attempt.obligation_id) == Some(attempt)
+    }
+
     fn stale_attempt_noop(&self, obligation_id: ObligationId) -> AckResolution {
         AckResolution::StaleNoOp {
             obligation_id,
@@ -2436,6 +2543,7 @@ impl FabricConsumer {
             },
         );
         self.pending_ack_tokens.insert(obligation_id, token);
+        self.pending_attempts.insert(obligation_id, attempt.clone());
         if let ScheduledConsumerRequest::Pull(pull_request) = &request
             && let Some(record) = self.make_pull_decision_record(pull_request, &plan, obligation_id)
         {
