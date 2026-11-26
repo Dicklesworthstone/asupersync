@@ -1658,6 +1658,7 @@ mod tests {
         let _accepted = listener.accept().expect("accept");
         let stream = crate::net::TcpStream::from_std(std_stream).expect("from_std");
         PgConnection {
+            statement_origin: Arc::new(()),
             inner: PgConnectionInner {
                 stream: PgStream::Plain(stream),
                 options: test_pg_connect_options(),
@@ -1700,6 +1701,7 @@ mod tests {
         let stream = crate::net::TcpStream::from_std(std_stream).expect("from_std");
         (
             PgConnection {
+                statement_origin: Arc::new(()),
                 inner: PgConnectionInner {
                     stream: PgStream::Plain(stream),
                     options: test_pg_connect_options(),
@@ -3404,6 +3406,7 @@ mod tests {
                 param_oids: Vec::new(),
                 columns: Vec::new(),
                 session_generation: tx.conn.inner.session_generation,
+                connection_origin: Arc::clone(&tx.conn.statement_origin),
             };
             assert_pg_rollback_required(tx.query_cursor_prepared(
                 &cx,
@@ -5479,6 +5482,7 @@ mod tests {
                                 param_oids: Vec::new(),
                                 columns: Vec::new(),
                                 session_generation: tx.conn.inner.session_generation,
+                                connection_origin: Arc::clone(&tx.conn.statement_origin),
                             };
                             assert_pg_transaction_finished(tx.query_cursor_prepared(
                                 &cx,
@@ -6536,6 +6540,7 @@ mod tests {
             param_oids: vec![param_oid],
             columns: Vec::new(),
             session_generation: 0,
+            connection_origin: Arc::new(()),
         };
         let instant = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_791_445_550);
         let instants = vec![instant];
@@ -6621,6 +6626,7 @@ mod tests {
             param_oids: vec![param_oid],
             columns: Vec::new(),
             session_generation: 0,
+            connection_origin: Arc::new(()),
         };
         let contains = |haystack: &[u8], needle: &[u8]| {
             haystack
@@ -9068,6 +9074,7 @@ mod tests {
     fn pg_statement_accessors() {
         let stmt = PgStatement {
             name: "s1".to_string(),
+            connection_origin: Arc::new(()),
             sql: "SELECT $1::int4, $2::text".to_string(),
             param_oids: vec![oid::INT4, oid::TEXT],
             columns: vec![PgColumn {
@@ -9213,6 +9220,7 @@ mod tests {
         let param_value: i32 = 42;
         let params: [&dyn ToSql; 1] = [&param_value];
         let stmt = PgStatement {
+            connection_origin: Arc::clone(&conn.statement_origin),
             name: "s1".to_string(),
             sql: "SELECT $1".to_string(),
             param_oids: vec![oid::INT4],
@@ -9242,6 +9250,7 @@ mod tests {
         let first: i32 = 7;
         let params: [&dyn ToSql; 1] = [&first];
         let stmt = PgStatement {
+            connection_origin: Arc::clone(&conn.statement_origin),
             name: "s1".to_string(),
             sql: "SELECT $1, $2".to_string(),
             param_oids: vec![oid::INT4, oid::TEXT],
@@ -9273,6 +9282,7 @@ mod tests {
         let only: i32 = 9;
         let params: [&dyn ToSql; 1] = [&only];
         let stmt = PgStatement {
+            connection_origin: Arc::clone(&conn.statement_origin),
             name: "s2".to_string(),
             sql: "SELECT 1".to_string(),
             param_oids: Vec::new(),
@@ -12516,6 +12526,7 @@ mod tests {
 
     fn fixture_pg_statement(name: &str) -> PgStatement {
         PgStatement {
+            connection_origin: Arc::new(()),
             name: name.to_string(),
             sql: format!("SELECT {name}"),
             param_oids: Vec::new(),
@@ -16185,6 +16196,7 @@ mod tests {
             conn.inner.next_stmt_id = 2;
             conn.inner.closed = true;
             let old_handle = |name: &str, sql: &str| PgStatement {
+                connection_origin: Arc::clone(&conn.statement_origin),
                 name: name.to_string(),
                 sql: sql.to_string(),
                 param_oids: vec![oid::TEXT],
@@ -16954,6 +16966,341 @@ mod tests {
         }
     }
 
+    // A prepared name is local to one backend, even when independently
+    // connected sessions have the same generation and statement counter.
+    fn statement_origin_prepare_response(param_oid: u32, rows: bool) -> Vec<u8> {
+        let mut parameters = 1i16.to_be_bytes().to_vec();
+        parameters.extend_from_slice(&param_oid.to_be_bytes());
+        let mut response = backend_message(b'1', &[]);
+        response.extend_from_slice(&backend_message(b't', &parameters));
+        response.extend_from_slice(&if rows {
+            single_text_row_description()
+        } else {
+            backend_message(b'n', &[])
+        });
+        response.extend_from_slice(&ready_for_query(b'I'));
+        response
+    }
+
+    fn expect_statement_origin_parse(peer: &mut std::net::TcpStream, name: &str, sql: &str) {
+        let (kind, body) = read_frontend_frame(peer);
+        assert_eq!(kind, b'P', "foreign SQL must be prepared before binding");
+        let mut reader = MessageReader::new(&body);
+        assert_eq!(reader.read_cstring().unwrap(), name);
+        assert_eq!(reader.read_cstring().unwrap(), sql);
+        assert_eq!(reader.read_i16().unwrap(), 0, "infer local parameter types");
+        assert_eq!(reader.remaining(), 0);
+        assert_eq!(
+            read_frontend_frame(peer),
+            (b'D', format!("S{name}\0").into_bytes())
+        );
+        assert_eq!(read_frontend_frame(peer), (b'S', Vec::new()));
+    }
+
+    fn prepare_statement_origin_fixture(
+        conn: &mut PgConnection,
+        peer: &mut std::net::TcpStream,
+        sql: &str,
+        param_oid: u32,
+        rows: bool,
+    ) -> PgStatement {
+        std::io::Write::write_all(peer, &statement_origin_prepare_response(param_oid, rows))
+            .expect("prepare response");
+        let statement = match run(conn.prepare(&Cx::for_testing(), sql)) {
+            Outcome::Ok(statement) => statement,
+            other => panic!("prepare origin fixture: {other:?}"),
+        };
+        expect_statement_origin_parse(peer, "__asupersync_s0", sql);
+        statement
+    }
+
+    fn expect_statement_origin_bind(
+        peer: &mut std::net::TcpStream,
+        name: &str,
+        value: &[u8],
+        rows: bool,
+    ) {
+        let (kind, body) = read_frontend_frame(peer);
+        assert_eq!(kind, b'B', "a local or cached handle needs no extra Parse");
+        let mut reader = MessageReader::new(&body);
+        assert_eq!(reader.read_cstring().unwrap(), "");
+        assert_eq!(reader.read_cstring().unwrap(), name);
+        let formats = reader.read_i16().unwrap();
+        assert!((0..=1).contains(&formats));
+        for _ in 0..formats {
+            assert!((0..=1).contains(&reader.read_i16().unwrap()));
+        }
+        assert_eq!(reader.read_i16().unwrap(), 1);
+        let value_len = usize::try_from(reader.read_i32().unwrap()).unwrap();
+        assert_eq!(reader.read_bytes(value_len).unwrap(), value);
+        assert_eq!(reader.read_i16().unwrap(), 1);
+        assert_eq!(reader.read_i16().unwrap(), 0, "text result format");
+        assert_eq!(reader.remaining(), 0);
+        if rows {
+            assert_eq!(read_frontend_frame(peer), (b'D', b"P\0".to_vec()));
+        }
+        assert_eq!(read_frontend_frame(peer), (b'E', vec![0; 5]));
+        assert_eq!(read_frontend_frame(peer), (b'S', Vec::new()));
+    }
+
+    fn reply_statement_origin_execution(peer: &mut std::net::TcpStream, value: &str, rows: bool) {
+        let mut response = backend_message(b'2', &[]);
+        if rows {
+            response.extend_from_slice(&single_text_row_description());
+            response.extend_from_slice(&data_row_text_message(&[value]));
+        }
+        response.extend_from_slice(&command_complete_message(if rows {
+            "SELECT 1"
+        } else {
+            "UPDATE 1"
+        }));
+        response.extend_from_slice(&ready_for_query(b'I'));
+        std::io::Write::write_all(peer, &response).expect("execution response");
+    }
+
+    fn check_prepared_statement_origin_collision(rows: bool) {
+        let source_sql = if rows {
+            "SELECT $1::text AS value /* source */"
+        } else {
+            "UPDATE source_table SET value = $1::text"
+        };
+        let receiver_sql = if rows {
+            "SELECT $1::text AS value /* unrelated receiver */"
+        } else {
+            "UPDATE unrelated_table SET value = $1::text"
+        };
+        let (mut source, mut source_peer) = make_test_connection_with_peer();
+        let foreign = prepare_statement_origin_fixture(
+            &mut source,
+            &mut source_peer,
+            source_sql,
+            oid::TEXT,
+            rows,
+        );
+        let (mut receiver, mut peer) = make_test_connection_with_peer();
+        let local = prepare_statement_origin_fixture(
+            &mut receiver,
+            &mut peer,
+            receiver_sql,
+            oid::TEXT,
+            rows,
+        );
+        assert_eq!(foreign.name, local.name);
+        assert_eq!(foreign.session_generation, local.session_generation);
+        let local_clone = local.clone();
+        let foreign_clone = foreign.clone();
+
+        // The responder owns the sole peer handle. A protocol assertion or
+        // timeout drops it, so a broken client cannot wait forever for a reply.
+        let responder = std::thread::spawn(move || {
+            expect_statement_origin_parse(&mut peer, "__asupersync_s1", source_sql);
+            std::io::Write::write_all(
+                &mut peer,
+                &statement_origin_prepare_response(oid::TEXT, rows),
+            )
+            .expect("re-prepare source SQL");
+            for (name, value) in [
+                ("__asupersync_s1", "foreign"),
+                ("__asupersync_s0", "local"),
+                ("__asupersync_s1", "cached foreign"),
+            ] {
+                expect_statement_origin_bind(&mut peer, name, value.as_bytes(), rows);
+                reply_statement_origin_execution(&mut peer, value, rows);
+            }
+        });
+        let cx = Cx::for_testing();
+        for (statement, value) in [
+            (&foreign, "foreign"),
+            (&local_clone, "local"),
+            (&foreign_clone, "cached foreign"),
+        ] {
+            let params: [&dyn ToSql; 1] = [&value];
+            if rows {
+                let result = match run(receiver.query_prepared(&cx, statement, &params)) {
+                    Outcome::Ok(result) => result,
+                    other => panic!("query with portable statement: {other:?}"),
+                };
+                assert_eq!(result.len(), 1);
+                assert_eq!(result[0].get_typed::<String>("value").unwrap(), value);
+            } else {
+                assert!(matches!(
+                    run(receiver.execute_prepared(&cx, statement, &params)),
+                    Outcome::Ok(1)
+                ));
+            }
+        }
+        responder.join().expect("statement origin responder");
+        assert_eq!(receiver.inner.next_stmt_id, 2);
+        assert_eq!(receiver.inner.prepared_cache.len(), 2);
+        assert_eq!(
+            receiver
+                .inner
+                .prepared_cache
+                .get_and_touch(receiver_sql)
+                .unwrap()
+                .name,
+            local.name,
+            "rebinding foreign SQL must preserve the receiver's original statement"
+        );
+    }
+
+    #[test]
+    fn prepared_statement_origin_query_rebinds_foreign_names() {
+        check_prepared_statement_origin_collision(true);
+    }
+
+    #[test]
+    fn prepared_statement_origin_execute_rebinds_foreign_names() {
+        check_prepared_statement_origin_collision(false);
+    }
+
+    #[test]
+    fn prepared_statement_origin_uses_receiver_cache_metadata() {
+        // The same SQL can infer different types on different databases.
+        // Validating the foreign FLOAT8 metadata would reject this INT8 value;
+        // binding it as FLOAT8 without validation would change its meaning.
+        for rows in [true, false] {
+            let sql = if rows {
+                "SELECT value FROM current_table WHERE key = $1"
+            } else {
+                "UPDATE current_table SET value = value WHERE key = $1"
+            };
+            let (mut source, mut source_peer) = make_test_connection_with_peer();
+            let foreign = prepare_statement_origin_fixture(
+                &mut source,
+                &mut source_peer,
+                sql,
+                oid::FLOAT8,
+                rows,
+            );
+            let (mut receiver, mut peer) = make_test_connection_with_peer();
+            let local =
+                prepare_statement_origin_fixture(&mut receiver, &mut peer, sql, oid::INT8, rows);
+            assert_eq!(foreign.name, local.name);
+            let before = receiver.inner.prepared_cache.stats();
+            let responder = std::thread::spawn(move || {
+                expect_statement_origin_bind(
+                    &mut peer,
+                    "__asupersync_s0",
+                    &42i64.to_be_bytes(),
+                    rows,
+                );
+                reply_statement_origin_execution(&mut peer, "local metadata", rows);
+            });
+            let cx = Cx::for_testing();
+            let value = 42i64;
+            let params: [&dyn ToSql; 1] = [&value];
+            if rows {
+                let result = match run(receiver.query_prepared(&cx, &foreign, &params)) {
+                    Outcome::Ok(result) => result,
+                    other => panic!("query must use local inferred types: {other:?}"),
+                };
+                assert_eq!(
+                    result[0].get_typed::<String>("value").unwrap(),
+                    "local metadata"
+                );
+            } else {
+                assert!(matches!(
+                    run(receiver.execute_prepared(&cx, &foreign, &params)),
+                    Outcome::Ok(1)
+                ));
+            }
+            responder.join().expect("local metadata responder");
+            assert_eq!(receiver.inner.prepared_cache.stats().hits, before.hits + 1);
+            assert_eq!(receiver.inner.next_stmt_id, 1, "reuse the local cache");
+        }
+    }
+
+    #[test]
+    fn prepared_statement_origin_foreign_close_has_no_session_effects() {
+        use std::future::Future;
+        use std::io::Read;
+        use std::task::{Context, Poll, Waker};
+
+        let foreign = {
+            let (mut source, mut peer) = make_test_connection_with_peer();
+            prepare_statement_origin_fixture(
+                &mut source,
+                &mut peer,
+                "SELECT $1::text /* source */",
+                oid::TEXT,
+                true,
+            )
+        };
+        // The handle keeps its origin alive even after its connection drops.
+        for maintenance_pending in [false, true] {
+            for closed in [false, true] {
+                let (mut receiver, mut peer) = make_test_connection_with_peer();
+                let sql = "SELECT $1::text /* receiver */";
+                let local = prepare_statement_origin_fixture(
+                    &mut receiver,
+                    &mut peer,
+                    sql,
+                    oid::TEXT,
+                    true,
+                );
+                assert_eq!(foreign.name, local.name);
+                receiver.inner.closed = closed;
+                receiver.inner.needs_rollback = maintenance_pending;
+                receiver.inner.transaction_status = if maintenance_pending { b'E' } else { b'I' };
+                receiver.inner.pending_session_reset = maintenance_pending;
+                receiver.inner.statement_timeout_uncertain = maintenance_pending;
+                if maintenance_pending {
+                    receiver
+                        .inner
+                        .deallocate_retry_queue
+                        .push_back("pending_close".to_string());
+                }
+                let before = receiver.inner.prepared_cache.stats();
+                let queued = receiver.inner.deallocate_retry_queue.clone();
+                let cx = Cx::for_testing();
+                let mut request = Box::pin(receiver.close_statement(&cx, &foreign));
+                let result = request
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop()));
+                drop(request);
+                assert!(matches!(
+                    result,
+                    Poll::Ready(Outcome::Err(PgError::Protocol(message)))
+                        if message.contains("different PostgreSQL connection")
+                ));
+                assert_user_cancelled(run(receiver.close_statement(&cancelled_cx(), &foreign)));
+                assert_eq!(receiver.inner.closed, closed);
+                assert_eq!(receiver.inner.needs_rollback, maintenance_pending);
+                assert_eq!(
+                    receiver.inner.transaction_status,
+                    if maintenance_pending { b'E' } else { b'I' }
+                );
+                assert_eq!(receiver.inner.pending_session_reset, maintenance_pending);
+                assert_eq!(
+                    receiver.inner.statement_timeout_uncertain,
+                    maintenance_pending
+                );
+                assert_eq!(receiver.inner.deallocate_retry_queue, queued);
+                assert_eq!(receiver.inner.next_stmt_id, 1);
+                assert_eq!(receiver.inner.session_generation, 0);
+                assert_eq!(receiver.inner.prepared_cache.stats(), before);
+                assert_eq!(receiver.inner.prepared_cache.len(), 1);
+                assert_eq!(
+                    receiver
+                        .inner
+                        .prepared_cache
+                        .get_and_touch(sql)
+                        .unwrap()
+                        .name,
+                    local.name
+                );
+                peer.set_nonblocking(true).expect("nonblocking wire check");
+                let mut byte = [0; 1];
+                assert_eq!(
+                    peer.read(&mut byte).unwrap_err().kind(),
+                    std::io::ErrorKind::WouldBlock,
+                    "foreign close must emit neither rollback nor statement close"
+                );
+            }
+        }
+    }
+
     // ─── br-asupersync-postgres-client-audit-r10-xi63yt ─────────────────
 
     /// Read one frontend message (type byte and body) from the peer.
@@ -17146,6 +17493,7 @@ mod tests {
         let cx = Cx::for_testing();
         let sql = "SELECT * FROM t";
         let stmt = PgStatement {
+            connection_origin: Arc::clone(&conn.statement_origin),
             name: "__asupersync_s7".to_string(),
             sql: sql.to_string(),
             param_oids: Vec::new(),
@@ -17436,6 +17784,7 @@ mod tests {
         let (mut conn, peer) = make_test_connection_with_peer();
         let cx = Cx::for_testing();
         let stmt = PgStatement {
+            connection_origin: Arc::clone(&conn.statement_origin),
             name: "s1".to_string(),
             sql: "INSERT INTO t(price) VALUES ($1)".to_string(),
             param_oids: vec![oid::FLOAT8],
@@ -17576,6 +17925,7 @@ mod tests {
             param_oids: vec![param_oid],
             columns: Vec::new(),
             session_generation: 0,
+            connection_origin: Arc::new(()),
         };
         let epoch_seconds: i64 = 1_791_445_550;
         let fractional_seconds: f64 = 1_791_445_550.5;

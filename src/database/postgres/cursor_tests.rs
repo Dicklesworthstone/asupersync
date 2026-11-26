@@ -71,6 +71,7 @@ fn pair() -> (PgConnection, std::net::TcpStream) {
     };
     (
         PgConnection {
+            statement_origin: std::sync::Arc::new(()),
             inner: PgConnectionInner {
                 stream: PgStream::Plain(crate::net::TcpStream::from_std(socket).unwrap()),
                 options,
@@ -117,6 +118,7 @@ fn cached(conn: &mut PgConnection, name: &str, sql: &str, oids: &[u32]) -> PgSta
         param_oids: oids.to_vec(),
         columns: Vec::new(),
         session_generation: conn.inner.session_generation,
+        connection_origin: std::sync::Arc::clone(&conn.statement_origin),
     };
     assert!(
         conn.inner

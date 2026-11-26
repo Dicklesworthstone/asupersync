@@ -29,6 +29,7 @@ fn make_test_connection_with_peer() -> (PgConnection, std::net::TcpStream) {
     let stream = crate::net::TcpStream::from_std(std_stream).expect("from_std");
     (
         PgConnection {
+            statement_origin: std::sync::Arc::new(()),
             inner: PgConnectionInner {
                 stream: PgStream::Plain(stream),
                 options: test_pg_connect_options(),

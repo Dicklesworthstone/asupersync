@@ -4284,6 +4284,10 @@ fn test_pg_connect_options() -> PgConnectOptions {
 pub struct PgConnection {
     /// Inner connection state.
     inner: PgConnectionInner,
+    /// Identifies this logical connection even when its backend is replaced.
+    /// Statement clones keep the allocation alive, so another connection can
+    /// never inherit authority over an earlier connection's statement names.
+    statement_origin: Arc<()>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5392,7 +5396,7 @@ impl PgConnection {
             }
         }
 
-        let PgConnection { inner } = fresh;
+        let PgConnection { inner, .. } = fresh;
         let mut inner = inner;
         // Statement names keep counting, and handles prepared before this
         // reconnect are recognised as stale (see `session_generation`).
@@ -5715,6 +5719,7 @@ impl PgConnection {
             Err(error) => return Outcome::Err(error),
         };
         let mut conn = Self {
+            statement_origin: Arc::new(()),
             inner: PgConnectionInner {
                 stream,
                 options: options.clone(),
@@ -8118,6 +8123,7 @@ impl PgConnection {
             param_oids,
             columns,
             session_generation: self.inner.session_generation,
+            connection_origin: Arc::clone(&self.statement_origin),
         };
 
         // br-asupersync-cvkoe9 + br-asupersync-7v80ju: insert into the
@@ -8162,6 +8168,7 @@ impl PgConnection {
             param_oids: Vec::new(),
             columns: Vec::new(),
             session_generation: self.inner.session_generation,
+            connection_origin: Arc::clone(&self.statement_origin),
         };
         match self.close_statement_exchange(cx, &victim_stmt).await {
             Outcome::Ok(()) => {
@@ -8252,6 +8259,7 @@ impl PgConnection {
                 param_oids: Vec::new(),
                 columns: Vec::new(),
                 session_generation: self.inner.session_generation,
+                connection_origin: Arc::clone(&self.statement_origin),
             };
             match self.close_statement_exchange(cx, &stmt).await {
                 Outcome::Ok(()) => {
@@ -8517,6 +8525,9 @@ impl PgConnection {
     }
 
     /// Execute a prepared statement returning rows.
+    ///
+    /// A handle from another connection is re-prepared from its retained SQL
+    /// on this backend. Its connection-local statement name is never reused.
     pub async fn query_prepared(
         &mut self,
         cx: &Cx,
@@ -8531,13 +8542,14 @@ impl PgConnection {
         }
         let rebound_stmt = match self.ensure_open_for_request(cx).await {
             Outcome::Ok(PgOpenState::AlreadyOpen)
-                if stmt.session_generation == self.inner.session_generation =>
+                if Arc::ptr_eq(&stmt.connection_origin, &self.statement_origin)
+                    && stmt.session_generation == self.inner.session_generation =>
             {
                 None
             }
-            // Reconnected in this call or an earlier one: the handle's name
-            // means nothing on this backend, or another statement, so
-            // prepare its SQL again.
+            // A foreign handle, or one from before a reconnect, may name
+            // unrelated SQL on this backend. Resolve its retained SQL through
+            // this connection's cache and use the local metadata for binding.
             Outcome::Ok(PgOpenState::AlreadyOpen | PgOpenState::Reconnected) => {
                 if stmt.sql.is_empty() {
                     return Outcome::Err(PgError::ConnectionClosed);
@@ -8623,6 +8635,9 @@ impl PgConnection {
     }
 
     /// Execute a prepared statement returning affected row count.
+    ///
+    /// A handle from another connection is re-prepared from its retained SQL
+    /// on this backend. Its connection-local statement name is never reused.
     pub async fn execute_prepared(
         &mut self,
         cx: &Cx,
@@ -8637,13 +8652,14 @@ impl PgConnection {
         }
         let rebound_stmt = match self.ensure_open_for_request(cx).await {
             Outcome::Ok(PgOpenState::AlreadyOpen)
-                if stmt.session_generation == self.inner.session_generation =>
+                if Arc::ptr_eq(&stmt.connection_origin, &self.statement_origin)
+                    && stmt.session_generation == self.inner.session_generation =>
             {
                 None
             }
-            // Reconnected in this call or an earlier one: the handle's name
-            // means nothing on this backend, or another statement, so
-            // prepare its SQL again.
+            // A foreign handle, or one from before a reconnect, may name
+            // unrelated SQL on this backend. Resolve its retained SQL through
+            // this connection's cache and use the local metadata for binding.
             Outcome::Ok(PgOpenState::AlreadyOpen | PgOpenState::Reconnected) => {
                 if stmt.sql.is_empty() {
                     return Outcome::Err(PgError::ConnectionClosed);
@@ -8746,12 +8762,21 @@ impl PgConnection {
     }
 
     /// Close a prepared statement, freeing server-side resources.
+    ///
+    /// Only the connection that created the handle can close its server-side
+    /// name. A foreign handle returns a local protocol error without changing
+    /// this connection's session or prepared-statement cache.
     pub async fn close_statement(&mut self, cx: &Cx, stmt: &PgStatement) -> Outcome<(), PgError> {
         if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
                 cx.cancel_reason()
                     .unwrap_or_else(|| CancelReason::user("cancelled")),
             );
+        }
+        if !Arc::ptr_eq(&stmt.connection_origin, &self.statement_origin) {
+            return Outcome::Err(PgError::Protocol(
+                "prepared statement belongs to a different PostgreSQL connection".to_string(),
+            ));
         }
         if self.inner.closed {
             return if self.inner.explicitly_closed {
@@ -11094,7 +11119,11 @@ impl Drop for PgTransaction<'_> {
 ///
 /// Created by [`PgConnection::prepare`] and executed with
 /// [`PgConnection::query_prepared`] or [`PgConnection::execute_prepared`].
-/// Call [`PgConnection::close_statement`] to release server-side resources.
+/// Call [`PgConnection::close_statement`] on the originating connection to
+/// release server-side resources. Executing this handle on another connection
+/// prepares its retained SQL there instead of trusting its original name.
+/// Clones preserve the origin, and transparent reconnects of the originating
+/// connection retain the existing automatic re-prepare behavior.
 #[derive(Debug, Clone)]
 pub struct PgStatement {
     /// Server-side statement name.
@@ -11109,6 +11138,8 @@ pub struct PgStatement {
     columns: Vec<PgColumn>,
     /// The connection session this statement was prepared on.
     session_generation: u64,
+    /// Private identity of the logical connection that issued this name.
+    connection_origin: Arc<()>,
 }
 
 impl PgStatement {
@@ -11402,6 +11433,7 @@ fn fuzz_test_connection_with_peer() -> (PgConnection, std::net::TcpStream) {
     };
     (
         PgConnection {
+            statement_origin: Arc::new(()),
             inner: PgConnectionInner {
                 stream: PgStream::Plain(stream),
                 options: test_pg_connect_options(),
