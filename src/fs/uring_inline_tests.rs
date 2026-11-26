@@ -102,6 +102,105 @@ fn assert_poll_fails_closed<T: std::fmt::Debug>(poll: Poll<io::Result<T>>, opera
 }
 
 #[test]
+fn test_uring_trait_settlement_keeps_supersession_through_pending_and_errors() {
+    init_test("test_uring_trait_settlement_keeps_supersession_through_pending_and_errors");
+    fn delayed_result<T: Send + 'static>(
+        released: Arc<crate::sync::atomic::AtomicBool>,
+        result: io::Result<T>,
+    ) -> TraitIoFuture<T> {
+        let mut result = Some(result);
+        Box::pin(std::future::poll_fn(move |_| {
+            if released.load(Ordering::Acquire) {
+                Poll::Ready(result.take().expect("terminal result is collected once"))
+            } else {
+                Poll::Pending
+            }
+        }))
+    }
+
+    // This state-machine test does not need a kernel ring. It also covers
+    // failed completions: observers report the error in either case, but only
+    // an operation that was never superseded may leave a result for retry.
+    for is_seek in [false, true] {
+        for superseded in [false, true] {
+            for fails in [false, true] {
+                let released = Arc::new(crate::sync::atomic::AtomicBool::new(false));
+                let pending = if is_seek {
+                    TraitOperation::Seek {
+                        future: delayed_result(
+                            Arc::clone(&released),
+                            if fails {
+                                Err(io::Error::from_raw_os_error(libc::EIO))
+                            } else {
+                                Ok(5)
+                            },
+                        ),
+                        position: SeekFrom::Current(5),
+                        retryable: true,
+                    }
+                } else {
+                    TraitOperation::Write {
+                        future: delayed_result(
+                            Arc::clone(&released),
+                            if fails {
+                                Err(io::Error::from_raw_os_error(libc::EIO))
+                            } else {
+                                Ok(5)
+                            },
+                        ),
+                        chunk: Arc::new(b"hello".to_vec()),
+                        retryable: true,
+                    }
+                };
+                let mut state = TraitIoState {
+                    pending: Some(pending),
+                    ..TraitIoState::default()
+                };
+                let mut task = Context::from_waker(Waker::noop());
+                assert!(
+                    state
+                        .settle(&mut task, !superseded, !superseded)
+                        .is_pending()
+                );
+                assert!(state.settle(&mut task, true, true).is_pending());
+                released.store(true, Ordering::Release);
+                let Poll::Ready(observed) = state.settle(&mut task, true, true) else {
+                    panic!("released operation must complete");
+                };
+                if fails {
+                    assert_eq!(observed.unwrap_err().raw_os_error(), Some(libc::EIO));
+                } else {
+                    observed.unwrap();
+                }
+                assert!(state.pending.is_none());
+                let retained = if is_seek {
+                    state.seek_credit.take().map(|credit| credit.result)
+                } else {
+                    state
+                        .write_credit
+                        .take()
+                        .map(|credit| credit.result.map(|count| u64::try_from(count).unwrap()))
+                };
+                if superseded {
+                    assert!(retained.is_none(), "superseded result must not be revived");
+                } else if fails {
+                    assert_eq!(
+                        retained.unwrap().unwrap_err().raw_os_error(),
+                        Some(libc::EIO),
+                        "a live retry keeps the original failure"
+                    );
+                } else {
+                    assert_eq!(retained.unwrap().unwrap(), 5);
+                }
+            }
+        }
+    }
+    crate::test_complete!(
+        "test_uring_trait_settlement_keeps_supersession_through_pending_and_errors"
+    );
+}
+
+#[test]
 fn test_uring_offsets_stay_in_the_nonnegative_kernel_range() {
     init_test("test_uring_offsets_stay_in_the_nonnegative_kernel_range");
     let largest = u64::try_from(i64::MAX).unwrap();
@@ -1657,6 +1756,133 @@ fn test_uring_relative_seek_is_not_replayed_after_interleaved_read_or_flush() {
     }
     crate::test_complete!(
         "test_uring_relative_seek_is_not_replayed_after_interleaved_read_or_flush"
+    );
+}
+
+#[test]
+fn test_uring_dropped_replacements_do_not_suppress_a_later_identical_write() {
+    init_test("test_uring_dropped_replacements_do_not_suppress_a_later_identical_write");
+    for replacement in ["write", "seek"] {
+        for observer in ["retry", "read", "flush"] {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("superseded_write.txt");
+            std::fs::write(&path, b"abcdefghijklmnop").unwrap();
+            let mut occupied = OccupiedTraitPool::new();
+            let cx = crate::cx::Cx::for_testing()
+                .with_blocking_pool_handle(Some(occupied.pool.handle()));
+            let _current = crate::cx::Cx::set_current(Some(cx));
+            let mut file = IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap();
+            let mut task = Context::from_waker(Waker::noop());
+            assert!(
+                Pin::new(&mut file)
+                    .poll_write(&mut task, b"hello")
+                    .is_pending()
+            );
+
+            // The worker remains occupied throughout replacement admission.
+            // Dropping the new borrowing future must not restore the old
+            // write's eligibility for acknowledgement by a future write.
+            if replacement == "write" {
+                let mut changed = Box::pin(std::future::poll_fn(|cx| {
+                    Pin::new(&mut file).poll_write(cx, b"other")
+                }));
+                assert!(changed.as_mut().poll(&mut task).is_pending());
+                drop(changed);
+            } else {
+                let mut changed = Box::pin(std::future::poll_fn(|cx| {
+                    Pin::new(&mut file).poll_seek(cx, SeekFrom::Start(0))
+                }));
+                assert!(changed.as_mut().poll(&mut task).is_pending());
+                drop(changed);
+            }
+            occupied.release_and_drain();
+            assert_eq!(std::fs::read(&path).unwrap(), b"hellofghijklmnop");
+            assert_eq!(file.position(), 5);
+
+            if observer == "read" {
+                let mut bytes = [0; 2];
+                assert_eq!(read_via_trait(&mut file, &mut bytes).unwrap(), 2);
+                assert_eq!(&bytes, b"fg");
+            } else if observer == "flush" {
+                futures_lite::future::block_on(std::future::poll_fn(|cx| {
+                    Pin::new(&mut file).poll_flush(cx)
+                }))
+                .unwrap();
+            }
+
+            let written = futures_lite::future::block_on(std::future::poll_fn(|cx| {
+                Pin::new(&mut file).poll_write(cx, b"hello")
+            }))
+            .unwrap();
+            assert_eq!(written, 5);
+            let expected: &[u8] = if observer == "read" {
+                b"hellofghellomnop"
+            } else {
+                b"hellohelloklmnop"
+            };
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                expected,
+                "replacement={replacement}, observer={observer}: identical bytes are a new write"
+            );
+            assert_eq!(file.position(), if observer == "read" { 12 } else { 10 });
+        }
+    }
+    crate::test_complete!(
+        "test_uring_dropped_replacements_do_not_suppress_a_later_identical_write"
+    );
+}
+
+#[test]
+fn test_uring_dropped_seek_replacement_does_not_suppress_a_later_relative_seek() {
+    init_test("test_uring_dropped_seek_replacement_does_not_suppress_a_later_relative_seek");
+    for observer in ["retry", "read", "flush"] {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("superseded_seek.txt");
+        std::fs::write(&path, b"abcdefghijklmnop").unwrap();
+        let mut occupied = OccupiedTraitPool::new();
+        let cx =
+            crate::cx::Cx::for_testing().with_blocking_pool_handle(Some(occupied.pool.handle()));
+        let _current = crate::cx::Cx::set_current(Some(cx));
+        let mut file = IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap();
+        let mut task = Context::from_waker(Waker::noop());
+        assert!(
+            Pin::new(&mut file)
+                .poll_seek(&mut task, SeekFrom::Current(5))
+                .is_pending()
+        );
+        let mut changed = Box::pin(std::future::poll_fn(|cx| {
+            Pin::new(&mut file).poll_seek(cx, SeekFrom::Start(0))
+        }));
+        assert!(changed.as_mut().poll(&mut task).is_pending());
+        drop(changed);
+        occupied.release_and_drain();
+        assert_eq!(file.position(), 5);
+
+        if observer == "read" {
+            let mut bytes = [0; 2];
+            assert_eq!(read_via_trait(&mut file, &mut bytes).unwrap(), 2);
+            assert_eq!(&bytes, b"fg");
+        } else if observer == "flush" {
+            futures_lite::future::block_on(std::future::poll_fn(|cx| {
+                Pin::new(&mut file).poll_flush(cx)
+            }))
+            .unwrap();
+        }
+
+        let position = futures_lite::future::block_on(std::future::poll_fn(|cx| {
+            Pin::new(&mut file).poll_seek(cx, SeekFrom::Current(5))
+        }))
+        .unwrap();
+        let expected = if observer == "read" { 12 } else { 10 };
+        assert_eq!(
+            position, expected,
+            "observer={observer}: the superseded seek cannot acknowledge a new relative seek"
+        );
+        assert_eq!(file.position(), expected);
+    }
+    crate::test_complete!(
+        "test_uring_dropped_seek_replacement_does_not_suppress_a_later_relative_seek"
     );
 }
 

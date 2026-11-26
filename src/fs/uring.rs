@@ -1463,11 +1463,14 @@ enum TraitOperation {
     Write {
         future: TraitIoFuture<usize>,
         chunk: Arc<Vec<u8>>,
+        // Once a replacement abandons this result, observers must not revive it.
+        retryable: bool,
     },
     Sync(TraitIoFuture<()>),
     Seek {
         future: TraitIoFuture<u64>,
         position: SeekFrom,
+        retryable: bool,
     },
 }
 
@@ -1606,23 +1609,37 @@ impl TraitIoState {
                     Poll::Ready(Ok(()))
                 }
             },
-            TraitOperation::Write { mut future, chunk } => match future.as_mut().poll(cx) {
-                Poll::Pending => {
-                    self.pending = Some(TraitOperation::Write { future, chunk });
-                    Poll::Pending
-                }
-                Poll::Ready(result) => {
-                    if !retain_write {
-                        return Poll::Ready(result.map(|_| ()));
+            TraitOperation::Write {
+                mut future,
+                chunk,
+                retryable,
+            } => {
+                // A different write or seek ends the original write's retry
+                // sequence before waiting. Its dropped future cannot undo that
+                // decision when a later read or flush collects the result.
+                let retryable = retryable && retain_write;
+                match future.as_mut().poll(cx) {
+                    Poll::Pending => {
+                        self.pending = Some(TraitOperation::Write {
+                            future,
+                            chunk,
+                            retryable,
+                        });
+                        Poll::Pending
                     }
-                    // The observer sees the failure too, but the writer keeps
-                    // its original error and must not silently resubmit on its
-                    // next poll. Preserve errno for errors produced by the OS.
-                    let observed = result.as_ref().map(|_| ()).map_err(copy_io_error);
-                    self.write_credit = Some(TraitWriteCredit { chunk, result });
-                    Poll::Ready(observed)
+                    Poll::Ready(result) => {
+                        if !retryable {
+                            return Poll::Ready(result.map(|_| ()));
+                        }
+                        // The observer sees the failure too, but the writer keeps
+                        // its original error and must not silently resubmit on its
+                        // next poll. Preserve errno for errors produced by the OS.
+                        let observed = result.as_ref().map(|_| ()).map_err(copy_io_error);
+                        self.write_credit = Some(TraitWriteCredit { chunk, result });
+                        Poll::Ready(observed)
+                    }
                 }
-            },
+            }
             TraitOperation::Sync(mut future) => match future.as_mut().poll(cx) {
                 Poll::Pending => {
                     self.pending = Some(TraitOperation::Sync(future));
@@ -1633,20 +1650,28 @@ impl TraitIoState {
             TraitOperation::Seek {
                 mut future,
                 position,
-            } => match future.as_mut().poll(cx) {
-                Poll::Pending => {
-                    self.pending = Some(TraitOperation::Seek { future, position });
-                    Poll::Pending
-                }
-                Poll::Ready(result) => {
-                    if !retain_seek {
-                        return Poll::Ready(result.map(|_| ()));
+                retryable,
+            } => {
+                let retryable = retryable && retain_seek;
+                match future.as_mut().poll(cx) {
+                    Poll::Pending => {
+                        self.pending = Some(TraitOperation::Seek {
+                            future,
+                            position,
+                            retryable,
+                        });
+                        Poll::Pending
                     }
-                    let observed = result.as_ref().map(|_| ()).map_err(copy_io_error);
-                    self.seek_credit = Some(TraitSeekCredit { position, result });
-                    Poll::Ready(observed)
+                    Poll::Ready(result) => {
+                        if !retryable {
+                            return Poll::Ready(result.map(|_| ()));
+                        }
+                        let observed = result.as_ref().map(|_| ()).map_err(copy_io_error);
+                        self.seek_credit = Some(TraitSeekCredit { position, result });
+                        Poll::Ready(observed)
+                    }
                 }
-            },
+            }
         }
     }
 }
@@ -1806,12 +1831,18 @@ impl AsyncWrite for IoUringFile {
             }
             loop {
                 match state.pending.take() {
-                    Some(TraitOperation::Write { mut future, chunk })
-                        if buf.starts_with(&chunk) =>
-                    {
+                    Some(TraitOperation::Write {
+                        mut future,
+                        chunk,
+                        retryable,
+                    }) if retryable && buf.starts_with(&chunk) => {
                         return match future.as_mut().poll(task) {
                             Poll::Pending => {
-                                state.pending = Some(TraitOperation::Write { future, chunk });
+                                state.pending = Some(TraitOperation::Write {
+                                    future,
+                                    chunk,
+                                    retryable,
+                                });
                                 Poll::Pending
                             }
                             Poll::Ready(result) => Poll::Ready(result),
@@ -1829,7 +1860,11 @@ impl AsyncWrite for IoUringFile {
                                 .store(offset.saturating_add(written as u64), Ordering::Relaxed);
                             Ok(written)
                         });
-                        state.pending = Some(TraitOperation::Write { future, chunk });
+                        state.pending = Some(TraitOperation::Write {
+                            future,
+                            chunk,
+                            retryable: true,
+                        });
                     }
                     other => {
                         state.pending = other;
@@ -1909,10 +1944,15 @@ impl AsyncSeek for IoUringFile {
                     Some(TraitOperation::Seek {
                         mut future,
                         position,
-                    }) if position == pos => {
+                        retryable,
+                    }) if retryable && position == pos => {
                         return match future.as_mut().poll(task) {
                             Poll::Pending => {
-                                state.pending = Some(TraitOperation::Seek { future, position });
+                                state.pending = Some(TraitOperation::Seek {
+                                    future,
+                                    position,
+                                    retryable,
+                                });
                                 Poll::Pending
                             }
                             Poll::Ready(result) => Poll::Ready(result),
@@ -1923,6 +1963,7 @@ impl AsyncSeek for IoUringFile {
                         state.pending = Some(TraitOperation::Seek {
                             future: Self::submit_trait_io(inner, move |file| file.seek_locked(pos)),
                             position: pos,
+                            retryable: true,
                         });
                     }
                     other => {
