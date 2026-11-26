@@ -795,3 +795,168 @@ fn native_four_workers_concurrent_permits_all_resolve() {
         );
     }
 }
+
+#[test]
+fn native_recoverable_oneshot_reservation_preserves_a_parked_receiver_until_quota_returns() {
+    use asupersync::record::region::RegionLimits;
+    use asupersync::runtime::obligation_mailbox::ObligationAdmissionError;
+    use std::time::Duration;
+
+    for (flavor, builder) in [
+        ("current-thread", RuntimeBuilder::current_thread()),
+        ("two-workers", RuntimeBuilder::multi_thread().worker_threads(2)),
+    ] {
+        let runtime = builder
+            .root_region_limits(RegionLimits {
+                max_obligations: Some(1),
+                ..RegionLimits::UNLIMITED
+            })
+            .build()
+            .expect("build quota-limited native runtime");
+        let diagnostics = runtime.diagnostics();
+        runtime.block_on(async {
+            let cx = Cx::current().expect("native root context");
+            asupersync::time::timeout(cx.now(), Duration::from_secs(10), async {
+                let (blocker, _blocker_rx) = oneshot::channel::<u32>();
+                let blocker = blocker.reserve_checked(&cx).expect("occupy the only credit");
+                let (mut sender, mut receiver) = oneshot::channel::<u32>();
+                let (parked, mut witness) = oneshot::channel();
+                let mut receiving = cx
+                    .spawn(move |child| async move {
+                        let mut receive = Box::pin(receiver.recv(&child));
+                        let mut parked = Some(parked);
+                        std::future::poll_fn(|task| {
+                            let result = receive.as_mut().poll(task);
+                            if result.is_pending() {
+                                if let Some(parked) = parked.take() {
+                                    parked.send_blocking(()).expect("receiver witness");
+                                }
+                            }
+                            result
+                        })
+                        .await
+                    })
+                    .expect("spawn receiver");
+                // Publication occurs only after the real receive registered
+                // its waiter and returned Pending.
+                witness.recv(&cx).await.expect("receiver is parked");
+                let before = sender.telemetry_snapshot(1);
+                assert_eq!(before.recv_waiter_count, 1, "{flavor}");
+                assert!(!before.closed, "{flavor}");
+
+                for _ in 0..3 {
+                    sender = match sender.reserve_checked_recover(&cx) {
+                        Err(oneshot::CheckedSendError::Admission {
+                            error: ObligationAdmissionError::LimitReached { limit: 1, live: 1 },
+                            value,
+                        }) => value,
+                        other => panic!("{flavor}: exact quota refusal required, got {other:?}"),
+                    };
+                    assert_eq!(sender.telemetry_snapshot(1), before, "{flavor}");
+                }
+                assert!(
+                    receiving.try_join().expect("receiver remains alive").is_none(),
+                    "{flavor}: a refused reservation must not close the receiver"
+                );
+
+                // Terminal settlement returns admission credit immediately.
+                // The recovered sender is retried without a scheduler yield.
+                blocker.send(11).expect("release occupied credit");
+                sender
+                    .reserve_checked_recover(&cx)
+                    .expect("reuse returned quota")
+                    .send(1729)
+                    .expect("publish exactly once");
+                assert_eq!(
+                    receiving.join(&cx).await.expect("join parked receiver"),
+                    Ok(1729),
+                    "{flavor}"
+                );
+                assert!(
+                    yield_until(|| live(&diagnostics, cx.task_id(), ObligationKind::SendPermit)
+                        .is_empty())
+                    .await,
+                    "{flavor}: every admitted permit settles"
+                );
+                assert!(
+                    confirmed(&diagnostics, cx.task_id(), ObligationKind::SendPermit).is_empty(),
+                    "{flavor}: no obligation leaks"
+                );
+            })
+            .await
+            .expect("native recovery journey must finish");
+        });
+        assert!(runtime.is_quiescent(), "{flavor}: no retained task or obligation");
+    }
+}
+
+#[test]
+fn native_cancelled_oneshot_owner_returns_sender_for_a_live_owner_to_retry() {
+    use std::time::Duration;
+
+    for (flavor, runtime) in native_runtimes() {
+        let diagnostics = runtime.diagnostics();
+        runtime.block_on(async {
+            let cx = Cx::current().expect("native root context");
+            asupersync::time::timeout(cx.now(), Duration::from_secs(10), async {
+                let (sender, mut receiver) = oneshot::channel::<u32>();
+                let (_gate, mut gate) = oneshot::channel::<()>();
+                let (parked, mut witness) = oneshot::channel();
+                let mut owner = cx
+                    .spawn(move |child| async move {
+                        let mut wait = Box::pin(gate.recv(&child));
+                        let mut parked = Some(parked);
+                        let cancelled = std::future::poll_fn(|task| {
+                            let result = wait.as_mut().poll(task);
+                            if result.is_pending() {
+                                if let Some(parked) = parked.take() {
+                                    parked
+                                        .send_blocking(child.task_id())
+                                        .expect("owner witness");
+                                }
+                            }
+                            result
+                        })
+                        .await;
+                        assert_eq!(cancelled, Err(oneshot::RecvError::Cancelled));
+                        match sender.reserve_checked_recover(&child) {
+                            Err(oneshot::CheckedSendError::Channel(
+                                oneshot::SendError::Cancelled(sender),
+                            )) => sender,
+                            other => panic!("cancelled owner must retain its sender: {other:?}"),
+                        }
+                    })
+                    .expect("spawn original sender owner");
+                let holder = witness.recv(&cx).await.expect("owner is parked");
+                owner.abort_with_reason(CancelReason::user("recover sender ownership"));
+                let sender = owner
+                    .join(&cx)
+                    .await
+                    .expect("acknowledged cancellation preserves the returned sender");
+                assert_eq!(receiver.try_recv(), Err(oneshot::TryRecvError::Empty));
+                assert!(!sender.telemetry_snapshot(2).closed, "{flavor}");
+                assert!(live(&diagnostics, holder, ObligationKind::SendPermit).is_empty());
+                assert!(confirmed(&diagnostics, holder, ObligationKind::SendPermit).is_empty());
+
+                sender
+                    .reserve_checked_recover(&cx)
+                    .expect("a live owner can admit the same sender")
+                    .send(2718)
+                    .expect("publish after handoff");
+                assert_eq!(receiver.recv(&cx).await, Ok(2718), "{flavor}");
+                assert!(
+                    yield_until(|| live(&diagnostics, cx.task_id(), ObligationKind::SendPermit)
+                        .is_empty())
+                    .await,
+                    "{flavor}: retry's obligation settles"
+                );
+                assert!(
+                    confirmed(&diagnostics, cx.task_id(), ObligationKind::SendPermit).is_empty()
+                );
+            })
+            .await
+            .expect("native cancelled-owner journey must finish");
+        });
+        assert!(runtime.is_quiescent(), "{flavor}: no retained task or obligation");
+    }
+}

@@ -22,7 +22,10 @@
 //!
 //! The two-phase pattern ensures cancellation at any point is clean:
 //!
-//! - If cancelled during reserve: sender is consumed, receiver sees Closed
+//! - If cancelled during `reserve` or `reserve_checked`: sender is consumed,
+//!   receiver sees Closed
+//! - [`Sender::reserve_checked_recover`] returns the sender on cancellation or
+//!   admission refusal, keeping the channel open for an explicit retry
 //! - If cancelled after reserve but before send: permit drop aborts cleanly
 //! - The commit operation (`send`) either delivers the value or returns it in
 //!   `SendError::Disconnected` if the receiver has already closed
@@ -77,7 +80,10 @@ impl<T> std::fmt::Display for SendError<T> {
 
 impl<T: std::fmt::Debug> std::error::Error for SendError<T> {}
 
-/// A checked send refused publication and retained the caller's value.
+/// A checked send or reservation refused publication and retained its input.
+///
+/// [`Sender::reserve_checked_recover`] uses the input slot to return the sender
+/// itself, so an admission refusal need not close the channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CheckedSendError<T> {
@@ -87,7 +93,7 @@ pub enum CheckedSendError<T> {
     Admission {
         /// The authoritative admission refusal.
         error: crate::runtime::obligation_mailbox::ObligationAdmissionError,
-        /// The value which was not published.
+        /// The value or sender which was not consumed by the operation.
         value: T,
     },
 }
@@ -437,6 +443,7 @@ impl<T> Sender<T> {
     /// without publishing a permit; the receiver observes closure. A context
     /// deliberately constructed without a runtime remains untracked. Existing
     /// [`Self::reserve`] behavior is retained for compatibility.
+    /// Use [`Self::reserve_checked_recover`] to keep the sender on refusal.
     pub fn reserve_checked(self, cx: &Cx) -> Result<SendPermit<T>, CheckedSendError<()>> {
         if cx.checkpoint().is_err() {
             return self.reserve(cx).map_err(CheckedSendError::Channel);
@@ -450,6 +457,47 @@ impl<T> Sender<T> {
                 cx.task_id(),
             )
             .map_err(|error| CheckedSendError::Admission { error, value: () })?;
+        Ok(self.into_checked_permit(obligation))
+    }
+
+    /// Reserves after checked admission, returning the sender on refusal.
+    ///
+    /// A cancelled context returns [`SendError::Cancelled`] containing this
+    /// sender. An admission refusal returns [`CheckedSendError::Admission`]
+    /// with this sender in its `value` field. Neither refusal closes the
+    /// channel, publishes a permit, or signals the channel's waiters. The caller
+    /// can keep the sender and retry after capacity becomes available or with
+    /// another live owner context. Dropping the returned sender closes the
+    /// channel as usual; no background retry is started.
+    ///
+    /// Keep the value to send separately until this reservation succeeds. Once
+    /// admitted, the returned [`SendPermit`] has the same commit/abort/drop
+    /// semantics as [`Self::reserve_checked`]. Receiver closure can race with
+    /// admission; [`SendPermit::send`] returns the unpublished value if the
+    /// receiver is gone.
+    ///
+    /// Cancellation masking and checked admission use the supplied context.
+    /// A context deliberately constructed without a runtime remains untracked.
+    /// A panic in an admission notifier unwinds normally: the sender is dropped
+    /// and its receiver observes closure, just as with [`Self::reserve_checked`].
+    pub fn reserve_checked_recover(self, cx: &Cx) -> Result<SendPermit<T>, CheckedSendError<Self>> {
+        if cx.checkpoint().is_err() {
+            return Err(CheckedSendError::Channel(SendError::Cancelled(self)));
+        }
+        let obligation = match cx.try_register_obligation_checked(
+            crate::record::ObligationKind::SendPermit,
+            cx.task_id(),
+        ) {
+            Ok(obligation) => obligation,
+            Err(error) => return Err(CheckedSendError::Admission { error, value: self }),
+        };
+        Ok(self.into_checked_permit(obligation))
+    }
+
+    fn into_checked_permit(
+        self,
+        obligation: Option<crate::runtime::obligation_mailbox::ObligationToken>,
+    ) -> SendPermit<T> {
         let permit = SendPermit {
             inner: Arc::clone(&self.inner),
             sent: false,
@@ -460,7 +508,7 @@ impl<T> Sender<T> {
             inner.sender_consumed = true;
             inner.permit_outstanding = true;
         }
-        Ok(permit)
+        permit
     }
 
     /// Sends after checked admission, returning the unpublished value on error.

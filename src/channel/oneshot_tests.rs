@@ -128,9 +128,233 @@ mod tests {
     }
 
     #[test]
+    fn recoverable_checked_reservation_retries_after_each_terminal_before_mailbox_drain() {
+        use crate::runtime::obligation_mailbox::ObligationAdmissionError;
+        for terminal in ["commit", "abort", "drop", "disconnect"] {
+            let mut lab =
+                crate::lab::LabRuntime::new(crate::lab::LabConfig::new(0x28_c004).max_steps(128));
+            let root = lab.state.create_root_region(Budget::INFINITE);
+            assert!(lab.state.set_region_limits(
+                root,
+                crate::record::region::RegionLimits {
+                    max_obligations: Some(1),
+                    ..crate::record::region::RegionLimits::UNLIMITED
+                }
+            ));
+            let (task, mut handle) = lab
+                .state
+                .create_task(root, Budget::INFINITE, async {})
+                .unwrap();
+            let cx = lab.state.task(task).unwrap().cx.clone().unwrap();
+            let mailbox = Arc::clone(lab.state.obligation_gateway().unwrap().mailbox());
+            let (first, mut first_rx) = channel::<u32>();
+            let permit = first.reserve_checked_recover(&cx).unwrap();
+            let (mut sender, mut rx) = channel::<u32>();
+            let inner = rx.inner.clone();
+            let wakes = Arc::new(AtomicUsize::new(0));
+            let waker = counting_waker(wakes.clone());
+            let mut ctx = Context::from_waker(&waker);
+            let mut receiver = Box::pin(rx.recv(&cx));
+            assert!(receiver.as_mut().poll(&mut ctx).is_pending());
+            assert!(inner.lock().waker.is_some());
+
+            for _ in 0..2 {
+                sender = match sender.reserve_checked_recover(&cx) {
+                    Err(CheckedSendError::Admission { error, value }) => {
+                        assert_eq!(
+                            error,
+                            ObligationAdmissionError::LimitReached { limit: 1, live: 1 }
+                        );
+                        assert!(Arc::ptr_eq(&value.inner, &inner));
+                        value
+                    }
+                    other => panic!("expected recoverable quota refusal, got {other:?}"),
+                };
+                let snapshot = sender.telemetry_snapshot(1);
+                assert!(!snapshot.closed);
+                assert_eq!(snapshot.reserved_uncommitted_obligations, 0);
+                assert_eq!(snapshot.cancellation_count, 0);
+                assert_eq!(wakes.load(Ordering::SeqCst), 0);
+                assert!(receiver.as_mut().poll(&mut ctx).is_pending());
+                let state = inner.lock();
+                assert!(!state.sender_consumed);
+                assert!(!state.permit_outstanding);
+                assert!(state.waker.is_some());
+                drop(state);
+                let stats = mailbox.stats();
+                assert_eq!(stats.reserved, 0);
+                assert_eq!(stats.posted, 1);
+                assert_eq!(stats.applied, 0);
+            }
+
+            match terminal {
+                "commit" => {
+                    permit.send(149).unwrap();
+                    assert_eq!(first_rx.try_recv(), Ok(149));
+                }
+                "abort" => {
+                    permit.abort();
+                    assert_eq!(first_rx.try_recv(), Err(TryRecvError::Closed));
+                }
+                "drop" => {
+                    drop(permit);
+                    assert_eq!(first_rx.try_recv(), Err(TryRecvError::Closed));
+                }
+                "disconnect" => {
+                    drop(first_rx);
+                    assert_eq!(permit.send(149), Err(SendError::Disconnected(149)));
+                }
+                _ => unreachable!(),
+            }
+            // Each terminal releases the authoritative quota immediately; no
+            // runtime turn or mailbox application is needed to retry this sender.
+            assert_eq!(mailbox.stats().applied, 0);
+            assert_eq!(wakes.load(Ordering::SeqCst), 0);
+            let permit = sender.reserve_checked_recover(&cx).unwrap();
+            assert!(permit.obligation.is_some());
+            assert_eq!(mailbox.stats().applied, 0);
+            assert_eq!(wakes.load(Ordering::SeqCst), 0);
+            permit.send(151).unwrap();
+            assert_eq!(wakes.load(Ordering::SeqCst), 1);
+            assert_eq!(receiver.as_mut().poll(&mut ctx), Poll::Ready(Ok(151)));
+            drop(receiver);
+
+            lab.scheduler.lock().schedule(task, 0);
+            let report = lab.run_until_quiescent_with_report();
+            assert!(
+                report.oracle_report.all_passed(),
+                "{:?}",
+                report.oracle_report.failures()
+            );
+            assert!(report.invariant_violations.is_empty());
+            assert!(handle.try_join().unwrap().is_some());
+            let stats = mailbox.stats();
+            assert_eq!(stats.reserved, 2);
+            assert_eq!(stats.committed, if terminal == "commit" { 2 } else { 1 });
+            assert_eq!(stats.aborted, u64::from(terminal != "commit"));
+            assert_eq!(stats.posted, stats.applied);
+            assert_eq!(stats.refused, 0);
+            assert_eq!(stats.leaked, 0);
+            assert_eq!(mailbox.open_tickets(), 0);
+            assert_eq!(lab.state.pending_obligation_count(), 0);
+            assert_eq!(lab.state.leak_count(), 0);
+        }
+    }
+
+    #[test]
+    fn recoverable_checked_refusal_closes_only_when_the_returned_error_is_dropped() {
+        use crate::runtime::obligation_mailbox::ObligationAdmissionError;
+        let mut lab =
+            crate::lab::LabRuntime::new(crate::lab::LabConfig::new(0x28_c005).max_steps(128));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        assert!(lab.state.set_region_limits(
+            root,
+            crate::record::region::RegionLimits {
+                max_obligations: Some(0),
+                ..crate::record::region::RegionLimits::UNLIMITED
+            }
+        ));
+        let (task, mut handle) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async {})
+            .unwrap();
+        let cx = lab.state.task(task).unwrap().cx.clone().unwrap();
+        let mailbox = Arc::clone(lab.state.obligation_gateway().unwrap().mailbox());
+        let (sender, mut rx) = channel::<u32>();
+        let inner = rx.inner.clone();
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let waker = counting_waker(wakes.clone());
+        let mut ctx = Context::from_waker(&waker);
+        let mut receiver = Box::pin(rx.recv(&cx));
+        assert!(receiver.as_mut().poll(&mut ctx).is_pending());
+        let error = sender.reserve_checked_recover(&cx).expect_err("zero quota");
+        assert!(matches!(
+            &error,
+            CheckedSendError::Admission {
+                error: ObligationAdmissionError::LimitReached { limit: 0, live: 0 },
+                ..
+            }
+        ));
+        assert!(!inner.lock().sender_consumed);
+        assert!(!inner.lock().permit_outstanding);
+        assert_eq!(wakes.load(Ordering::SeqCst), 0);
+        assert!(receiver.as_mut().poll(&mut ctx).is_pending());
+        drop(error);
+        assert_eq!(wakes.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            receiver.as_mut().poll(&mut ctx),
+            Poll::Ready(Err(RecvError::Closed))
+        );
+        drop(receiver);
+        assert_eq!(rx.try_recv(), Err(TryRecvError::Closed));
+        assert_eq!(mailbox.stats().posted, 0);
+        lab.scheduler.lock().schedule(task, 0);
+        let report = lab.run_until_quiescent_with_report();
+        assert!(
+            report.oracle_report.all_passed(),
+            "{:?}",
+            report.oracle_report.failures()
+        );
+        assert!(report.invariant_violations.is_empty());
+        assert!(handle.try_join().unwrap().is_some());
+        let stats = mailbox.stats();
+        assert_eq!(stats.reserved, 0);
+        assert_eq!(stats.committed + stats.aborted + stats.leaked + stats.refused, 0);
+        assert_eq!(stats.posted, stats.applied);
+        assert_eq!(mailbox.open_tickets(), 0);
+        assert_eq!(lab.state.pending_obligation_count(), 0);
+        assert_eq!(lab.state.leak_count(), 0);
+    }
+
+    #[test]
+    fn recoverable_checked_cancellation_masking_and_stateless_nonclone_payload() {
+        let cancelled = test_cx();
+        cancelled.set_cancel_requested(true);
+        let healthy = test_cx();
+        let (sender, mut rx) = channel::<NonClone>();
+        let inner = rx.inner.clone();
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let waker = counting_waker(wakes.clone());
+        let mut ctx = Context::from_waker(&waker);
+        let mut receiver = Box::pin(rx.recv(&healthy));
+        assert!(receiver.as_mut().poll(&mut ctx).is_pending());
+        let sender = match sender.reserve_checked_recover(&cancelled) {
+            Err(CheckedSendError::Channel(SendError::Cancelled(sender))) => sender,
+            other => panic!("expected recoverable cancellation, got {other:?}"),
+        };
+        assert!(Arc::ptr_eq(&sender.inner, &inner));
+        assert!(!inner.lock().sender_consumed);
+        assert!(!inner.lock().permit_outstanding);
+        assert_eq!(sender.telemetry_snapshot(2).cancellation_count, 0);
+        assert_eq!(wakes.load(Ordering::SeqCst), 0);
+        assert!(receiver.as_mut().poll(&mut ctx).is_pending());
+        let permit = sender.reserve_checked_recover(&healthy).unwrap();
+        assert!(permit.obligation.is_none());
+        permit.send(NonClone(157)).unwrap();
+        assert_eq!(wakes.load(Ordering::SeqCst), 1);
+        match receiver.as_mut().poll(&mut ctx) {
+            Poll::Ready(Ok(NonClone(value))) => assert_eq!(value, 157),
+            other => panic!("expected the original non-Clone payload, got {other:?}"),
+        }
+        drop(receiver);
+
+        let (sender, mut rx) = channel::<NonClone>();
+        let permit = cancelled.masked(|| sender.reserve_checked_recover(&cancelled).unwrap());
+        assert!(cancelled.is_cancel_requested());
+        assert!(permit.obligation.is_none());
+        permit.send(NonClone(163)).unwrap();
+        assert_eq!(rx.try_recv().unwrap().0, 163);
+        assert_eq!(rx.telemetry_snapshot(3).cancellation_count, 0);
+    }
+
+    #[test]
     fn checked_admission_notification_panics_preserve_parked_receiver_and_cleanup() {
         use crate::runtime::obligation_mailbox::ObligationGateway;
-        for operation in ["admission", "commit", "abort", "drop"] {
+        for (recover, operation) in [false, true].into_iter().flat_map(|recover| {
+            ["admission", "commit", "abort", "drop"]
+                .into_iter()
+                .map(move |operation| (recover, operation))
+        }) {
             let mut lab =
                 crate::lab::LabRuntime::new(crate::lab::LabConfig::new(0x28_c003).max_steps(128));
             let root = lab.state.create_root_region(crate::types::Budget::INFINITE);
@@ -172,7 +396,11 @@ mod tests {
             assert!(receiver.as_mut().poll(&mut ctx).is_pending());
             assert!(inner.lock().waker.is_some());
             let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let permit = tx.reserve_checked(&cx).unwrap();
+                let permit = if recover {
+                    tx.reserve_checked_recover(&cx).unwrap()
+                } else {
+                    tx.reserve_checked(&cx).unwrap()
+                };
                 match operation {
                     "commit" => permit.send(137).unwrap(),
                     "abort" => permit.abort(),
