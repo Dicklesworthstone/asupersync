@@ -221,6 +221,8 @@ enum PendingIo {
         future: PollIoFuture<u64>,
         /// The requested position; a retry asks for the same one.
         pos: SeekFrom,
+        /// A replacement cursor operation permanently ends this retry.
+        retryable: bool,
         /// Read-ahead of a combined rewind-then-seek job.
         restore: Option<RewindRestore>,
     },
@@ -268,6 +270,14 @@ impl RewindRestore {
 struct SettledWrite {
     chunk: Arc<Vec<u8>>,
     written: usize,
+}
+
+/// A seek collected by another operation before its caller retried. Retaining
+/// the original result prevents a relative seek from moving the cursor twice,
+/// or a failed seek from succeeding after an interleaved read moved it.
+struct SettledSeek {
+    pos: SeekFrom,
+    result: io::Result<u64>,
 }
 
 /// A serialized syscall can have a reader, writer, flusher and seeker waiting
@@ -386,6 +396,10 @@ impl fmt::Debug for PendingIo {
 ///
 /// The file handle is wrapped in `Arc` to allow sharing across
 /// `spawn_blocking_io` boundaries for async operations.
+/// Poll-based writes and seeks retain their completion when another operation
+/// collects it, so retrying the original operation does not repeat its effect.
+/// An explicit owned [`seek`](Self::seek), [`rewind`](Self::rewind), or
+/// [`set_len`](Self::set_len) starts a new cursor operation and ends those retries.
 pub struct File {
     pub(crate) inner: Arc<std::fs::File>,
     cursor_gate: Arc<Mutex<()>>,
@@ -394,6 +408,9 @@ pub struct File {
     /// A write settled by another operation, awaiting its caller's retry.
     /// Locked only while `pending` is held.
     settled_write: Mutex<Option<SettledWrite>>,
+    /// A seek settled by another operation, awaiting its caller's retry.
+    /// Locked only while `pending` is held, after `settled_write` if needed.
+    settled_seek: Mutex<Option<SettledSeek>>,
     waiters: Arc<FileIoWaiters>,
     #[cfg(feature = "test-internals")]
     cursor_probe: Option<Arc<FileCursorOperationProbe>>,
@@ -411,13 +428,18 @@ impl fmt::Debug for File {
 }
 
 impl File {
-    /// Explicit cursor/size changes end a previous poll-write retry. Clear its
-    /// credit before awaiting the change: a failed or abandoned operation must
-    /// not let a later identical write report bytes committed at the old
-    /// position or removed by a resize (br-asupersync-pxg07b).
-    fn invalidate_settled_write(&self) {
-        let _pending = self.pending.lock();
+    /// Explicit cursor/size changes end previous poll-write and poll-seek
+    /// retries. Clear their results before awaiting the change: even a failed
+    /// or abandoned change starts a new operation (br-asupersync-pxg07b).
+    fn invalidate_settled_cursor_operations(&self) {
+        let mut pending = self.pending.lock();
         self.settled_write.lock().take();
+        self.settled_seek.lock().take();
+        if let Some(PendingIo::Seek { retryable, .. }) = pending.as_mut() {
+            // Keep the invalidation even if the replacement is dropped while
+            // the old syscall is pending and a later observer collects it.
+            *retryable = false;
+        }
     }
 
     async fn with_inner<R, F>(&self, op: F) -> io::Result<R>
@@ -429,7 +451,7 @@ impl File {
         spawn_blocking_io(move || op(inner)).await
     }
 
-    async fn with_cursor_inner<R, F>(&mut self, retain_write: bool, op: F) -> io::Result<R>
+    async fn with_cursor_inner<R, F>(&mut self, retain_results: bool, op: F) -> io::Result<R>
     where
         R: Send + 'static,
         F: FnOnce(Arc<std::fs::File>) -> io::Result<R> + Send + 'static,
@@ -438,7 +460,7 @@ impl File {
         // bytes the caller never consumed; both move the OS cursor past where
         // the caller believes it is. Settle them first so this owned cursor
         // operation observes the caller's cursor.
-        self.settle_trait_pending(retain_write).await?;
+        self.settle_trait_pending(retain_results).await?;
         let read_ahead = {
             let mut pending = self.pending.lock();
             if let Some(PendingIo::ReadAhead { bytes, consumed }) = pending.as_mut() {
@@ -502,7 +524,7 @@ impl File {
                 bytes,
                 consumed,
             });
-            self.settle_trait_pending(retain_write).await?;
+            self.settle_trait_pending(retain_results).await?;
             let completed = result.lock().take();
             return completed.unwrap_or_else(|| {
                 Err(io::Error::other(
@@ -587,6 +609,7 @@ impl File {
             cursor_gate: Arc::new(Mutex::new(())),
             pending: Mutex::new(None),
             settled_write: Mutex::new(None),
+            settled_seek: Mutex::new(None),
             waiters: Arc::new(FileIoWaiters::default()),
             #[cfg(feature = "test-internals")]
             cursor_probe: None,
@@ -605,6 +628,7 @@ impl File {
             cursor_gate,
             pending,
             settled_write: _,
+            settled_seek: _,
             waiters: _,
             #[cfg(feature = "test-internals")]
                 cursor_probe: _,
@@ -685,7 +709,7 @@ impl File {
     /// returned future is dropped. A poll-trait write still in flight lands
     /// before the resize.
     pub async fn set_len(&self, size: u64) -> io::Result<()> {
-        self.invalidate_settled_write();
+        self.invalidate_settled_cursor_operations();
         self.settle_trait_pending(false).await?;
         self.with_inner(move |inner| inner.set_len(size)).await
     }
@@ -711,6 +735,7 @@ impl File {
             cursor_gate: Arc::clone(&self.cursor_gate),
             pending: Mutex::new(None),
             settled_write: Mutex::new(None),
+            settled_seek: Mutex::new(None),
             waiters: Arc::new(FileIoWaiters::default()),
             #[cfg(feature = "test-internals")]
             cursor_probe: self.cursor_probe.clone(),
@@ -738,7 +763,7 @@ impl File {
     /// If this future is dropped after the syscall starts, the seek may still
     /// complete. A later cursor operation waits for that completion.
     pub async fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
-        self.invalidate_settled_write();
+        self.invalidate_settled_cursor_operations();
         self.with_cursor_inner(false, move |inner| {
             let mut inner_ref: &std::fs::File = &inner;
             Seek::seek(&mut inner_ref, pos)
@@ -760,7 +785,7 @@ impl File {
     /// If this future is dropped after the syscall starts, the rewind may still
     /// complete. A later cursor operation waits for that completion.
     pub async fn rewind(&mut self) -> io::Result<()> {
-        self.invalidate_settled_write();
+        self.invalidate_settled_cursor_operations();
         self.with_cursor_inner(false, move |inner| {
             let mut inner_ref: &std::fs::File = &inner;
             Seek::rewind(&mut inner_ref)
@@ -870,11 +895,12 @@ impl File {
     /// to a settled state before a new operation starts, so no started
     /// syscall is ever lost or reordered. A completed read settles as
     /// read-ahead bytes; a completed write, flush, or seek settles as `None`.
-    /// With `retain`, a completed write's count is kept there for its caller's
-    /// retry (see [`SettledWrite`]).
+    /// The optional result slots retain a write or seek completion for its
+    /// caller's retry (see [`SettledWrite`] and [`SettledSeek`]).
     fn settle_foreign_pending(
         pending: &mut Option<PendingIo>,
-        retain: Option<&mut Option<SettledWrite>>,
+        retain_write: Option<&mut Option<SettledWrite>>,
+        retain_seek: Option<&mut Option<SettledSeek>>,
         poll_cx: &mut Context<'_>,
     ) -> Poll<io::Result<()>> {
         match pending.take() {
@@ -934,7 +960,7 @@ impl File {
                 // copy_bidirectional or split it is still polling and would
                 // otherwise submit the same bytes again (br-asupersync-pxg07b).
                 Poll::Ready(result) => {
-                    if let (Ok(written), Some(slot)) = (&result, retain) {
+                    if let (Ok(written), Some(slot)) = (&result, retain_write) {
                         *slot = Some(SettledWrite {
                             chunk,
                             written: *written,
@@ -956,23 +982,45 @@ impl File {
             Some(PendingIo::Seek {
                 mut future,
                 pos,
+                retryable,
                 restore,
-            }) => match future.as_mut().poll(poll_cx) {
-                Poll::Pending => {
-                    *pending = Some(PendingIo::Seek {
-                        future,
-                        pos,
-                        restore,
-                    });
-                    Poll::Pending
-                }
-                Poll::Ready(result) => {
-                    if let (Err(_), Some(restore)) = (&result, restore) {
-                        restore.restore_unless_rewound(pending);
+            }) => {
+                // A replacement seek must not revive this result if it is
+                // itself abandoned before the original syscall completes.
+                let retryable = retryable && retain_seek.is_some();
+                match future.as_mut().poll(poll_cx) {
+                    Poll::Pending => {
+                        *pending = Some(PendingIo::Seek {
+                            future,
+                            pos,
+                            retryable,
+                            restore,
+                        });
+                        Poll::Pending
                     }
-                    Poll::Ready(result.map(|_| ()))
+                    Poll::Ready(result) => {
+                        if let (Err(_), Some(restore)) = (&result, restore) {
+                            restore.restore_unless_rewound(pending);
+                        }
+                        if retryable
+                            && let Some(slot) = retain_seek
+                        {
+                            // The observer reports failure too, but the seek's
+                            // caller must still receive the original result.
+                            let observed = result.as_ref().map(|_| ()).map_err(|error| {
+                                error.raw_os_error().map_or_else(
+                                    || io::Error::new(error.kind(), error.to_string()),
+                                    io::Error::from_raw_os_error,
+                                )
+                            });
+                            *slot = Some(SettledSeek { pos, result });
+                            Poll::Ready(observed)
+                        } else {
+                            Poll::Ready(result.map(|_| ()))
+                        }
+                    }
                 }
-            },
+            }
         }
     }
 
@@ -987,20 +1035,22 @@ impl File {
 
     /// Settles outstanding syscalls without discarding read-ahead. Internal
     /// rewind futures remain owned by the file if the caller is dropped.
-    /// Reads, cursor observations, and syncs preserve a completed write for
-    /// its caller's retry, just like interleaved poll-trait reads and flushes.
-    /// Explicit seeks and resizes instead end that retry before changing the
-    /// cursor or extent; they must not revive an old write's credit here.
-    async fn settle_trait_pending(&self, retain_write: bool) -> io::Result<()> {
+    /// Reads, cursor observations, and syncs preserve completed writes and
+    /// seeks for their callers' retries, just like interleaved trait polls.
+    /// Explicit seeks and resizes instead end those retries before changing
+    /// the cursor or extent; they must not revive old results here.
+    async fn settle_trait_pending(&self, retain_results: bool) -> io::Result<()> {
         let waiter = FileOwnedWaiter::new(Arc::clone(&self.waiters));
         let waker = Waker::from(Arc::clone(&self.waiters));
         std::future::poll_fn(|poll_cx| {
             waiter.register(poll_cx.waker());
             let mut pending = self.pending.lock();
-            let mut settled = retain_write.then(|| self.settled_write.lock());
+            let mut settled_write = retain_results.then(|| self.settled_write.lock());
+            let mut settled_seek = retain_results.then(|| self.settled_seek.lock());
             Self::settle_foreign_pending(
                 &mut pending,
-                settled.as_deref_mut(),
+                settled_write.as_deref_mut(),
+                settled_seek.as_deref_mut(),
                 &mut Context::from_waker(&waker),
             )
         })
@@ -1071,7 +1121,13 @@ impl File {
                 other => {
                     *pending = other;
                     let mut settled = this.settled_write.lock();
-                    match Self::settle_foreign_pending(&mut pending, Some(&mut *settled), poll_cx) {
+                    let mut settled_seek = this.settled_seek.lock();
+                    match Self::settle_foreign_pending(
+                        &mut pending,
+                        Some(&mut *settled),
+                        Some(&mut *settled_seek),
+                        poll_cx,
+                    ) {
                         Poll::Pending => return Poll::Pending,
                         Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                         Poll::Ready(Ok(())) => {}
@@ -1194,7 +1250,13 @@ impl File {
                 }
                 other => {
                     *pending = other;
-                    match Self::settle_foreign_pending(&mut pending, None, poll_cx) {
+                    let mut settled_seek = this.settled_seek.lock();
+                    match Self::settle_foreign_pending(
+                        &mut pending,
+                        None,
+                        Some(&mut *settled_seek),
+                        poll_cx,
+                    ) {
                         Poll::Pending => return Poll::Pending,
                         Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                         Poll::Ready(Ok(())) => {}
@@ -1231,7 +1293,13 @@ impl File {
                 other => {
                     *pending = other;
                     let mut settled = this.settled_write.lock();
-                    match Self::settle_foreign_pending(&mut pending, Some(&mut *settled), poll_cx) {
+                    let mut settled_seek = this.settled_seek.lock();
+                    match Self::settle_foreign_pending(
+                        &mut pending,
+                        Some(&mut *settled),
+                        Some(&mut *settled_seek),
+                        poll_cx,
+                    ) {
                         Poll::Pending => return Poll::Pending,
                         Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                         Poll::Ready(Ok(())) => {}
@@ -1257,6 +1325,15 @@ impl File {
     fn poll_seek_inner(&self, poll_cx: &mut Context<'_>, pos: SeekFrom) -> Poll<io::Result<u64>> {
         let this = self;
         let mut pending = this.pending.lock();
+        // A read, write, flush, or owned observer may have collected this
+        // seek. Acknowledge its result before touching later operations: an
+        // interleaved write may have its own completion waiting for a retry.
+        let settled = this.settled_seek.lock().take();
+        if let Some(settled) = settled
+            && settled.pos == pos
+        {
+            return Poll::Ready(settled.result);
+        }
         // A write retried after the cursor moves is a new write, not a retry.
         this.settled_write.lock().take();
         loop {
@@ -1266,12 +1343,14 @@ impl File {
                 Some(PendingIo::Seek {
                     mut future,
                     pos: submitted,
+                    retryable,
                     restore,
-                }) if submitted == pos => match future.as_mut().poll(poll_cx) {
+                }) if retryable && submitted == pos => match future.as_mut().poll(poll_cx) {
                     Poll::Pending => {
                         *pending = Some(PendingIo::Seek {
                             future,
                             pos,
+                            retryable,
                             restore,
                         });
                         return Poll::Pending;
@@ -1291,6 +1370,7 @@ impl File {
                     *pending = Some(PendingIo::Seek {
                         future,
                         pos,
+                        retryable: true,
                         restore: None,
                     });
                 }
@@ -1317,6 +1397,7 @@ impl File {
                     *pending = Some(PendingIo::Seek {
                         future,
                         pos,
+                        retryable: true,
                         restore: Some(RewindRestore {
                             bytes,
                             consumed,
@@ -1326,7 +1407,7 @@ impl File {
                 }
                 other => {
                     *pending = other;
-                    match Self::settle_foreign_pending(&mut pending, None, poll_cx) {
+                    match Self::settle_foreign_pending(&mut pending, None, None, poll_cx) {
                         Poll::Pending => return Poll::Pending,
                         Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                         Poll::Ready(Ok(())) => {}

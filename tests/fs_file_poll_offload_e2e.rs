@@ -528,6 +528,260 @@ async fn abandon_queued_io(future: impl std::future::Future) {
     blocker.await;
 }
 
+/// br-asupersync-pxg07b/e66q35: a relative seek has the same completion
+/// ownership requirement as a write. An interleaved operation may collect its
+/// syscall, but must not cause the seek's retry to move the cursor again.
+#[test]
+fn relative_seek_retry_survives_interleaved_file_operations() {
+    for operation in [
+        "read",
+        "write",
+        "flush",
+        "sync_all",
+        "sync_data",
+        "position",
+        "owned_read",
+    ] {
+        let path = scratch_path(&format!("seek-retry-{operation}"));
+        std::fs::write(&path, b"abcdefghijklmnop").expect("write seek fixture");
+        let mut observer = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("open cursor observer");
+        let mut file = File::from_std(observer.try_clone().expect("share OS cursor"));
+        let runtime = RuntimeBuilder::current_thread()
+            .blocking_threads(1, 1)
+            .build()
+            .expect("runtime with one blocking worker");
+        runtime.block_on(async move {
+            // The helper proves the first seek is queued before releasing its
+            // worker; no timing assumption decides who collects completion.
+            abandon_queued_io(AsyncSeekExt::seek(&mut file, SeekFrom::Current(5))).await;
+            let position = match operation {
+                "read" => {
+                    let mut bytes = [0; 2];
+                    file.read_exact(&mut bytes).await.expect("interleaved read");
+                    assert_eq!(&bytes, b"fg");
+                    7
+                }
+                "write" => {
+                    file.write_all(b"XY").await.expect("interleaved write");
+                    assert_eq!(
+                        std::fs::read(&path).expect("written bytes"),
+                        b"abcdeXYhijklmnop"
+                    );
+                    7
+                }
+                "flush" => {
+                    file.flush().await.expect("interleaved flush");
+                    5
+                }
+                "sync_all" => {
+                    file.sync_all().await.expect("interleaved sync_all");
+                    5
+                }
+                "sync_data" => {
+                    file.sync_data().await.expect("interleaved sync_data");
+                    5
+                }
+                "position" => {
+                    assert_eq!(file.stream_position().await.expect("observe position"), 5);
+                    5
+                }
+                "owned_read" => {
+                    let (bytes, count) = file
+                        .read_into_vec(vec![0; 2])
+                        .await
+                        .expect("owned read");
+                    assert_eq!(count, 2);
+                    assert_eq!(&bytes, b"fg");
+                    7
+                }
+                _ => unreachable!(),
+            };
+            assert_eq!(
+                std::io::Seek::stream_position(&mut observer).expect("physical cursor"),
+                position
+            );
+            assert_eq!(
+                AsyncSeekExt::seek(&mut file, SeekFrom::Current(5))
+                    .await
+                    .expect("retry seek"),
+                5,
+                "the seek reports its original result after {operation}"
+            );
+            assert_eq!(
+                std::io::Seek::stream_position(&mut observer).expect("cursor after retry"),
+                position,
+                "the relative seek must not execute twice"
+            );
+            assert_eq!(
+                AsyncSeekExt::seek(&mut file, SeekFrom::Current(5))
+                    .await
+                    .expect("new seek"),
+                position + 5,
+                "the result is consumed exactly once"
+            );
+        });
+        assert!(runtime.shutdown_timeout(Duration::from_secs(10)));
+    }
+}
+
+#[test]
+fn failed_relative_seek_retry_keeps_its_error_after_an_interleaved_read() {
+    let path = scratch_path("failed-seek-retry");
+    std::fs::write(&path, b"abcdef").expect("write seek fixture");
+    let mut observer = std::fs::File::open(&path).expect("open cursor observer");
+    let mut file = File::from_std(observer.try_clone().expect("share OS cursor"));
+    let runtime = RuntimeBuilder::current_thread()
+        .blocking_threads(1, 1)
+        .build()
+        .expect("runtime with one blocking worker");
+    runtime.block_on(async move {
+        assert_eq!(file.seek(SeekFrom::Start(2)).await.expect("initial seek"), 2);
+        abandon_queued_io(AsyncSeekExt::seek(&mut file, SeekFrom::Current(-3))).await;
+        let observed = file.flush().await.expect_err("seek before zero must fail");
+        assert_eq!(observed.kind(), std::io::ErrorKind::InvalidInput);
+        let mut bytes = [0; 2];
+        file.read_exact(&mut bytes)
+            .await
+            .expect("read after failed seek");
+        assert_eq!(&bytes, b"cd");
+        assert_eq!(
+            std::io::Seek::stream_position(&mut observer).expect("physical cursor"),
+            4
+        );
+
+        // Repeating the syscall now would succeed at position 1, hiding the
+        // original failure and unexpectedly moving the file's cursor.
+        let retried = AsyncSeekExt::seek(&mut file, SeekFrom::Current(-3))
+            .await
+            .expect_err("retry returns the original failure");
+        assert_eq!(retried.kind(), observed.kind());
+        assert_eq!(retried.raw_os_error(), observed.raw_os_error());
+        assert_eq!(
+            std::io::Seek::stream_position(&mut observer).expect("cursor after failure"),
+            4
+        );
+        assert_eq!(
+            AsyncSeekExt::seek(&mut file, SeekFrom::Current(-3))
+                .await
+                .expect("new valid seek"),
+            1
+        );
+    });
+    assert!(runtime.shutdown_timeout(Duration::from_secs(10)));
+}
+
+#[test]
+fn acknowledging_a_collected_seek_preserves_a_later_write_completion() {
+    let path = scratch_path("seek-retry-with-write-credit");
+    std::fs::write(&path, b"abcdefghijklmnop").expect("write seek fixture");
+    let std_file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .expect("open file");
+    let mut file = File::from_std(std_file);
+    let runtime = RuntimeBuilder::current_thread()
+        .blocking_threads(1, 1)
+        .build()
+        .expect("runtime with one blocking worker");
+    runtime.block_on(async move {
+        abandon_queued_io(AsyncSeekExt::seek(&mut file, SeekFrom::Current(5))).await;
+        file.flush().await.expect("collect seek completion");
+        abandon_queued_io(file.write(b"XY")).await;
+        file.flush().await.expect("collect write completion");
+        assert_eq!(file.stream_position().await.expect("cursor after write"), 7);
+        assert_eq!(
+            std::fs::read(&path).expect("written bytes"),
+            b"abcdeXYhijklmnop"
+        );
+
+        assert_eq!(
+            AsyncSeekExt::seek(&mut file, SeekFrom::Current(5))
+                .await
+                .expect("retry seek"),
+            5
+        );
+        assert_eq!(file.write(b"XY").await.expect("retry write"), 2);
+        assert_eq!(
+            file.stream_position().await.expect("cursor after retries"),
+            7
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("bytes after retries"),
+            b"abcdeXYhijklmnop"
+        );
+    });
+    assert!(runtime.shutdown_timeout(Duration::from_secs(10)));
+}
+
+#[test]
+fn explicit_cursor_changes_end_a_previous_trait_seek_retry() {
+    for collected in [false, true] {
+        for operation in ["seek", "rewind", "resize", "failed_seek", "abandoned_seek"] {
+            let path = scratch_path(&format!("seek-credit-{collected}-{operation}"));
+            std::fs::write(&path, b"abcdefghijklmnop").expect("write seek fixture");
+            let std_file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .expect("open file");
+            let mut file = File::from_std(std_file);
+            let runtime = RuntimeBuilder::current_thread()
+                .blocking_threads(1, 1)
+                .build()
+                .expect("runtime with one blocking worker");
+            runtime.block_on(async move {
+                abandon_queued_io(AsyncSeekExt::seek(&mut file, SeekFrom::Current(5))).await;
+                if collected {
+                    file.flush().await.expect("collect seek completion");
+                }
+                let position = match operation {
+                    "seek" => file.seek(SeekFrom::Start(2)).await.expect("owned seek"),
+                    "rewind" => {
+                        file.rewind().await.expect("owned rewind");
+                        0
+                    }
+                    "resize" => {
+                        file.set_len(20).await.expect("resize");
+                        5
+                    }
+                    "failed_seek" => {
+                        file.seek(SeekFrom::Current(-6))
+                            .await
+                            .expect_err("invalid owned seek");
+                        5
+                    }
+                    "abandoned_seek" => {
+                        abandon_queued_io(file.seek(SeekFrom::Start(2))).await;
+                        5
+                    }
+                    _ => unreachable!(),
+                };
+                assert_eq!(
+                    file.stream_position().await.expect("cursor after change"),
+                    position
+                );
+                assert_eq!(
+                    AsyncSeekExt::seek(&mut file, SeekFrom::Current(5))
+                        .await
+                        .expect("new trait seek"),
+                    position + 5,
+                    "an explicit {operation} ends the old seek even if it fails or is abandoned"
+                );
+                assert_eq!(
+                    file.stream_position().await.expect("new cursor"),
+                    position + 5
+                );
+            });
+            assert!(runtime.shutdown_timeout(Duration::from_secs(10)));
+        }
+    }
+}
+
 fn check_poll_seek_after_abandoned_read(
     name: &str,
     seek: SeekFrom,
