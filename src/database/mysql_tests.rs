@@ -5917,8 +5917,10 @@ mod tests {
 
         #[derive(Clone, Copy, Debug)]
         enum Terminal {
+            EndOfRows,
             ServerError,
-            ReservedNullBits,
+            ShortError,
+            MalformedRow,
             TruncatedEof,
             OversizedValue,
             EmptyPacket,
@@ -5927,34 +5929,66 @@ mod tests {
 
         #[test]
         fn prepared_stream_native_errors_remain_terminal() {
+            row_stream_native_errors_remain_terminal(true);
+        }
+
+        #[test]
+        fn text_stream_native_errors_remain_terminal() {
+            row_stream_native_errors_remain_terminal(false);
+        }
+
+        fn row_stream_native_errors_remain_terminal(binary: bool) {
             for workers in [1, 2] {
                 for terminal in [
+                    Terminal::EndOfRows,
                     Terminal::ServerError,
-                    Terminal::ReservedNullBits,
+                    Terminal::ShortError,
+                    Terminal::MalformedRow,
                     Terminal::TruncatedEof,
                     Terminal::OversizedValue,
                     Terminal::EmptyPacket,
                     Terminal::UnsolicitedError,
                 ] {
+                    let clean = matches!(terminal, Terminal::EndOfRows | Terminal::ServerError);
                     let peer = PoolResetPeer::start_with_listener(move |listener, peer| {
                         authenticate(peer, false);
-                        prepare(peer, 7, false);
-                        execute(peer, 7);
+                        if binary {
+                            prepare(peer, 7, false);
+                            execute(peer, 7);
+                        } else {
+                            pool_reset_peer_command(
+                                peer,
+                                command::COM_QUERY,
+                                b"SELECT value FROM stream_values",
+                            );
+                        }
                         let kind = if matches!(terminal, Terminal::OversizedValue) {
                             column_type::MYSQL_TYPE_VAR_STRING
                         } else {
                             column_type::MYSQL_TYPE_LONGLONG
                         };
                         let sequence = header(peer, kind, false);
-                        write_response_packet(peer, sequence, vec![0, 4]);
+                        write_response_packet(
+                            peer,
+                            sequence,
+                            if binary { vec![0, 4] } else { vec![0xfb] },
+                        );
                         let packet = match terminal {
+                            Terminal::EndOfRows => eof_packet_payload(2),
                             Terminal::ServerError | Terminal::UnsolicitedError => {
                                 error_packet_payload(1317, "70100", "interrupted")
                             }
-                            Terminal::ReservedNullBits => vec![0, 3],
+                            Terminal::ShortError => vec![0xff],
+                            Terminal::MalformedRow => {
+                                if binary { vec![0, 3] } else { vec![4, b'x'] }
+                            }
                             Terminal::TruncatedEof => vec![0xfe, 0],
                             Terminal::OversizedValue => {
-                                vec![0, 0, 0xfe, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]
+                                let mut packet = if binary { vec![0, 0] } else { vec![] };
+                                packet.extend_from_slice(&[
+                                    0xfe, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                                ]);
+                                packet
                             }
                             Terminal::EmptyPacket => vec![],
                         };
@@ -5963,7 +5997,7 @@ mod tests {
                         } else {
                             sequence + 1
                         };
-                        if matches!(terminal, Terminal::ServerError) {
+                        if clean {
                             write_response_packet(peer, error_sequence, packet);
                             finish_clean(peer);
                         } else {
@@ -5979,10 +6013,15 @@ mod tests {
                         let cx = Cx::current().unwrap();
                         crate::time::timeout(cx.now(), Duration::from_secs(30), async {
                             let mut connection = MySqlConnection::connect_with_options(&cx, options).await.unwrap();
-                            let mut stream = connection.query_stream_params(&cx, SQL, &[&42_u32]).await.unwrap();
+                            let mut stream = if binary {
+                                connection.query_stream_params(&cx, SQL, &[&42_u32]).await.unwrap()
+                            } else {
+                                connection.query_stream(&cx, "SELECT value FROM stream_values").await.unwrap()
+                            };
                             assert!(stream.next(&cx).await.unwrap().unwrap().get_idx(0).unwrap().is_null());
                             let result = stream.next(&cx).await;
                             match terminal {
+                                Terminal::EndOfRows => assert!(matches!(result, Outcome::Ok(None)), "{terminal:?}: {result:?}"),
                                 Terminal::ServerError => assert!(matches!(result, Outcome::Err(MySqlError::Server { code: 1317, .. })), "{terminal:?}: {result:?}"),
                                 Terminal::UnsolicitedError => assert!(matches!(&result, Outcome::Err(MySqlError::Io(error)) if error.kind() == std::io::ErrorKind::ConnectionAborted), "{terminal:?}: {result:?}"),
                                 _ => assert!(matches!(result, Outcome::Err(MySqlError::Protocol(_) | MySqlError::InvalidPacket(_))), "{terminal:?}: {result:?}"),
@@ -5990,7 +6029,7 @@ mod tests {
                             assert_eq!(stream.row_count(), 1);
                             assert!(stream.next(&cx).await.unwrap().is_none());
                             drop(stream);
-                            if matches!(terminal, Terminal::ServerError) {
+                            if clean {
                                 assert!(!connection.inner.closed);
                                 assert!(!connection.inner.query_in_flight.load(Ordering::Acquire));
                                 assert!(matches!(connection.ping(&cx).await, Outcome::Ok(())));
@@ -6022,6 +6061,15 @@ mod tests {
 
         #[test]
         fn prepared_stream_native_startup_enforces_terminal_and_column_limits() {
+            row_stream_native_startup_enforces_terminal_and_column_limits(true);
+        }
+
+        #[test]
+        fn text_stream_native_startup_enforces_terminal_and_column_limits() {
+            row_stream_native_startup_enforces_terminal_and_column_limits(false);
+        }
+
+        fn row_stream_native_startup_enforces_terminal_and_column_limits(binary: bool) {
             for workers in [1, 2] {
                 for response in [
                     FirstResponse::Ok,
@@ -6035,8 +6083,16 @@ mod tests {
                     let clean = matches!(response, FirstResponse::Ok | FirstResponse::ServerError);
                     let peer = PoolResetPeer::start_with_listener(move |listener, peer| {
                         authenticate(peer, false);
-                        prepare(peer, 7, false);
-                        execute(peer, 7);
+                        if binary {
+                            prepare(peer, 7, false);
+                            execute(peer, 7);
+                        } else {
+                            pool_reset_peer_command(
+                                peer,
+                                command::COM_QUERY,
+                                b"SELECT value FROM stream_values",
+                            );
+                        }
                         let packet = match response {
                             FirstResponse::Ok => ok_packet_payload(3, 2),
                             FirstResponse::ServerError => {
@@ -6048,10 +6104,13 @@ mod tests {
                             FirstResponse::TooManyColumns => vec![0xfc, 1, 64], // 16,385
                             FirstResponse::Empty => vec![],
                         };
-                        write_response_packet(peer, 1, packet);
                         if clean {
+                            write_response_packet(peer, 1, packet);
                             finish_clean(peer);
                         } else {
+                            // No malformed startup response may make the
+                            // queued terminator look like a new command's reply.
+                            error_then_eof(peer, 1, &packet, 2);
                             finish_poisoned(listener, peer);
                         }
                     });
@@ -6064,7 +6123,12 @@ mod tests {
                                 MySqlConnection::connect_with_options(&cx, options)
                                     .await
                                     .unwrap();
-                            match connection.query_stream_params(&cx, SQL, &[&42_u32]).await {
+                            let result = if binary {
+                                connection.query_stream_params(&cx, SQL, &[&42_u32]).await
+                            } else {
+                                connection.query_stream(&cx, "SELECT value FROM stream_values").await
+                            };
+                            match result {
                                 Outcome::Ok(mut stream) => {
                                     assert!(matches!(response, FirstResponse::Ok), "{response:?}");
                                     assert!(stream.next(&cx).await.unwrap().is_none());
@@ -6088,6 +6152,9 @@ mod tests {
                                     panic!("unexpected cancellation: {reason:?}")
                                 }
                                 Outcome::Panicked(payload) => panic!("unexpected panic: {payload}"),
+                            }
+                            if !clean {
+                                assert_eq!(connection.inner.sequence, 2, "{response:?}");
                             }
                             assert_eq!(connection.inner.closed, !clean);
                             assert_eq!(
@@ -6117,81 +6184,146 @@ mod tests {
         #[cfg(unix)]
         #[test]
         fn prepared_stream_native_dropped_partial_read_cannot_resume() {
+            row_stream_native_dropped_partial_read_cannot_resume(true);
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn text_stream_native_dropped_partial_read_cannot_resume() {
+            row_stream_native_dropped_partial_read_cannot_resume(false);
+        }
+
+        #[cfg(unix)]
+        fn row_stream_native_dropped_partial_read_cannot_resume(binary: bool) {
             use std::os::fd::AsFd;
 
             for workers in [1, 2] {
-                let written = Arc::new(crate::sync::Notify::new());
-                let peer_written = Arc::clone(&written);
-                let peer = PoolResetPeer::start_with_listener(move |listener, peer| {
-                    authenticate(peer, false);
-                    prepare(peer, 7, false);
-                    execute(peer, 7);
-                    let sequence = header(peer, column_type::MYSQL_TYPE_LONGLONG, false);
-                    // Ten-byte row payload, but only its first three bytes
-                    // are sent. The rest are withheld throughout the test.
-                    peer.write_all(&[10, 0, 0, sequence, 0, 0, 7]).unwrap();
-                    peer_written.notify_one();
-                    finish_poisoned(listener, peer);
-                });
-                let options = peer.options(None);
-                let runtime = prepared_stream_runtime(workers);
-                runtime.block_on(runtime.handle().spawn(async move {
-                    let cx = Cx::current().unwrap();
-                    crate::time::timeout(cx.now(), Duration::from_secs(30), async {
-                        let mut connection = MySqlConnection::connect_with_options(&cx, options).await.unwrap();
-                        let observer = match &connection.inner.stream {
-                            MySqlStream::Plain(stream) => std::net::TcpStream::from(stream.as_fd().try_clone_to_owned().unwrap()),
-                            _ => panic!("fixture uses plain TCP"),
+                for prefix_len in [2, 7] {
+                    let written = Arc::new(crate::sync::Notify::new());
+                    let peer_written = Arc::clone(&written);
+                    let peer = PoolResetPeer::start_with_listener(move |listener, peer| {
+                        authenticate(peer, false);
+                        if binary {
+                            prepare(peer, 7, false);
+                            execute(peer, 7);
+                        } else {
+                            pool_reset_peer_command(
+                                peer,
+                                command::COM_QUERY,
+                                b"SELECT value FROM stream_values",
+                            );
+                        }
+                        let sequence = header(peer, column_type::MYSQL_TYPE_LONGLONG, false);
+                        // Withhold either the rest of the packet header or
+                        // the rest of its ten-byte row payload.
+                        let prefix = if binary {
+                            [10, 0, 0, sequence, 0, 0, 7]
+                        } else {
+                            [10, 0, 0, sequence, 9, b'1', b'2']
                         };
-                        let mut stream = connection.query_stream_params(&cx, SQL, &[&42_u32]).await.unwrap();
-                        written.notified().await;
-                        std::future::poll_fn(|task_cx| {
-                            let mut prefix = [0; 7];
-                            match observer.peek(&mut prefix) {
-                                Ok(7) => Poll::Ready(()),
-                                Ok(0) => panic!("row socket closed before its partial packet"),
-                                Ok(_) => {
-                                    task_cx.waker().wake_by_ref();
-                                    Poll::Pending
+                        peer.write_all(&prefix[..prefix_len]).unwrap();
+                        peer_written.notify_one();
+                        finish_poisoned(listener, peer);
+                    });
+                    let options = peer.options(None);
+                    let runtime = prepared_stream_runtime(workers);
+                    runtime.block_on(runtime.handle().spawn(async move {
+                        let cx = Cx::current().unwrap();
+                        crate::time::timeout(cx.now(), Duration::from_secs(30), async {
+                            let mut connection =
+                                MySqlConnection::connect_with_options(&cx, options)
+                                    .await
+                                    .unwrap();
+                            let observer = match &connection.inner.stream {
+                                MySqlStream::Plain(stream) => std::net::TcpStream::from(
+                                    stream.as_fd().try_clone_to_owned().unwrap(),
+                                ),
+                                _ => panic!("fixture uses plain TCP"),
+                            };
+                            let mut stream = if binary {
+                                connection
+                                    .query_stream_params(&cx, SQL, &[&42_u32])
+                                    .await
+                                    .unwrap()
+                            } else {
+                                connection
+                                    .query_stream(&cx, "SELECT value FROM stream_values")
+                                    .await
+                                    .unwrap()
+                            };
+                            written.notified().await;
+                            std::future::poll_fn(|task_cx| {
+                                let mut prefix = [0; 7];
+                                match observer.peek(&mut prefix) {
+                                    Ok(count) if count == prefix_len => Poll::Ready(()),
+                                    Ok(0) => {
+                                        panic!("row socket closed before its partial packet")
+                                    }
+                                    Ok(_) => {
+                                        task_cx.waker().wake_by_ref();
+                                        Poll::Pending
+                                    }
+                                    Err(error)
+                                        if error.kind() == std::io::ErrorKind::WouldBlock =>
+                                    {
+                                        task_cx.waker().wake_by_ref();
+                                        Poll::Pending
+                                    }
+                                    Err(error) => panic!("peek partial packet: {error}"),
                                 }
-                                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                                    task_cx.waker().wake_by_ref();
-                                    Poll::Pending
+                            })
+                            .await;
+                            let mut pending = Box::pin(stream.next(&cx));
+                            std::future::poll_fn(|task_cx| {
+                                assert!(
+                                    pending.as_mut().poll(task_cx).is_pending(),
+                                    "row is incomplete"
+                                );
+                                let mut byte = [0];
+                                match observer.peek(&mut byte) {
+                                    Err(error)
+                                        if error.kind() == std::io::ErrorKind::WouldBlock =>
+                                    {
+                                        Poll::Ready(())
+                                    }
+                                    Ok(count) if count > 0 => {
+                                        task_cx.waker().wake_by_ref();
+                                        Poll::Pending
+                                    }
+                                    other => panic!(
+                                        "live socket with withheld row remainder: {other:?}"
+                                    ),
                                 }
-                                Err(error) => panic!("peek partial packet: {error}"),
-                            }
-                        }).await;
-                        let mut pending = Box::pin(stream.next(&cx));
-                        std::future::poll_fn(|task_cx| {
-                            assert!(pending.as_mut().poll(task_cx).is_pending(), "row is incomplete");
-                            let mut byte = [0];
-                            match observer.peek(&mut byte) {
-                                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Poll::Ready(()),
-                                Ok(count) if count > 0 => {
-                                    task_cx.waker().wake_by_ref();
-                                    Poll::Pending
-                                }
-                                other => panic!("live socket with withheld row remainder: {other:?}"),
-                            }
-                        }).await;
-                        // A peek first witnessed all seven bytes in this
-                        // socket. Now next() is Pending and a second peek
-                        // proves those bytes left it: the abandoned future
-                        // owns partial framing, not just a pending empty read.
-                        drop(pending);
-                        assert!(stream.read_in_progress);
-                        assert!(matches!(stream.next(&cx).await, Outcome::Err(MySqlError::Protocol(message)) if message.contains("abandoned")));
-                        assert!(stream.next(&cx).await.unwrap().is_none());
-                        drop(stream);
-                        assert!(connection.inner.closed);
-                        assert!(connection.inner.query_in_flight.load(Ordering::Acquire));
-                        assert!(matches!(connection.ping(&cx).await, Outcome::Err(MySqlError::ConnectionClosed)));
-                        drop(observer);
-                        drop(connection);
-                    }).await.expect("bounded dropped partial-read journey");
-                }));
-                peer.finish();
-                assert_pool_reset_drained(&runtime);
+                            })
+                            .await;
+                            // Peek first witnessed the entire prefix in this
+                            // socket. Now next() is Pending and a second peek
+                            // proves those bytes left it: the abandoned future
+                            // owns partial framing, not just an empty read.
+                            drop(pending);
+                            assert!(stream.read_in_progress);
+                            assert!(matches!(
+                                stream.next(&cx).await,
+                                Outcome::Err(MySqlError::Protocol(message))
+                                    if message.contains("abandoned")
+                            ));
+                            assert!(stream.next(&cx).await.unwrap().is_none());
+                            drop(stream);
+                            assert!(connection.inner.closed);
+                            assert!(connection.inner.query_in_flight.load(Ordering::Acquire));
+                            assert!(matches!(
+                                connection.ping(&cx).await,
+                                Outcome::Err(MySqlError::ConnectionClosed)
+                            ));
+                            drop(observer);
+                            drop(connection);
+                        })
+                        .await
+                        .expect("bounded dropped partial-read journey");
+                    }));
+                    peer.finish();
+                    assert_pool_reset_drained(&runtime);
+                }
             }
         }
 
