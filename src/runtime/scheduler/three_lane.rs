@@ -1478,6 +1478,50 @@ impl std::fmt::Debug for WakeNotifier {
     }
 }
 
+/// A callback-free producer signal for deferred cancellation. The state mutex's
+/// unlock hook owns the dispatch boundary; reinstalling a scheduler changes only
+/// the weak target, so the hook never retains an obsolete coordinator.
+#[derive(Debug, Default)]
+pub(crate) struct DeferredCancelWake {
+    pending: AtomicBool,
+    coordinator: Mutex<Option<Weak<WorkerCoordinator>>>,
+}
+
+impl DeferredCancelWake {
+    pub(crate) fn request(&self) {
+        self.pending.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn install(&self, coordinator: &Arc<WorkerCoordinator>) {
+        // Replacing a Weak cannot run the coordinator's captured destructors.
+        *self.coordinator.lock() = Some(Arc::downgrade(coordinator));
+    }
+
+    pub(crate) fn is_installed(&self) -> bool {
+        self.coordinator.lock().is_some()
+    }
+
+    pub(crate) fn dispatch(&self) {
+        // Claim before callbacks: a notifier may lock and unlock RuntimeState
+        // again, which must not recursively deliver this same notification.
+        if !self.pending.load(Ordering::Acquire) || !self.pending.swap(false, Ordering::AcqRel) {
+            return;
+        }
+        let coordinator = self.coordinator.lock().clone();
+        let Some(coordinator) = coordinator.and_then(|coordinator| coordinator.upgrade()) else {
+            return;
+        };
+        // No state or signal-slot lock remains, including when the final
+        // coordinator reference (and its user captures) is retired below.
+        if coordinator.wake_one_parker_prefer_waiter() {
+            ThreeLaneScheduler::contain_publication_effect(|| coordinator.wake_io_driver());
+        }
+        // A hostile reactor must not suppress the browser/embedding wake, and
+        // a hostile embedding must not lose the native reactor notification.
+        ThreeLaneScheduler::contain_publication_effect(|| coordinator.notify_wake());
+    }
+}
+
 /// Coordination for waking workers.
 #[derive(Debug)]
 pub(crate) struct WorkerCoordinator {
@@ -1813,12 +1857,9 @@ impl WorkerCoordinator {
         }
     }
 
-    /// Publishes one concrete Parker permit without calling the reactor.
-    ///
-    /// RuntimeState uses this beneath its outer lock after enqueueing deferred
-    /// cancellation work. Keeping this boundary Parker-only prevents a
-    /// user-supplied reactor callback from running under that lock while still
-    /// closing the final-check/park lost-wakeup race.
+    /// Publishes one concrete Parker permit and notifies the host, without
+    /// waking the reactor. The dispatch-loop helper uses this after releasing
+    /// runtime locks; its host notifier can invoke arbitrary embedding code.
     #[inline]
     pub(crate) fn wake_one_parker(&self) {
         self.wake_one_parker_prefer_waiter();
@@ -2914,12 +2955,11 @@ impl ThreeLaneScheduler {
     ///
     /// The caller MUST call
     /// [`install_pending_cancel_dispatch_coordinator`](Self::install_pending_cancel_dispatch_coordinator)
-    /// (or otherwise install this scheduler's `WorkerCoordinator` into the
-    /// state that mints deferred cancellation batches) **before worker
-    /// threads start parking**. Without the coordinator, a deferred cancel
-    /// batch enqueued while every worker is parked would set the readiness
-    /// flag but wake nobody. The convenience constructors do this
-    /// automatically.
+    /// **before worker threads start parking**. This installs both the weak
+    /// coordinator target and the owning state mutex's post-unlock hook.
+    /// Without that hook, a deferred cancel batch would publish readiness
+    /// without waking a parked worker, a blocked reactor, or a host pump.
+    /// The convenience constructors perform both parts automatically.
     #[allow(clippy::too_many_lines)]
     pub fn new_with_options_task_table_and_handles(
         worker_count: usize,
@@ -3228,8 +3268,9 @@ impl ThreeLaneScheduler {
         ))
     }
 
-    /// Installs this scheduler's `WorkerCoordinator` as the parked-worker
-    /// notifier for deferred cancellation batches minted by `state`
+    /// Installs this scheduler's deferred-cancellation target and the owning
+    /// state mutex's post-unlock notification hook. Wakes reach parked workers,
+    /// the reactor, and an embedding host without running beneath RuntimeState
     /// (br-asupersync-sched-hot-path-perf-bt4y5f.2.2 / E1.2, row T02).
     ///
     /// Must run before worker threads start parking when the scheduler was
@@ -3247,10 +3288,18 @@ impl ThreeLaneScheduler {
         &self,
         state: &Arc<ContendedMutex<RuntimeState>>,
     ) {
-        let mut guard = state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        guard.set_pending_cancel_dispatch_coordinator(&self.coordinator);
+        let signal = {
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.set_pending_cancel_dispatch_coordinator(&self.coordinator);
+            guard.pending_cancel_dispatch_wake_handle()
+        };
+        let hook_signal = Arc::clone(&signal);
+        state.install_post_unlock_hook(Arc::new(move || hook_signal.dispatch()));
+        // A manual state owner may have queued cancellation before the first
+        // scheduler was installed. Deliver that pending signal as well.
+        signal.dispatch();
     }
 
     /// Sets the maximum number of ready tasks to steal in one batch.

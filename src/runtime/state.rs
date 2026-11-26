@@ -2994,14 +2994,12 @@ pub struct RuntimeState {
     /// Lock-free scheduler hint that avoids taking the state lock when the
     /// deferred cancellation queue is empty.
     pending_cancel_dispatch_ready: Arc<AtomicBool>,
-    /// Concrete scheduler wake target for deferred cancellation work.
+    /// Pending scheduler notification, shared with the state mutex's unlock hook.
     ///
-    /// This is deliberately a `WorkerCoordinator`, not an arbitrary callback:
-    /// `defer_cancel_dispatch` may run beneath an outer runtime-state lock and
-    /// may only publish a Parker permit there. Reactor wakeups and user code
-    /// remain outside this notification boundary.
-    pending_cancel_dispatch_coordinator:
-        Option<std::sync::Weak<crate::runtime::scheduler::three_lane::WorkerCoordinator>>,
+    /// Producers set only an atomic flag beneath RuntimeState. The hook upgrades
+    /// the coordinator and wakes Parkers, the reactor, and the host after unlock,
+    /// so neither callbacks nor a final coordinator destructor run under state.
+    pending_cancel_dispatch_wake: Arc<crate::runtime::scheduler::three_lane::DeferredCancelWake>,
     /// Live runtime monitors and links, fired when a watched task finishes
     /// (br-asupersync-issue65-criticisms-kpmoy5.6.1). Empty unless a task
     /// called `Cx::monitor`, `Cx::link` or `Cx::link_trapping`.
@@ -3215,7 +3213,7 @@ impl std::fmt::Debug for RuntimeState {
             )
             .field(
                 "has_pending_cancel_dispatch_coordinator",
-                &self.pending_cancel_dispatch_coordinator.is_some(),
+                &self.pending_cancel_dispatch_wake.is_installed(),
             )
             .field("has_shard_tables", &self.shard_tables.is_some())
             .field("obligation_leak_response", &self.obligation_leak_response)
@@ -3311,7 +3309,9 @@ impl RuntimeState {
             pending_cancel_dispatches: Vec::new(),
             outstanding_cancel_dispatches: Arc::new(AtomicUsize::new(0)),
             pending_cancel_dispatch_ready: Arc::new(AtomicBool::new(false)),
-            pending_cancel_dispatch_coordinator: None,
+            pending_cancel_dispatch_wake: Arc::new(
+                crate::runtime::scheduler::three_lane::DeferredCancelWake::default(),
+            ),
             task_watches: crate::monitor::TaskWatches::default(),
             down_history: VecDeque::new(),
             down_history_limit: None,
@@ -4726,16 +4726,10 @@ impl RuntimeState {
         self.pending_cancel_dispatches.push(tracked);
         self.pending_cancel_dispatch_ready
             .store(true, Ordering::Release);
-        if let Some(coordinator) = self
-            .pending_cancel_dispatch_coordinator
-            .as_ref()
-            .and_then(std::sync::Weak::upgrade)
-        {
-            // Publish a concrete Parker permit after the queue+flag release.
-            // This closes the final-check/park race without invoking an
-            // arbitrary notifier or reactor callback beneath RuntimeState.
-            coordinator.wake_one_parker();
-        }
+        // The mutex unlock hook leaves a concrete permit and wakes the reactor
+        // after releasing RuntimeState. A worker that parks between the final
+        // queue check and that notification consumes the permit on arrival.
+        self.pending_cancel_dispatch_wake.request();
     }
 
     /// Tracks a batch before its producer releases the outer state lock.
@@ -4776,7 +4770,20 @@ impl RuntimeState {
         &mut self,
         coordinator: &Arc<crate::runtime::scheduler::three_lane::WorkerCoordinator>,
     ) {
-        self.pending_cancel_dispatch_coordinator = Some(Arc::downgrade(coordinator));
+        self.pending_cancel_dispatch_wake.install(coordinator);
+        // A former scheduler may have disappeared after a previous hook
+        // claimed the signal. Installing a live target must re-notify any
+        // cancellation batches that still await publication.
+        if self.pending_cancel_dispatch_ready.load(Ordering::Acquire) {
+            self.pending_cancel_dispatch_wake.request();
+        }
+    }
+
+    /// Shared notification signal for the owning mutex's post-unlock boundary.
+    pub(crate) fn pending_cancel_dispatch_wake_handle(
+        &self,
+    ) -> Arc<crate::runtime::scheduler::three_lane::DeferredCancelWake> {
+        Arc::clone(&self.pending_cancel_dispatch_wake)
     }
 
     /// Installs the shard-table handle bundle on a `with_sharded_state`
@@ -4824,7 +4831,7 @@ impl RuntimeState {
     #[cfg(test)]
     #[inline]
     pub(crate) fn has_pending_cancel_dispatch_coordinator(&self) -> bool {
-        self.pending_cancel_dispatch_coordinator.is_some()
+        self.pending_cancel_dispatch_wake.is_installed()
     }
 
     /// Returns whether callback-free cancellation work still awaits owner-side

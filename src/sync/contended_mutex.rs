@@ -2,7 +2,8 @@
 //!
 //! When the `lock-metrics` feature is enabled, `ContendedMutex<T>` wraps
 //! `std::sync::Mutex<T>` and tracks wait time, hold time, contention count,
-//! and total acquisitions. When disabled, it's a zero-cost wrapper.
+//! and total acquisitions. Internal notification hooks are opt-in and run only
+//! after the protected data has been unlocked.
 //!
 //! # Usage
 //!
@@ -63,11 +64,53 @@ pub struct LockMetricsSnapshot {
     pub instrumentation_mode: &'static str,
 }
 
+/// One immutable, opt-in notification boundary shared by all guards of a mutex.
+/// The callback must consume its own pending signal before reentering the mutex.
+#[derive(Default)]
+struct PostUnlockHook {
+    // The callback cannot observe protected data until after the raw guard is
+    // gone, and its panics are contained. Preserve the wrapper's unwind-safety
+    // auto traits even when the captured notification target is not unwind-safe.
+    callback:
+        std::sync::OnceLock<std::panic::AssertUnwindSafe<std::sync::Arc<dyn Fn() + Send + Sync>>>,
+}
+
+impl PostUnlockHook {
+    fn install(&self, callback: std::sync::Arc<dyn Fn() + Send + Sync>) {
+        // Installation is immutable. Reinstalling the same runtime signal is
+        // harmless; an unused callback is retired here, outside the data lock.
+        let _ = self.callback.set(std::panic::AssertUnwindSafe(callback));
+    }
+
+    #[inline]
+    fn run(&self) {
+        let Some(callback) = self.callback.get() else {
+            return;
+        };
+        let callback = &callback.0;
+        if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback()))
+        {
+            // A wake notification must not poison already-unlocked state or
+            // double-panic when the guard is dropped during an existing unwind.
+            // Panic payload destruction can itself invoke user code.
+            std::mem::forget(payload);
+        }
+    }
+}
+
+impl std::fmt::Debug for PostUnlockHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PostUnlockHook")
+            .field("installed", &self.callback.get().is_some())
+            .finish()
+    }
+}
+
 // ── Feature-gated implementation ──────────────────────────────────────────
 
 #[cfg(feature = "lock-metrics")]
 mod inner {
-    use super::LockMetricsSnapshot;
+    use super::{LockMetricsSnapshot, PostUnlockHook};
     use crate::sync::atomic::{AtomicU64, Ordering};
     use crate::sync::lock_ordering::{self, LockModule, LockRank};
     use std::collections::VecDeque;
@@ -398,6 +441,7 @@ mod inner {
     #[derive(Debug)]
     pub struct ContendedMutex<T> {
         inner: Mutex<T>,
+        post_unlock: PostUnlockHook,
         metrics: Metrics,
         name: &'static str,
         rank: Option<LockRank>,
@@ -414,11 +458,22 @@ mod inner {
             let policy = lock_ordering::enforce_lock_name_policy(name);
             Self {
                 inner: Mutex::new(value),
+                post_unlock: PostUnlockHook::default(),
                 metrics: Metrics::default(),
                 name,
                 rank: policy.rank(),
                 module: policy.module(),
             }
+        }
+
+        /// Installs an internal notification once. Call only without a data
+        /// guard: rejected captures are dropped immediately. The callback runs
+        /// after unlocking and must consume a pending signal before reentry.
+        pub(crate) fn install_post_unlock_hook(
+            &self,
+            callback: std::sync::Arc<dyn Fn() + Send + Sync>,
+        ) {
+            self.post_unlock.install(callback);
         }
 
         /// Acquires the mutex, tracking contention metrics.
@@ -451,6 +506,7 @@ mod inner {
             match result {
                 Ok(guard) => Ok(ContendedMutexGuard {
                     guard: Some(guard),
+                    post_unlock: &self.post_unlock,
                     acquired_at,
                     metrics: &self.metrics,
                     name: self.name,
@@ -459,6 +515,7 @@ mod inner {
                 }),
                 Err(poison) => Err(PoisonError::new(ContendedMutexGuard {
                     guard: Some(poison.into_inner()),
+                    post_unlock: &self.post_unlock,
                     acquired_at,
                     metrics: &self.metrics,
                     name: self.name,
@@ -499,6 +556,7 @@ mod inner {
                     self.metrics.record_acquire(0, false);
                     Ok(ContendedMutexGuard {
                         guard: Some(guard),
+                        post_unlock: &self.post_unlock,
                         acquired_at,
                         metrics: &self.metrics,
                         name: self.name,
@@ -519,6 +577,7 @@ mod inner {
                     Err(std::sync::TryLockError::Poisoned(PoisonError::new(
                         ContendedMutexGuard {
                             guard: Some(poison.into_inner()),
+                            post_unlock: &self.post_unlock,
                             acquired_at,
                             metrics: &self.metrics,
                             name: self.name,
@@ -549,6 +608,7 @@ mod inner {
     /// Guard that tracks hold time on drop.
     pub struct ContendedMutexGuard<'a, T> {
         guard: Option<MutexGuard<'a, T>>,
+        post_unlock: &'a PostUnlockHook,
         acquired_at: Instant,
         metrics: &'a Metrics,
         name: &'static str,
@@ -582,6 +642,7 @@ mod inner {
             }
 
             self.metrics.record_hold(hold_ns);
+            self.post_unlock.run();
         }
     }
 
@@ -598,14 +659,15 @@ mod inner {
 
 #[cfg(not(feature = "lock-metrics"))]
 mod inner {
-    use super::LockMetricsSnapshot;
+    use super::{LockMetricsSnapshot, PostUnlockHook};
     use crate::sync::lock_ordering::{self, LockRank};
     use std::sync::{LockResult, Mutex, MutexGuard, PoisonError};
 
-    /// Zero-cost mutex wrapper (metrics disabled).
+    /// Mutex wrapper with optional internal unlock notification (metrics disabled).
     #[derive(Debug)]
     pub struct ContendedMutex<T> {
         inner: Mutex<T>,
+        post_unlock: PostUnlockHook,
         name: &'static str,
         rank: Option<LockRank>,
     }
@@ -620,9 +682,20 @@ mod inner {
             let rank = lock_ordering::rank_for_lock_name(name);
             Self {
                 inner: Mutex::new(value),
+                post_unlock: PostUnlockHook::default(),
                 name,
                 rank,
             }
+        }
+
+        /// Installs an internal notification once. Call only without a data
+        /// guard: rejected captures are dropped immediately. The callback runs
+        /// after unlocking and must consume a pending signal before reentry.
+        pub(crate) fn install_post_unlock_hook(
+            &self,
+            callback: std::sync::Arc<dyn Fn() + Send + Sync>,
+        ) {
+            self.post_unlock.install(callback);
         }
 
         /// Acquires the mutex (no instrumentation).
@@ -640,7 +713,8 @@ mod inner {
                         lock_ordering::record_acquire(self.name, rank);
                     }
                     Ok(ContendedMutexGuard {
-                        guard,
+                        guard: Some(guard),
+                        post_unlock: &self.post_unlock,
                         name: self.name,
                         rank: self.rank,
                     })
@@ -651,7 +725,8 @@ mod inner {
                         lock_ordering::record_acquire(self.name, rank);
                     }
                     Err(PoisonError::new(ContendedMutexGuard {
-                        guard: poison.into_inner(),
+                        guard: Some(poison.into_inner()),
+                        post_unlock: &self.post_unlock,
                         name: self.name,
                         rank: self.rank,
                     }))
@@ -685,7 +760,8 @@ mod inner {
                         lock_ordering::record_acquire(name, rank);
                     }
                     Ok(ContendedMutexGuard {
-                        guard,
+                        guard: Some(guard),
+                        post_unlock: &self.post_unlock,
                         name: self.name,
                         rank: self.rank,
                     })
@@ -700,7 +776,8 @@ mod inner {
                     }
                     Err(std::sync::TryLockError::Poisoned(PoisonError::new(
                         ContendedMutexGuard {
-                            guard: poison.into_inner(),
+                            guard: Some(poison.into_inner()),
+                            post_unlock: &self.post_unlock,
                             name: self.name,
                             rank: self.rank,
                         },
@@ -727,9 +804,10 @@ mod inner {
         }
     }
 
-    /// Zero-cost guard wrapper (metrics disabled).
+    /// Guard wrapper that releases data before any internal unlock notification.
     pub struct ContendedMutexGuard<'a, T> {
-        guard: MutexGuard<'a, T>,
+        guard: Option<MutexGuard<'a, T>>,
+        post_unlock: &'a PostUnlockHook,
         name: &'static str,
         rank: Option<LockRank>,
     }
@@ -738,30 +816,32 @@ mod inner {
         type Target = T;
         #[inline]
         fn deref(&self) -> &T {
-            &self.guard
+            self.guard.as_ref().expect("guard used after drop")
         }
     }
 
     impl<T> std::ops::DerefMut for ContendedMutexGuard<'_, T> {
         #[inline]
         fn deref_mut(&mut self) -> &mut T {
-            &mut self.guard
+            self.guard.as_mut().expect("guard used after drop")
         }
     }
 
     impl<T> Drop for ContendedMutexGuard<'_, T> {
         fn drop(&mut self) {
-            // Record lock release for ordering tracking
+            drop(self.guard.take());
+            // Record lock release before a notification can reenter.
             if let Some(rank) = self.rank {
                 lock_ordering::record_release(self.name, rank);
             }
+            self.post_unlock.run();
         }
     }
 
     impl<T: std::fmt::Debug> std::fmt::Debug for ContendedMutexGuard<'_, T> {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             f.debug_struct("ContendedMutexGuard")
-                .field("data", &*self.guard)
+                .field("data", &self.guard)
                 .finish()
         }
     }

@@ -245,53 +245,64 @@ fn pending_checkpoint_ack_republishes_cancel_lane_before_wakers() {
 }
 
 #[test]
-fn deferred_cancel_enqueue_publishes_queue_flag_then_parker_permit() {
-    // RegionRunner::Drop and other outer-lock owners cannot publish the
-    // scheduler routes themselves. Pin the owner handoff order: queue the
-    // opaque batch, publish the Release flag, then leave a concrete Parker
-    // permit. The notifier must be the coordinator's Parker-only path so an
-    // arbitrary reactor callback cannot run beneath RuntimeState.
+fn deferred_cancel_enqueue_publishes_queue_flag_then_unlock_notification() {
+    // RegionRunner::Drop may hold RuntimeState. Its handoff must remain pure
+    // publication: queue, Release-ready, then request a post-unlock wake. Even
+    // upgrading a coordinator here could retire user captures under state.
     let state = read("src/runtime/state.rs");
     let marker = "pub(crate) fn defer_cancel_dispatch(";
     let start = state.find(marker).expect("deferred cancel enqueue");
     let end = state[start..]
-        .find("\n    /// Installs the concrete parked-worker notifier")
+        .find("\n    /// Tracks a batch before")
         .expect("deferred cancel enqueue end");
     let body = &state[start..start + end];
 
     let enqueue = body
-        .find("self.pending_cancel_dispatches.push(effects);")
-        .expect("queue publication");
+        .find("self.pending_cancel_dispatches.push(tracked);")
+        .expect("tracked queue publication");
     let ready = body
         .find(".store(true, Ordering::Release);")
         .expect("ready-flag publication");
-    let permit = body
-        .find("coordinator.wake_one_parker();")
-        .expect("Parker permit publication");
+    let requested = body
+        .find("self.pending_cancel_dispatch_wake.request();")
+        .expect("post-unlock notification request");
     assert!(
-        enqueue < ready && ready < permit && body.contains(".and_then(std::sync::Weak::upgrade)"),
-        "REGRESSION: deferred cancellation no longer queues its opaque batch, publishes the \
-         Release-ready flag, and then leaves a concrete Parker permit in that order.",
+        enqueue < ready
+            && ready < requested
+            && !body.contains("Weak::upgrade")
+            && !body.contains("wake_one_parker")
+            && !body.contains("notify_wake"),
+        "REGRESSION: deferred cancellation must publish its queue and readiness before \
+         requesting notification, without invoking or retaining arbitrary callbacks under state.",
     );
 
     let scheduler = read("src/runtime/scheduler/three_lane.rs");
-    // br-asupersync-ppdgkg moved the actual unpark into the shared
-    // waiter-preferring round-robin helper; wake_one_parker must stay a
-    // Parker-only delegate to it (no reactor callback on this path).
-    let wake_marker = "pub(crate) fn wake_one_parker(&self) {";
-    let wake_start = scheduler
-        .find(wake_marker)
-        .expect("Parker-only coordinator wake");
-    let wake_end = scheduler[wake_start..]
+    let signal = scheduler
+        .find("impl DeferredCancelWake {")
+        .expect("shared deferred notification signal");
+    let dispatch_start = signal
+        + scheduler[signal..]
+            .find("pub(crate) fn dispatch(&self)")
+            .expect("post-unlock signal dispatch");
+    let dispatch_end = scheduler[dispatch_start..]
         .find("\n    }\n")
-        .expect("Parker-only coordinator wake end");
-    let wake_body = &scheduler[wake_start..wake_start + wake_end];
+        .expect("signal dispatch end");
+    let dispatch = &scheduler[dispatch_start..dispatch_start + dispatch_end];
+    let claim = dispatch
+        .find("self.pending.swap(false, Ordering::AcqRel)")
+        .expect("claim signal before reentry");
+    let target = dispatch
+        .find("coordinator.upgrade()")
+        .expect("upgrade only at post-unlock boundary");
     assert!(
-        wake_body.contains("self.wake_one_parker_prefer_waiter();")
-            && !wake_body.contains("io.wake()"),
-        "REGRESSION: deferred cancellation's outer-lock notifier is no longer Parker-only; \
-         reactor callbacks must remain outside RuntimeState.",
+        claim < target
+            && dispatch.contains("wake_one_parker_prefer_waiter()")
+            && dispatch.contains("contain_publication_effect(|| coordinator.wake_io_driver())")
+            && dispatch.contains("contain_publication_effect(|| coordinator.notify_wake())"),
+        "REGRESSION: post-unlock notification must claim its signal before callbacks and \
+         contain reactor and host wakes independently.",
     );
+
     let helper_marker = "fn wake_one_parker_prefer_waiter(&self) -> bool {";
     let helper_start = scheduler
         .find(helper_marker)
@@ -304,9 +315,7 @@ fn deferred_cancel_enqueue_publishes_queue_flag_then_parker_permit() {
         helper_body.contains("unpark_if_waiting()")
             && helper_body.contains(".unpark();")
             && !helper_body.contains("io.wake()"),
-        "REGRESSION: the coordinator's waiter-preferring wake helper no longer \
-         publishes concrete Parker permits (or now calls the reactor). \
-         Reactor callbacks must remain outside RuntimeState.",
+        "REGRESSION: the concrete Parker helper must remain callback-free.",
     );
 
     // E1.2 subsystem 3a (br-asupersync-sched-hot-path-perf-bt4y5f.2.2,
@@ -329,7 +338,10 @@ fn deferred_cancel_enqueue_publishes_queue_flag_then_parker_permit() {
     let install_call = scheduler[install_fn..]
         .find("guard.set_pending_cancel_dispatch_coordinator(&self.coordinator);")
         .expect("install step sets the concrete coordinator");
-    let _ = install_call;
+    let install_hook = scheduler[install_fn..]
+        .find("state.install_post_unlock_hook(")
+        .expect("installer attaches the owning mutex's unlock hook");
+    assert!(install_call < install_hook);
     let convenience = scheduler
         .find("let scheduler = Self::new_with_options_task_table_and_handles(")
         .expect("convenience constructor delegates to the zero-acquisition core");

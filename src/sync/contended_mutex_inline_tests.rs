@@ -573,3 +573,103 @@ fn hold_time_recorded_on_panic_in_critical_section() {
     );
     crate::test_complete!("hold_time_recorded_on_panic_in_critical_section");
 }
+
+// A runtime notification may reenter the same mutex. Both instrumentation
+// modes must release the raw guard and lock-order tracking first.
+#[test]
+fn post_unlock_hook_reenters_all_guard_paths_without_repeating_the_signal() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    fn assert_unwind_traits<T: std::panic::RefUnwindSafe + std::panic::UnwindSafe>() {}
+    assert_unwind_traits::<ContendedMutex<usize>>();
+    let mutex = Arc::new(ContendedMutex::new("runtime_state", 0_usize));
+    let pending = Arc::new(AtomicBool::new(false));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::downgrade(&mutex);
+    let hook_pending = Arc::clone(&pending);
+    let hook_calls = Arc::clone(&calls);
+    mutex.install_post_unlock_hook(Arc::new(move || {
+        if !hook_pending.swap(false, Ordering::AcqRel) {
+            return;
+        }
+        let mutex = observed.upgrade().expect("mutex remains live");
+        let guard = match mutex.try_lock() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                panic!("unlock notification retained the data lock");
+            }
+        };
+        drop(guard);
+        hook_calls.fetch_add(1, Ordering::AcqRel);
+    }));
+
+    let guard = mutex.lock().expect("lock");
+    pending.store(true, Ordering::Release);
+    drop(guard);
+    assert_eq!(calls.load(Ordering::Acquire), 1);
+
+    let guard = mutex.try_lock().expect("try_lock");
+    pending.store(true, Ordering::Release);
+    drop(guard);
+    assert_eq!(calls.load(Ordering::Acquire), 2);
+
+    // Also compiles without AssertUnwindSafe: adding the hook must preserve
+    // ContendedMutex's existing unwind-safety auto traits.
+    let panic = std::panic::catch_unwind(|| {
+        let _guard = mutex.lock().expect("unpoisoned before unwind");
+        pending.store(true, Ordering::Release);
+        panic!("original unwind");
+    });
+    assert!(panic.is_err());
+    assert_eq!(calls.load(Ordering::Acquire), 3);
+
+    let guard = mutex
+        .lock()
+        .expect_err("original unwind poisons data")
+        .into_inner();
+    pending.store(true, Ordering::Release);
+    drop(guard);
+    assert_eq!(calls.load(Ordering::Acquire), 4);
+
+    let guard = match mutex.try_lock() {
+        Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+        _ => panic!("try_lock must expose the poisoned guard"),
+    };
+    pending.store(true, Ordering::Release);
+    drop(guard);
+    assert_eq!(calls.load(Ordering::Acquire), 5);
+}
+
+#[test]
+fn post_unlock_hook_panics_do_not_poison_data_or_replace_an_existing_unwind() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    let mutex = Arc::new(ContendedMutex::new("runtime_state", 0_usize));
+    let pending = Arc::new(AtomicBool::new(false));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let hook_pending = Arc::clone(&pending);
+    let hook_calls = Arc::clone(&calls);
+    mutex.install_post_unlock_hook(Arc::new(move || {
+        if hook_pending.swap(false, Ordering::AcqRel) {
+            hook_calls.fetch_add(1, Ordering::AcqRel);
+            panic!("notification panic");
+        }
+    }));
+    {
+        let mut guard = mutex.lock().expect("lock");
+        *guard = 7;
+        pending.store(true, Ordering::Release);
+    }
+    assert_eq!(calls.load(Ordering::Acquire), 1);
+    assert_eq!(*mutex.lock().expect("hook did not poison data"), 7);
+
+    let panic = std::panic::catch_unwind(|| {
+        let _guard = mutex.lock().expect("data still healthy");
+        pending.store(true, Ordering::Release);
+        panic!("original unwind");
+    })
+    .expect_err("the original panic remains observable");
+    assert_eq!(panic.downcast_ref::<&str>(), Some(&"original unwind"));
+    assert_eq!(calls.load(Ordering::Acquire), 2);
+}

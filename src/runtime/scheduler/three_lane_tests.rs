@@ -3237,10 +3237,14 @@ fn deferred_cancel_enqueue_publishes_parker_permit() {
         ));
         assert!(runtime.has_deferred_cancel_dispatches());
         assert!(
-            parker.notification_pending_for_test(),
-            "queue publication must leave a Parker permit before releasing RuntimeState"
+            !parker.notification_pending_for_test(),
+            "notification waits until RuntimeState is released"
         );
     }
+    assert!(
+        parker.notification_pending_for_test(),
+        "unlock must leave a permit for a worker racing into park"
+    );
 
     let batches = state
         .lock()
@@ -14054,4 +14058,199 @@ fn an_early_none_from_next_task_spills_the_lifo_slot() {
         .pop_ready()
         .expect("the woken task went to the global ready lane");
     assert_eq!((spilled.task, spilled.priority), (woken, 7));
+}
+
+// br-asupersync-runtime-cancel-waker-outer-lock-118ayd / kopidb: the
+// producer owns RuntimeState, but the host notifier is arbitrary embedding
+// code and may need that same state before it can schedule a browser turn.
+#[test]
+fn deferred_cancel_host_notification_reenters_state_once_after_unlock() {
+    let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+    let scheduler = ThreeLaneScheduler::new(1, &state);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::downgrade(&state);
+    let notified = Arc::clone(&calls);
+    scheduler.coordinator.set_wake_notifier(Arc::new(move || {
+        let state = observed.upgrade().expect("state remains live");
+        let guard = state.try_lock().expect("notifier runs outside state");
+        assert!(guard.has_deferred_cancel_dispatches());
+        drop(guard); // Reentrant unlock must not redeliver the same signal.
+        notified.fetch_add(1, Ordering::AcqRel);
+    }));
+    {
+        let mut guard = state.lock().expect("state");
+        for _ in 0..2 {
+            guard.defer_cancel_dispatch(crate::types::task_context::CancellationEffects::ready(
+                Vec::new(),
+            ));
+        }
+        assert_eq!(calls.load(Ordering::Acquire), 0);
+    }
+    assert_eq!(calls.load(Ordering::Acquire), 1);
+    assert!(scheduler.parkers[0].notification_pending_for_test());
+    scheduler.workers[0].drain_deferred_cancel_dispatches();
+    assert_eq!(calls.load(Ordering::Acquire), 1);
+    assert!(
+        !state
+            .lock()
+            .expect("state")
+            .has_outstanding_cancel_dispatches()
+    );
+}
+
+#[test]
+fn deferred_cancel_install_wakes_batches_queued_before_or_between_schedulers() {
+    for retired_scheduler in [false, true] {
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        if retired_scheduler {
+            let previous = ThreeLaneScheduler::new(1, &state);
+            let coordinator = Arc::downgrade(&previous.coordinator);
+            drop(previous);
+            assert!(
+                coordinator.upgrade().is_none(),
+                "the unlock hook must not keep its old scheduler alive"
+            );
+        }
+        state.lock().expect("state").defer_cancel_dispatch(
+            crate::types::task_context::CancellationEffects::ready(Vec::new()),
+        );
+
+        // The explicit seam supports installing a host callback before making
+        // the new coordinator responsible for an existing manual RuntimeState.
+        let handles = SchedulerConstructionHandles::extract_from_unified(&state);
+        let scheduler = ThreeLaneScheduler::new_with_options_task_table_and_handles(
+            1, &state, None, handles, 16, false, 32,
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let notified = Arc::clone(&calls);
+        scheduler.coordinator.set_wake_notifier(Arc::new(move || {
+            notified.fetch_add(1, Ordering::AcqRel);
+        }));
+        assert_eq!(calls.load(Ordering::Acquire), 0);
+        scheduler.install_pending_cancel_dispatch_coordinator(&state);
+        assert_eq!(
+            calls.load(Ordering::Acquire),
+            1,
+            "install must notify an existing queue, including after its old target disappeared"
+        );
+        assert!(scheduler.parkers[0].notification_pending_for_test());
+        scheduler.workers[0].drain_deferred_cancel_dispatches();
+        scheduler.install_pending_cancel_dispatch_coordinator(&state);
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+        assert!(
+            !state
+                .lock()
+                .expect("state")
+                .has_outstanding_cancel_dispatches()
+        );
+    }
+}
+
+#[test]
+fn deferred_cancel_reactor_panic_cannot_suppress_the_host_notification() {
+    use crate::runtime::reactor::{Events, Interest, Reactor, Source, Token};
+
+    struct PanicWakeReactor;
+    impl Reactor for PanicWakeReactor {
+        fn register(&self, _: &dyn Source, _: Token, _: Interest) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn modify(&self, _: Token, _: Interest) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn deregister(&self, _: Token) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn poll(&self, _: &mut Events, _: Option<Duration>) -> std::io::Result<usize> {
+            Ok(0)
+        }
+        fn wake(&self) -> std::io::Result<()> {
+            panic!("reactor wake panic");
+        }
+        fn registration_count(&self) -> usize {
+            0
+        }
+    }
+
+    let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+    state
+        .lock()
+        .expect("state")
+        .set_io_driver(IoDriverHandle::new(Arc::new(PanicWakeReactor)));
+    let scheduler = ThreeLaneScheduler::new(1, &state);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let notified = Arc::clone(&calls);
+    scheduler.coordinator.set_wake_notifier(Arc::new(move || {
+        notified.fetch_add(1, Ordering::AcqRel);
+    }));
+    state.lock().expect("state").defer_cancel_dispatch(
+        crate::types::task_context::CancellationEffects::ready(Vec::new()),
+    );
+    assert_eq!(calls.load(Ordering::Acquire), 1);
+    assert!(scheduler.parkers[0].notification_pending_for_test());
+    scheduler.workers[0].drain_deferred_cancel_dispatches();
+    assert!(
+        !state
+            .lock()
+            .expect("state was not poisoned")
+            .has_outstanding_cancel_dispatches()
+    );
+}
+
+// A Parker permit alone cannot reach the only native worker when it is
+// waiting inside the reactor. Exercise the real backend's blocking poll.
+#[cfg(all(unix, not(target_arch = "wasm32")))]
+#[test]
+fn deferred_cancel_unlock_interrupts_native_reactor_even_if_host_notification_panics() {
+    use crate::runtime::reactor::{Events, create_reactor};
+
+    let reactor = create_reactor().expect("native reactor");
+    let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+    state
+        .lock()
+        .expect("state")
+        .set_io_driver(IoDriverHandle::new(Arc::clone(&reactor)));
+    let scheduler = ThreeLaneScheduler::new(1, &state);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let notified = Arc::clone(&calls);
+    scheduler.coordinator.set_wake_notifier(Arc::new(move || {
+        notified.fetch_add(1, Ordering::AcqRel);
+        panic!("host notification panic");
+    }));
+
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (returned_tx, returned_rx) = std::sync::mpsc::channel();
+    let polling = Arc::clone(&reactor);
+    let participant = thread::spawn(move || {
+        let mut events = Events::with_capacity(8);
+        entered_tx.send(()).expect("poll observer");
+        let result = polling.poll(&mut events, Some(Duration::from_secs(5)));
+        let _ = returned_tx.send(result);
+    });
+    entered_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("reactor participant started");
+    {
+        let mut guard = state.lock().expect("state");
+        guard.defer_cancel_dispatch(crate::types::task_context::CancellationEffects::ready(
+            Vec::new(),
+        ));
+        assert_eq!(calls.load(Ordering::Acquire), 0);
+    }
+    let returned = returned_rx.recv_timeout(Duration::from_secs(2));
+    if returned.is_err() {
+        let _ = reactor.wake();
+    }
+    participant.join().expect("reactor participant");
+    returned
+        .expect("cancellation must interrupt the reactor before its five-second timeout")
+        .expect("reactor poll");
+    assert_eq!(calls.load(Ordering::Acquire), 1);
+    scheduler.workers[0].drain_deferred_cancel_dispatches();
+    assert!(
+        !state
+            .lock()
+            .expect("state was not poisoned")
+            .has_outstanding_cancel_dispatches()
+    );
 }
