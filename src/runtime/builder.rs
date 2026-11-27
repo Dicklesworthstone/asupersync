@@ -4916,7 +4916,9 @@ impl Runtime {
         // and unwind. The shutdown reaper waits for these owners before
         // retiring shared task storage after the background worker exits.
         let future = match self.inner.current_thread_driver.get().cloned() {
-            Some(driver) => match driver.drive(&self.inner.scheduler, &request_cx, future) {
+            Some(driver) => match driver.drive(&self.inner.scheduler, &request_cx, future, || {
+                self.inner.retire_tasks_from_stopped_loan();
+            }) {
                 Ok(output) => return output,
                 Err(future) => future,
             },
@@ -5126,9 +5128,9 @@ impl Runtime {
     /// the workers have exited, it drops task futures as ordinary drop would,
     /// so a task holding a strong `RuntimeHandle` releases it. On a multi-thread
     /// runtime a `block_on` caller waiting for a task sees that join end. On a
-    /// current-thread or caller-driven runtime, the reaper first waits for any
-    /// active `block_on` or root drain to return its worker loan. A root still
-    /// waiting for a stopped child can therefore outlive the shutdown bound.
+    /// current-thread or caller-driven runtime, a `block_on` root between polls
+    /// retires its stopped children on the thread holding the worker loan. A
+    /// root stuck inside a poll can still outlive the shutdown bound.
     ///
     /// [#60]: https://github.com/Dicklesworthstone/asupersync/issues/60
     #[must_use = "the return value reports whether teardown completed within the bound"]
@@ -5165,7 +5167,7 @@ impl Runtime {
         }
         if spawn_publishers
             .as_ref()
-            .is_none_or(|publishers| publishers.strong_count() == 0)
+            .is_some_and(|publishers| publishers.strong_count() == 0)
         {
             // With no admitted scheduler publication in flight, stop scheduler
             // admission now too. Otherwise the reaper defers that signal until
@@ -6916,6 +6918,11 @@ impl RuntimeInner {
     }
 
     fn begin_shutdown(&self) {
+        // Only the owner of the admission token gets here, after every
+        // previously admitted publisher has released its guard.
+        if let Some(driver) = self.current_thread_driver.get() {
+            driver.request_stopped_task_retirement();
+        }
         if let Some(driver) = &self.io_service {
             // This path runs on the bounded caller: publish revocation only.
             // Waker callbacks and driver locking belong to the reaper below.
@@ -7008,15 +7015,22 @@ impl RuntimeInner {
             // decrements before observing the state their workers left behind.
             std::sync::atomic::fence(Ordering::Acquire);
         }
-        let gateway_mailbox = {
-            let state = self
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            state
-                .spawn_gateway()
-                .map(|gateway| Arc::clone(gateway.mailbox()))
-        };
+        self.retire_shared_stopped_tasks();
+    }
+
+    fn retire_tasks_from_stopped_loan(&self) {
+        crate::runtime::spawn_mailbox::cancel_local_spawns_for_mailbox(&self.local_lane_mailbox);
+        crate::runtime::local::retire_local_store(self.scheduler.local_store_key());
+        self.retire_shared_stopped_tasks();
+    }
+
+    fn retire_shared_stopped_tasks(&self) {
+        let gateway_mailbox = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .spawn_gateway()
+            .map(|gateway| Arc::clone(gateway.mailbox()));
         retire_stopped_tasks(
             &self.state,
             self.sharded_state.as_ref(),

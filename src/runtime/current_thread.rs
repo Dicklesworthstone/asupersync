@@ -176,6 +176,9 @@ pub struct CurrentThreadDriver {
     /// Raised while a `block_on` caller waits for the worker; the background
     /// thread's dispatch loop stops at its next boundary when it sees it.
     handover_requested: AtomicBool,
+    /// Set by the runtime after spawn publication finishes. A scheduler stop
+    /// alone does not authorize a borrower to take the task tables.
+    retirement_requested: AtomicBool,
     /// Identity of the background worker thread, for the nested-`block_on`
     /// fallback (that thread can never wait for itself to yield the worker).
     background_thread: Mutex<Option<ThreadId>>,
@@ -198,6 +201,7 @@ impl CurrentThreadDriver {
             slot: Mutex::new(WorkerSlot::Background),
             changed: Condvar::new(),
             handover_requested: AtomicBool::new(false),
+            retirement_requested: AtomicBool::new(false),
             background_thread: Mutex::new(None),
             reentrant: Mutex::new(None),
             gateway,
@@ -248,6 +252,10 @@ impl CurrentThreadDriver {
         self.gateway
             .as_deref()
             .is_some_and(spawn_mailbox::local_spawn_lane_is_owned_by)
+    }
+
+    pub(super) fn request_stopped_task_retirement(&self) {
+        self.retirement_requested.store(true, Ordering::Release);
     }
 
     /// Marks the driver closed and wakes every waiter. Called from the
@@ -527,12 +535,13 @@ impl CurrentThreadDriver {
         scheduler: &ThreeLaneScheduler,
         request_cx: &Cx,
         future: F,
+        retire_stopped: impl FnOnce(),
     ) -> Result<F::Output, F> {
         let Some(mut loan) = self.borrow_for_drive(scheduler) else {
             return Err(future);
         };
         let outcome = loan.with_thread_context(|driver, worker| {
-            drive_root_on(driver, worker, request_cx, future)
+            drive_root_on(driver, worker, request_cx, future, retire_stopped)
         });
         drop(loan);
         match outcome {
@@ -701,6 +710,7 @@ fn drive_root_on<F: Future>(
     slot: &mut Option<Box<ThreeLaneWorker>>,
     request_cx: &Cx,
     future: F,
+    retire_stopped: impl FnOnce(),
 ) -> std::thread::Result<F::Output> {
     let root_waker = {
         let worker = slot
@@ -746,6 +756,8 @@ fn drive_root_on<F: Future>(
                 &root_cx,
                 &mut ctx,
                 future.as_mut().as_pin_mut().expect("root is still live"),
+                &driver.retirement_requested,
+                retire_stopped,
             );
         }
         if root_waker.take_woken() {
@@ -828,8 +840,19 @@ fn drive_root_after_shutdown<F: Future>(
     root_cx: &Cx,
     ctx: &mut Context<'_>,
     mut future: Pin<&mut F>,
+    retirement_requested: &AtomicBool,
+    retire_stopped: impl FnOnce(),
 ) -> std::thread::Result<F::Output> {
+    let mut retire_stopped = Some(retire_stopped);
     loop {
+        // The single worker is between polls and exclusively on loan here.
+        // A scheduler-only stop may precede the runtime's publication fence.
+        // Resolve stopped child joins as soon as retirement becomes legal.
+        if retirement_requested.load(Ordering::Acquire)
+            && let Some(retire) = retire_stopped.take()
+        {
+            retire();
+        }
         if let Some(timer) = worker.timer_driver.as_ref() {
             let _ = timer.process_timers();
         }

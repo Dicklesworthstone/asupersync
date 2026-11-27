@@ -366,6 +366,9 @@ fn shutdown_waits_for_inflight_spawn_publication_before_stopping_scheduler() {
         .expect("runtime accepts spawn publication");
 
     assert!(!runtime.shutdown_timeout(Duration::ZERO));
+    // A follower has no publication token. It must leave scheduler shutdown
+    // to the token owner, which still sees the outstanding publisher.
+    assert!(!retained.clone().shutdown_timeout(Duration::ZERO));
     assert!(
         !retained.inner.scheduler.is_shutdown(),
         "the scheduler must remain live until the admitted publication finishes"
@@ -6881,6 +6884,70 @@ fn shutdown_timeout_waits_for_current_thread_worker_loan_before_retiring_tasks()
     assert!(dropped.load(Ordering::Acquire));
     assert!(join.is_finished());
     assert!(runtime_inner.upgrade().is_none());
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn shutdown_timeout_releases_current_thread_root_joining_parked_children() {
+    for caller_driven in [false, true] {
+        for sharded in [false, true] {
+            let builder = RuntimeBuilder::current_thread().with_sharded_state(sharded);
+            let runtime = if caller_driven {
+                builder.caller_driven_topology()
+            } else {
+                builder
+            }
+            .build()
+            .unwrap();
+            let caller_runtime = runtime.clone();
+            let (parked, parked_rx) = std::sync::mpsc::channel();
+            let (resume, mut resumed) = crate::channel::oneshot::channel();
+            let (joining, joining_rx) = std::sync::mpsc::channel();
+            let caller = std::thread::spawn(move || {
+                caller_runtime.block_on(async {
+                    let cx = Cx::current().unwrap();
+                    let local_parked = parked.clone();
+                    let mut local = cx
+                        .spawn_local(move |_| async move {
+                            let _affine = std::rc::Rc::new(());
+                            local_parked.send(()).unwrap();
+                            std::future::pending::<()>().await;
+                        })
+                        .unwrap();
+                    let mut child = cx
+                        .spawn(move |_| async move {
+                            parked.send(()).unwrap();
+                            std::future::pending::<()>().await;
+                        })
+                        .unwrap();
+                    resumed.recv_uninterruptible().await.unwrap();
+                    joining.send(()).unwrap();
+                    let sent = child.join(&cx).await;
+                    let affine = local.join(&cx).await;
+                    (sent, affine)
+                })
+            });
+            parked_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            parked_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            if sharded {
+                // Enter the scheduler-only stopped loop before full shutdown
+                // authorizes task retirement, then wake the root in that loop.
+                runtime.inner.scheduler.shutdown();
+            }
+            resume.send_blocking(()).unwrap();
+            joining_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            assert!(
+                runtime.shutdown_timeout(Duration::from_secs(10)),
+                "root waiting on stopped children retained the worker loan"
+            );
+            let (sent, affine) = caller.join().unwrap();
+            assert!(matches!(sent, Err(crate::runtime::JoinError::Cancelled(_))));
+            assert!(matches!(
+                affine,
+                Err(crate::runtime::JoinError::Cancelled(_))
+            ));
+        }
+    }
 }
 
 /// br-asupersync-1pi7ne H1, trigger (a): a `block_on` caller on a cloned
