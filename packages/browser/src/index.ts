@@ -9413,13 +9413,20 @@ export class BrowserArtifactStore {
     },
   ): BrowserArtifactPersistResult {
     const { requestedId, kind, format, requestedFilename, contentType, tags, bytes } = prepared;
-    if (index.nextSequence === Number.MAX_SAFE_INTEGER) {
-      throw this.operationError("persist", "corrupt_index", "browser artifact sequence space is exhausted", requestedId);
-    }
-    const sequence = index.nextSequence + 1;
-    const id =
-      requestedId ??
-      normalizeBrowserArtifactId(`${kind}-${sequence.toString().padStart(6, "0")}`);
+    // Import preserves IDs while assigning new local sequences. Explicit IDs
+    // can also occupy a future generated name. Only a caller-supplied ID may
+    // replace an existing artifact.
+    const occupiedIds = requestedId === undefined
+      ? new Set(index.entries.map((entry) => entry.id)) : undefined;
+    let sequence = index.nextSequence;
+    let id: string;
+    do {
+      if (sequence === Number.MAX_SAFE_INTEGER) {
+        throw this.operationError("persist", "corrupt_index", "browser artifact sequence space is exhausted", requestedId);
+      }
+      sequence += 1;
+      id = requestedId ?? `${kind}-${sequence.toString().padStart(6, "0")}`;
+    } while (occupiedIds?.has(id));
     const filename = normalizeBrowserArtifactFilename(kind, id, format, requestedFilename);
     const payloadKey = `artifact:${sequence.toString().padStart(6, "0")}:${encodeBrowserStorageSegment(id, this.storage.globalObject)}`;
 

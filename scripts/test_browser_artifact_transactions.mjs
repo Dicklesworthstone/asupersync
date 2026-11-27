@@ -397,6 +397,51 @@ for (const backend of ["localstorage", "indexeddb"]) {
     for (const request of requests) assert.equal(bytesText((await second.exportArtifact(request.id)).bytes), request.value);
   });
 
+  test(`${backend}: automatic IDs preserve restored artifacts across concurrent appends`, async () => {
+    const env = await environment(backend);
+    const source = env.store({}, "source");
+    for (const value of ["one", "two", "three", "four"]) {
+      await source.persistArtifact({ kind: "custom", value });
+    }
+    await source.deleteArtifact("custom-000001");
+    await source.deleteArtifact("custom-000002");
+    const destination = env.store();
+    await destination.importArchive((await source.exportArchive()).archive);
+    const appended = await Promise.all(["five", "six"].map((value) =>
+      env.store().persistArtifact({ kind: "custom", value })));
+    assert.deepEqual(ids(appended.map(result => result.artifact)), ["custom-000005", "custom-000006"]);
+    assert.deepEqual(ids(await consistent(destination)), ["custom-000003", "custom-000004", "custom-000005", "custom-000006"]);
+    assert.equal(bytesText((await destination.exportArtifact("custom-000003")).bytes), "three");
+    assert.equal(bytesText((await destination.exportArtifact("custom-000004")).bytes), "four");
+  });
+
+  test(`${backend}: generated IDs obey append quotas while explicit replacement remains available`, async () => {
+    const env = await environment(backend);
+    const store = env.store({ maxArtifacts: 1, quotaStrategy: "fail" });
+    await store.persistArtifact(custom("custom-000002", "keep"));
+    await assert.rejects(store.persistArtifact({ kind: "custom", value: "append" }),
+      (error) => artifactError(error, "quota_exceeded"));
+    assert.equal(bytesText((await store.exportArtifact("custom-000002")).bytes), "keep");
+    const replacement = await store.persistArtifact(custom("custom-000002", "updated"));
+    assert.equal(replacement.artifact.sequence, 2);
+    assert.equal(bytesText((await store.exportArtifact("custom-000002")).bytes), "updated");
+  });
+
+  test(`${backend}: a reserved last safe automatic ID fails without altering the index`, async () => {
+    const env = await environment(backend);
+    const store = env.store();
+    const reserved = `custom-${Number.MAX_SAFE_INTEGER}`;
+    await store.persistArtifact(custom(reserved));
+    const index = JSON.parse(bytesText(await store.storage.get(store.namespace, "__artifact_index__")));
+    index.nextSequence = Number.MAX_SAFE_INTEGER - 1;
+    const raw = new TextEncoder().encode(JSON.stringify(index));
+    await store.storage.set(store.namespace, "__artifact_index__", raw);
+    await assert.rejects(store.persistArtifact({ kind: "custom", value: "append" }),
+      (error) => artifactError(error, "corrupt_index"));
+    assert.deepEqual(Array.from(await store.storage.get(store.namespace, "__artifact_index__")), Array.from(raw));
+    assert.deepEqual(ids(await consistent(store)), [reserved]);
+  });
+
   test(`${backend}: concurrent admission cannot exceed artifact count quota`, async () => {
     const env = await environment(backend);
     const first = env.store({ maxArtifacts: 1, quotaStrategy: "fail" });
