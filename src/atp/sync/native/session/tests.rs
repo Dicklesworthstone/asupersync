@@ -249,8 +249,10 @@ fn native_session_restart_preserves_bidirectional_edit_and_subtree_deletion_hist
             let first = session.prepare(&cx).await.unwrap();
             assert!(first.preview().is_noop());
             let first_id = first.plan_id().to_owned();
+            let first_review = first.review_id().to_owned();
             drop(first);
             let second = session.prepare(&cx).await.unwrap();
+            assert_eq!(second.review_id(), first_review);
             assert_ne!(
                 second.plan_id(),
                 first_id,
@@ -261,6 +263,102 @@ fn native_session_restart_preserves_bidirectional_edit_and_subtree_deletion_hist
             assert_eq!(roots.reopen(&cx).await.generation(), 3);
         });
     }
+}
+
+#[test]
+fn native_session_review_id_survives_reopen_and_binds_contents_and_history() {
+    for workers in [1, 2] {
+        native(workers, |cx| async move {
+            let roots = Roots::new("stable-review");
+            for root in [&roots.local, &roots.remote] {
+                fs::write(root.join("file"), b"common contents").unwrap();
+            }
+            let mut session = roots.create(&cx).await;
+            let prepared = session.prepare(&cx).await.unwrap();
+            let initial_review = prepared.review_id().to_owned();
+            let initial_attempt = prepared.plan_id().to_owned();
+            assert_eq!(initial_review.len(), 64);
+            drop(prepared);
+            drop(session);
+
+            let current = fs::read(roots.current()).unwrap();
+            let mut session = roots.reopen(&cx).await;
+            let prepared = session.prepare(&cx).await.unwrap();
+            assert_eq!(prepared.review_id(), initial_review);
+            assert_ne!(prepared.plan_id(), initial_attempt);
+            assert_eq!(fs::read(roots.current()).unwrap(), current);
+            let report = prepared
+                .apply(&cx, authorized(), &roots.staging)
+                .await
+                .unwrap();
+            durable(&report, 1);
+            let baseline = session.baseline().unwrap().clone();
+            let prepared = session.prepare(&cx).await.unwrap();
+            assert!(prepared.preview().is_noop());
+            let generation_one_review = prepared.review_id().to_owned();
+            assert_ne!(generation_one_review, initial_review);
+            let report = prepared
+                .apply(&cx, authorized(), &roots.staging)
+                .await
+                .unwrap();
+            durable(&report, 2);
+            assert_eq!(session.baseline(), Some(&baseline));
+            let prepared = session.prepare(&cx).await.unwrap();
+            assert!(prepared.preview().is_noop());
+            let generation_two_review = prepared.review_id().to_owned();
+            assert_ne!(
+                generation_two_review, generation_one_review,
+                "a new durable generation invalidates the previous approval"
+            );
+            drop(prepared);
+
+            fs::write(roots.local.join("file"), b"local edit").unwrap();
+            let prepared = session.prepare(&cx).await.unwrap();
+            let local_edit_review = prepared.review_id().to_owned();
+            assert_ne!(local_edit_review, generation_two_review);
+            assert_eq!(
+                action(&prepared, "file"),
+                BidirectionalSyncAction::CopyLocalToRemote
+            );
+            drop(prepared);
+            fs::write(roots.remote.join("file"), b"independent remote edit").unwrap();
+            let prepared = session.prepare(&cx).await.unwrap();
+            assert!(prepared.preview().has_conflicts());
+            assert_ne!(prepared.review_id(), local_edit_review);
+        });
+    }
+}
+
+#[test]
+fn native_session_review_id_binds_state_directory_identity() {
+    native(1, |cx| async move {
+        let roots = Roots::new("review-state");
+        fs::write(roots.local.join("file"), b"source contents").unwrap();
+        let mut session = roots.create(&cx).await;
+        let prepared = session.prepare(&cx).await.unwrap();
+        let first_review = prepared.review_id().to_owned();
+        let decisions = prepared.preview().clone();
+        drop(prepared);
+        drop(session);
+
+        let other_state = roots.base.join("other-state");
+        fs::create_dir(&other_state).unwrap();
+        fs::set_permissions(&other_state, Permissions::from_mode(0o700)).unwrap();
+        let mut session = NativeDirectorySyncSession::create(
+            &cx,
+            &roots.local,
+            &roots.remote,
+            &other_state,
+            NativeDirectoryLimits::default(),
+            STATE_LIMIT,
+        )
+        .await
+        .unwrap();
+        assert_eq!(session.generation(), 0);
+        let prepared = session.prepare(&cx).await.unwrap();
+        assert_eq!(prepared.preview(), &decisions);
+        assert_ne!(prepared.review_id(), first_review);
+    });
 }
 
 #[test]

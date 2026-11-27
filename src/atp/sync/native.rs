@@ -187,6 +187,7 @@ pub struct PreparedNativeDirectorySync {
     remote: NativeDirectorySnapshot,
     limits: NativeDirectoryLimits,
     preview: BidirectionalSyncPlan,
+    review_id: String,
     plan_id: String,
 }
 
@@ -197,7 +198,22 @@ impl PreparedNativeDirectorySync {
         &self.preview
     }
 
-    /// Identity binding the review to these roots and captured contents.
+    /// Stable identity binding the review to these roots, contents and baseline.
+    ///
+    /// Independent preparations of unchanged inputs have the same review ID,
+    /// including after [`Self::with_fresh_plan_id`]. Callers can compare it with
+    /// an earlier review before applying a newly prepared opaque plan. The ID
+    /// grants no mutation authority and does not replace application revalidation.
+    #[must_use]
+    pub fn review_id(&self) -> &str {
+        &self.review_id
+    }
+
+    /// Identity of this prepared plan and its retained recovery staging job.
+    ///
+    /// Direct sync/mirror preparation initially uses [`Self::review_id`]. Sessions
+    /// and [`Self::with_fresh_plan_id`] add per-attempt entropy while retaining the
+    /// stable review identity.
     #[must_use]
     pub fn plan_id(&self) -> &str {
         &self.plan_id
@@ -205,9 +221,9 @@ impl PreparedNativeDirectorySync {
 
     /// Give this prepared attempt a fresh identity for its retained staging job.
     ///
-    /// The deterministic identity returned by preparation remains useful for
-    /// comparing a reviewed plan with a fresh scan. After that comparison, this
-    /// additive operation separates an execution attempt from earlier retained
+    /// The deterministic [`Self::review_id`] remains useful for comparing a
+    /// reviewed plan with a fresh scan. After that comparison, this additive
+    /// operation separates an execution attempt from earlier retained
     /// jobs with the same source/destination contents, including a mirror repeated
     /// after recovery. Decisions, captured guards and authorization do not change.
     ///
@@ -421,12 +437,14 @@ fn prepare_native_directory_owned(
         identity.update(snapshot.root.identity.inode.to_be_bytes());
         identity.update(snapshot.manifest.tree_root());
     }
+    let review_id = hex::encode(identity.finalize());
     Ok(PreparedNativeDirectorySync {
         local,
         remote,
         limits,
         preview,
-        plan_id: hex::encode(identity.finalize()),
+        review_id: review_id.clone(),
+        plan_id: review_id,
     })
 }
 

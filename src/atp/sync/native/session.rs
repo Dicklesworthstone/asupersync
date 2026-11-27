@@ -287,6 +287,9 @@ impl NativeDirectorySyncSession {
                     hash.update(generation.to_be_bytes());
                     hash.update(lease.directory.identity.device.to_be_bytes());
                     hash.update(lease.directory.identity.inode.to_be_bytes());
+                    // Reopening unchanged history preserves review identity;
+                    // the nonce still separates retained recovery attempts.
+                    prepared.review_id = hex::encode(hash.clone().finalize());
                     hash.update(nonce);
                     prepared.plan_id = hex::encode(hash.finalize());
                     Ok(prepared)
@@ -322,7 +325,19 @@ impl PreparedNativeDirectorySessionSync<'_> {
         self.prepared.preview()
     }
 
-    /// Identity unique to this review and its retained recovery staging job.
+    /// Stable identity binding this review to the roots, contents and history.
+    ///
+    /// The ID is unchanged across preparation and reopen when both inventories,
+    /// root identities, baseline, state directory identity and generation match.
+    /// Compare it with an earlier review before applying this newly prepared
+    /// opaque plan. It grants no mutation authority and does not replace the
+    /// native engine's stale-plan checks or explicit destructive grants.
+    #[must_use]
+    pub fn review_id(&self) -> &str {
+        self.prepared.review_id()
+    }
+
+    /// Identity unique to this attempt and its retained recovery staging job.
     #[must_use]
     pub fn plan_id(&self) -> &str {
         self.prepared.plan_id()

@@ -112,10 +112,12 @@ fn native_mirror_fresh_plan_ids_differ_across_default_runtime_instances() {
                 )
                 .await
                 .unwrap();
-                let review_id = prepared.plan_id().to_owned();
+                let review_id = prepared.review_id().to_owned();
+                assert_eq!(prepared.plan_id(), review_id);
                 let decisions = prepared.preview().clone();
                 let attempted = prepared.with_fresh_plan_id(&cx).unwrap();
                 assert_eq!(attempted.preview(), &decisions);
+                assert_eq!(attempted.review_id(), review_id);
                 assert_ne!(attempted.plan_id(), review_id);
                 (review_id, attempted.plan_id().to_owned())
             })
@@ -160,6 +162,7 @@ fn native_mirror_prepare_is_directional_deterministic_and_read_only() {
                 .unwrap();
             assert_eq!(first.preview(), second.preview());
             assert_eq!(first.plan_id(), second.plan_id());
+            assert_eq!(first.review_id(), second.review_id());
             assert_eq!(first.local().root(), source.as_path());
             assert_eq!(first.remote().root(), destination.as_path());
             assert!(!first.preview().has_conflicts());
@@ -193,6 +196,7 @@ fn native_mirror_prepare_is_directional_deterministic_and_read_only() {
             .unwrap();
             assert_eq!(first.preview(), sync.preview());
             assert_ne!(first.plan_id(), sync.plan_id());
+            assert_ne!(first.review_id(), sync.review_id());
             assert_eq!(
                 std::fs::read(source.join("shared")).unwrap(),
                 b"authoritative-source"
@@ -210,6 +214,40 @@ fn native_mirror_prepare_is_directional_deterministic_and_read_only() {
             assert_eq!(std::fs::read_dir(staging).unwrap().count(), 0);
         });
     }
+}
+
+#[test]
+fn native_mirror_review_id_binds_roots_and_current_contents() {
+    native(1, |cx| async move {
+        let (source, destination, _) = mirror_roots("review-binding");
+        let other_destination = destination.with_file_name("other-destination");
+        std::fs::create_dir(&other_destination).unwrap();
+        std::fs::write(source.join("file"), b"source").unwrap();
+        for root in [&destination, &other_destination] {
+            std::fs::write(root.join("file"), b"destination").unwrap();
+        }
+        let limits = NativeDirectoryLimits::default();
+        let reviewed = prepare_native_directory_mirror(&cx, &source, &destination, limits)
+            .await
+            .unwrap();
+        let other = prepare_native_directory_mirror(&cx, &source, &other_destination, limits)
+            .await
+            .unwrap();
+        assert_eq!(reviewed.preview(), other.preview());
+        assert_ne!(reviewed.review_id(), other.review_id());
+
+        std::fs::write(destination.join("file"), b"edited destination").unwrap();
+        let changed_destination =
+            prepare_native_directory_mirror(&cx, &source, &destination, limits)
+                .await
+                .unwrap();
+        assert_ne!(reviewed.review_id(), changed_destination.review_id());
+        std::fs::write(source.join("file"), b"edited source").unwrap();
+        let changed_source = prepare_native_directory_mirror(&cx, &source, &destination, limits)
+            .await
+            .unwrap();
+        assert_ne!(changed_destination.review_id(), changed_source.review_id());
+    });
 }
 
 #[test]
