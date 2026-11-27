@@ -39,14 +39,14 @@ console.log(JSON.stringify({
   source_sha256: hashes,
 }));
 
-async function loadSdk(closeInterceptor, joinInterceptor) {
+async function loadSdk(closeInterceptor, joinInterceptor, spawnInterceptor, cancelInterceptor) {
   const context = createContext({
     console, AbortController, AbortSignal, ArrayBuffer, DataView, Uint8Array, URL,
     EventTarget, MessageEvent, WebSocket, TextEncoder, TextDecoder,
     ReadableStream, WritableStream, WebAssembly, Response, Request, structuredClone,
     queueMicrotask, setTimeout, clearTimeout,
     window: {}, document: {}, isSecureContext: true,
-    closeInterceptor, joinInterceptor,
+    closeInterceptor, joinInterceptor, spawnInterceptor, cancelInterceptor,
   });
   const modules = new Map();
   for (const [name, path, typescript] of files) {
@@ -61,7 +61,18 @@ async function loadSdk(closeInterceptor, joinInterceptor) {
   modules.set("@asupersync/browser-core", new SourceTextModule(`
     export * from "core-live";
     export { default } from "core-live";
-    import { scopeClose as realScopeClose, taskJoin as realTaskJoin } from "core-live";
+    import {
+      scopeClose as realScopeClose, taskJoin as realTaskJoin,
+      taskSpawn as realTaskSpawn, taskCancel as realTaskCancel,
+    } from "core-live";
+    export function taskSpawn(request, version) {
+      const refused = globalThis.spawnInterceptor?.(request, version);
+      return refused === undefined ? realTaskSpawn(request, version) : refused;
+    }
+    export function taskCancel(request, version) {
+      const refused = globalThis.cancelInterceptor?.(request, version);
+      return refused === undefined ? realTaskCancel(request, version) : refused;
+    }
     export function taskJoin(handle, outcome, version) {
       const refused = globalThis.joinInterceptor?.(handle, outcome, version);
       return refused === undefined ? realTaskJoin(handle, outcome, version) : refused;
@@ -108,9 +119,10 @@ async function bounded(promise) {
   } finally { clearTimeout(timer); }
 }
 async function fixture(t, {
-  closeInterceptor, joinInterceptor, beforeCleanup = () => {}, runtimeAlreadyClosed = () => false,
+  closeInterceptor, joinInterceptor, spawnInterceptor, cancelInterceptor,
+  beforeCleanup = () => {}, runtimeAlreadyClosed = () => false,
 } = {}) {
-  const loaded = await loadSdk(closeInterceptor, joinInterceptor);
+  const loaded = await loadSdk(closeInterceptor, joinInterceptor, spawnInterceptor, cancelInterceptor);
   const runtime = unwrap(await loaded.sdk.createBrowserRuntime({ eagerInit: false }));
   t.after(async () => {
     beforeCleanup();
@@ -731,4 +743,413 @@ test("runtime close joins an operation still cleaning up after synchronous child
   release.resolve();
   unwrap(await bounded(closing));
   assert.equal((await bounded(task.completed)).outcome, "cancelled");
+});
+
+
+function parkedGroupBranch({ cleanupError, failCleanup = false } = {}) {
+  const entered = deferred();
+  const aborted = deferred();
+  const cleanup = deferred();
+  let calls = 0;
+  return {
+    entered, aborted, cleanup,
+    calls: () => calls,
+    async work(signal) {
+      calls += 1;
+      entered.resolve();
+      try {
+        await new Promise((_, reject) => {
+          signal.addEventListener("abort", () => {
+            aborted.resolve();
+            reject(signal.reason);
+          }, { once: true });
+        });
+      } finally {
+        await cleanup.promise;
+        if (failCleanup) throw cleanupError;
+      }
+    },
+  };
+}
+
+test("task groups validate the bounded full input before admitting any callback", async (t) => {
+  let admissions = 0;
+  let elementReads = 0;
+  let calls = 0;
+  const { runtime, snapshot } = await fixture(t, {
+    spawnInterceptor() { admissions += 1; },
+  });
+  const scope = unwrap(runtime.enterScope("group-validation"));
+  const excessive = new Array(65);
+  Object.defineProperty(excessive, 0, { get() { elementReads += 1; return () => {}; } });
+  const invalidTail = [() => { calls += 1; }, null];
+  const throwingTail = [() => { calls += 1; }, () => {}];
+  Object.defineProperty(throwingTail, 1, { get() { throw new Error("invalid callback getter"); } });
+  for (const method of ["joinTasks", "raceTasks"]) {
+    for (const input of [null, {}, excessive, invalidTail, throwingTail]) {
+      const refused = scope[method](input);
+      assert.equal(refused.outcome, "err");
+      assert.equal(refused.failure.code, "compatibility_rejected");
+    }
+    assert.equal(scope[method]([() => {}], { label: 7 }).outcome, "err");
+  }
+  assert.equal(scope.raceTasks([]).outcome, "err");
+  const empty = unwrap(scope.joinTasks([]));
+  assert.deepEqual(Array.from(unwrap(await empty.completed)), []);
+  unwrap(await empty.cancel());
+  assert.equal(admissions, 0);
+  assert.equal(elementReads, 0, "the cap must be enforced before reading array elements");
+  assert.equal(calls, 0);
+  assert.equal(snapshot().tasks.total, 0);
+  unwrap(await scope.closeAsync());
+});
+
+test("task joins preserve input order, callback values, and a snapshotted callback list", async (t) => {
+  const gates = [deferred(), deferred(), deferred()];
+  const values = [{ id: "first" }, { outcome: "panicked", message: "ordinary value" }, undefined];
+  let calls = 0;
+  const { runtime, snapshot } = await fixture(t, {
+    beforeCleanup() { for (const gate of gates) gate.resolve(); },
+  });
+  const scope = unwrap(runtime.enterScope("ordered-group"));
+  const work = gates.map((gate, index) => async () => {
+    calls += 1;
+    await gate.promise;
+    return values[index];
+  });
+  const group = unwrap(scope.joinTasks(work));
+  work.fill(() => { throw new Error("mutated caller list must not run"); });
+  assert.equal(calls, 0, "admission must not invoke callbacks synchronously");
+  assert.equal(snapshot().tasks.total, 3);
+  let settled = false;
+  void group.completed.then(() => { settled = true; });
+  gates[2].resolve();
+  gates[0].resolve();
+  await nextTurn();
+  assert.equal(calls, 3);
+  assert.equal(settled, false);
+  assert.equal(snapshot().tasks.total, 1);
+  gates[1].resolve();
+  const result = unwrap(await bounded(group.completed));
+  assert.equal(Object.isFrozen(result), true);
+  assert.equal(result.length, 3);
+  for (let index = 0; index < result.length; index += 1) {
+    assert.strictEqual(result[index], values[index]);
+  }
+  assert.equal(snapshot().tasks.total, 0);
+  unwrap(await group.cancel());
+  unwrap(await scope.closeAsync());
+});
+
+test("task race chooses settled order and waits for every losing finally block", async (t) => {
+  const losers = [parkedGroupBranch(), parkedGroupBranch()];
+  const releaseWinner = deferred();
+  const selected = { outcome: "err", failure: { message: "this is a value" } };
+  const { runtime, snapshot } = await fixture(t, {
+    beforeCleanup() {
+      releaseWinner.resolve(selected);
+      for (const loser of losers) loser.cleanup.resolve();
+    },
+  });
+  const scope = unwrap(runtime.enterScope("drained-task-race"));
+  const group = unwrap(scope.raceTasks([
+    losers[0].work, () => releaseWinner.promise, losers[1].work,
+  ]));
+  await bounded(Promise.all(losers.map(loser => loser.entered.promise)));
+  assert.equal(snapshot().tasks.total, 3);
+  let settled = false;
+  void group.completed.then(() => { settled = true; });
+  releaseWinner.resolve(selected);
+  await bounded(Promise.all(losers.map(loser => loser.aborted.promise)));
+  assert.equal(settled, false);
+  assert.equal(snapshot().tasks.total, 2);
+  losers[1].cleanup.resolve();
+  await nextTurn();
+  assert.equal(settled, false, "one joined loser is not a race receipt");
+  assert.equal(snapshot().tasks.total, 1);
+  losers[0].cleanup.resolve();
+  const winner = unwrap(await bounded(group.completed));
+  assert.equal(winner.index, 1);
+  assert.strictEqual(winner.value, selected);
+  assert.equal(Object.isFrozen(winner), true);
+  assert.equal(snapshot().tasks.total, 0);
+  const immediate = unwrap(scope.raceTasks([() => "first", () => "second"]));
+  const tied = unwrap(await bounded(immediate.completed));
+  assert.equal(tied.index, 0, "input order breaks already-ready completion ties");
+  assert.equal(tied.value, "first");
+  unwrap(await scope.closeAsync());
+});
+
+for (const failedIndex of [0, 1, 3]) {
+  test("partial group admission at index " + failedIndex + " drains rollback without callback entry", async (t) => {
+    let admissions = 0;
+    let calls = 0;
+    const refusal = { outcome: "err", failure: {
+      code: "compatibility_rejected", recoverability: "permanent", message: "group admission refused",
+    } };
+    const { runtime, snapshot } = await fixture(t, {
+      spawnInterceptor(request) {
+        if (!request.label.startsWith("partial-admission:")) return;
+        const index = admissions++;
+        if (index === failedIndex) return refusal;
+      },
+    });
+    const scope = unwrap(runtime.enterScope("partial-admission-owner"));
+    const group = unwrap(scope.joinTasks([
+      () => { calls += 1; }, () => { calls += 1; },
+      () => { calls += 1; }, () => { calls += 1; },
+    ], { label: "partial-admission" }));
+    assert.equal(admissions, failedIndex + 1);
+    assert.equal(snapshot().tasks.total, failedIndex, "only the admitted prefix is ledger-owned");
+    assert.equal(calls, 0);
+    assert.strictEqual(await bounded(group.completed), refusal);
+    assert.equal(calls, 0, "rollback aborts the prefix before deferred callback entry");
+    assert.equal(snapshot().tasks.total, 0);
+    unwrap(await group.cancel());
+    unwrap(await scope.closeAsync());
+  });
+}
+
+for (const refusedOperation of ["cancel", "join"]) {
+  test("task group " + refusedOperation + " refusal retains real owners until an explicit retry", async (t) => {
+    const loser = parkedGroupBranch();
+    const winner = deferred();
+    let refusing = true;
+    let refusals = 0;
+    const refusal = { outcome: "err", failure: {
+      code: "internal_failure", recoverability: "transient", message: "group retirement refused",
+    } };
+    const { runtime, snapshot } = await fixture(t, {
+      cancelInterceptor() {
+        if (refusedOperation === "cancel" && refusing) { refusals += 1; return refusal; }
+      },
+      joinInterceptor(_task, outcome) {
+        if (refusedOperation === "join" && refusing && outcome.outcome === "cancelled") {
+          refusals += 1;
+          return refusal;
+        }
+      },
+      beforeCleanup() {
+        refusing = false;
+        winner.resolve("winner");
+        loser.cleanup.resolve();
+      },
+    });
+    const scope = unwrap(runtime.enterScope("group-retirement-refusal"));
+    const group = unwrap(scope.raceTasks([() => winner.promise, loser.work]));
+    await bounded(loser.entered.promise);
+    winner.resolve("winner");
+    await bounded(loser.aborted.promise);
+    loser.cleanup.resolve();
+    assert.strictEqual(await bounded(group.completed), refusal);
+    assert.equal(refusals, 1);
+    assert.equal(snapshot().tasks.total, 1, "failed publication cannot retire the real losing task");
+    assert.strictEqual(await bounded(scope.closeAsync()), refusal);
+    assert.equal(snapshot().tasks.total, 1, "refused owner close keeps retryable ledger ownership");
+    refusing = false;
+    unwrap(await bounded(group.cancel()));
+    assert.equal(snapshot().tasks.total, 0);
+    assert.equal(loser.calls(), 1, "retry is retirement, not callback replay");
+    assert.strictEqual(await group.completed, refusal, "the first failure stays observable");
+    unwrap(await scope.closeAsync());
+  });
+}
+
+test("a task race preserves a loser's asynchronous cleanup panic over its winner", async (t) => {
+  let inspected = 0;
+  const hostile = Object.freeze({
+    get name() { inspected += 1; throw new Error("must not inspect"); },
+    toString() { inspected += 1; throw new Error("must not render"); },
+  });
+  const loser = parkedGroupBranch({ failCleanup: true, cleanupError: hostile });
+  const winner = deferred();
+  const { runtime, snapshot } = await fixture(t, {
+    beforeCleanup() { winner.resolve("winner"); loser.cleanup.resolve(); },
+  });
+  const scope = unwrap(runtime.enterScope("race-cleanup-panic"));
+  const group = unwrap(scope.raceTasks([() => winner.promise, loser.work]));
+  await bounded(loser.entered.promise);
+  winner.resolve("winner");
+  await bounded(loser.aborted.promise);
+  assert.equal(snapshot().tasks.total, 1);
+  loser.cleanup.resolve();
+  const result = await bounded(group.completed);
+  assert.equal(result.outcome, "panicked");
+  assert.equal(result.message, "Browser operation threw or rejected.");
+  assert.equal(inspected, 0);
+  assert.equal(snapshot().tasks.total, 0);
+  unwrap(await group.cancel(), "the panic result is independent of successful retirement");
+  unwrap(await scope.closeAsync());
+});
+
+test("task join fails fast but delivers its failure only after sibling cleanup", async (t) => {
+  const sibling = parkedGroupBranch();
+  const fail = deferred();
+  const { runtime, snapshot } = await fixture(t, {
+    beforeCleanup() { fail.resolve(); sibling.cleanup.resolve(); },
+  });
+  const scope = unwrap(runtime.enterScope("join-failure"));
+  const group = unwrap(scope.joinTasks([
+    sibling.work, async () => { await fail.promise; throw new Error("branch failed"); },
+  ]));
+  await bounded(sibling.entered.promise);
+  let settled = false;
+  void group.completed.then(() => { settled = true; });
+  fail.resolve();
+  await bounded(sibling.aborted.promise);
+  assert.equal(settled, false);
+  assert.equal(snapshot().tasks.total, 1);
+  sibling.cleanup.resolve();
+  assert.equal((await bounded(group.completed)).outcome, "panicked");
+  assert.equal(snapshot().tasks.total, 0);
+  unwrap(await scope.closeAsync());
+});
+
+for (const method of ["joinTasks", "raceTasks"]) {
+  test(method + " cancellation before callback entry starts no work", async (t) => {
+    let calls = 0;
+    const { runtime, snapshot } = await fixture(t);
+    const scope = unwrap(runtime.enterScope("pre-entry-group-cancel"));
+    const group = unwrap(scope[method]([() => { calls += 1; }, () => { calls += 1; }]));
+    unwrap(await bounded(group.cancel()));
+    const result = await bounded(group.completed);
+    assert.equal(result.outcome, "cancelled");
+    assert.equal(result.cancellation.kind, method === "joinTasks" ? "task_join_cancel" : "task_race_cancel");
+    assert.equal(calls, 0);
+    assert.equal(snapshot().tasks.total, 0);
+    unwrap(await scope.closeAsync());
+  });
+
+  test(method + " cancellation signals all parked members before joining any cleanup", async (t) => {
+    const branches = [parkedGroupBranch(), parkedGroupBranch()];
+    const { runtime, snapshot } = await fixture(t, {
+      beforeCleanup() { for (const branch of branches) branch.cleanup.resolve(); },
+    });
+    const scope = unwrap(runtime.enterScope("parked-group-cancel"));
+    const group = unwrap(scope[method](branches.map(branch => branch.work)));
+    await bounded(Promise.all(branches.map(branch => branch.entered.promise)));
+    const cancelled = group.cancel();
+    assert.strictEqual(group.cancel(), cancelled, "concurrent cancellation shares one cleanup attempt");
+    await bounded(Promise.all(branches.map(branch => branch.aborted.promise)));
+    let drained = false;
+    void cancelled.then(() => { drained = true; });
+    await nextTurn();
+    assert.equal(drained, false);
+    assert.equal(snapshot().tasks.total, 2);
+    branches[0].cleanup.resolve();
+    await nextTurn();
+    assert.equal(drained, false);
+    branches[1].cleanup.resolve();
+    unwrap(await bounded(cancelled));
+    const result = await bounded(group.completed);
+    assert.equal(result.outcome, "cancelled");
+    assert.equal(result.cancellation.kind, method === "joinTasks" ? "task_join_cancel" : "task_race_cancel");
+    assert.equal(snapshot().tasks.total, 0);
+    unwrap(await scope.closeAsync());
+  });
+}
+
+for (const ownerKind of ["scope", "runtime"]) {
+  test(ownerKind + " close cancels a selected race while joining its still-live loser", async (t) => {
+    const loser = parkedGroupBranch();
+    const winner = deferred();
+    let runtimeClosed = false;
+    const { runtime, snapshot } = await fixture(t, {
+      beforeCleanup() { winner.resolve("winner"); loser.cleanup.resolve(); },
+      runtimeAlreadyClosed: () => runtimeClosed,
+    });
+    const scope = unwrap(runtime.enterScope("owner-cancelled-race"));
+    const group = unwrap(scope.raceTasks([() => winner.promise, loser.work]));
+    await bounded(loser.entered.promise);
+    winner.resolve("winner");
+    await bounded(loser.aborted.promise);
+    const closing = ownerKind === "scope" ? scope.closeAsync() : runtime.closeAsync();
+    let closed = false;
+    void closing.then(() => { closed = true; });
+    await nextTurn();
+    assert.equal(closed, false);
+    assert.equal(snapshot().tasks.total, 1);
+    loser.cleanup.resolve();
+    const result = await bounded(group.completed);
+    assert.equal(result.outcome, "cancelled");
+    assert.equal(result.cancellation.kind, ownerKind + "_close");
+    unwrap(await bounded(closing));
+    runtimeClosed = ownerKind === "runtime";
+    assert.equal(snapshot().tasks.total, 0);
+  });
+}
+
+test("successful synchronous owner close still leaves task group JS cleanup joinable", async (t) => {
+  const branch = parkedGroupBranch();
+  let runtimeClosed = false;
+  const { runtime, snapshot } = await fixture(t, {
+    beforeCleanup() { branch.cleanup.resolve(); },
+    runtimeAlreadyClosed: () => runtimeClosed,
+  });
+  const scope = unwrap(runtime.enterScope("released-group-owner"));
+  const group = unwrap(scope.joinTasks([branch.work]));
+  await bounded(branch.entered.promise);
+  unwrap(scope.close());
+  assert.equal(snapshot().tasks.total, 0, "synchronous ABI close has released the task");
+  await bounded(branch.aborted.promise);
+  let settled = false;
+  void group.completed.then(() => { settled = true; });
+  let closed = false;
+  const closing = runtime.closeAsync();
+  void closing.then(() => { closed = true; });
+  await nextTurn();
+  assert.equal(settled, false);
+  assert.equal(closed, false, "ancestor close must retain the released group's JS ancestry");
+  branch.cleanup.resolve();
+  const result = await bounded(group.completed);
+  assert.equal(result.outcome, "cancelled");
+  unwrap(await bounded(closing));
+  runtimeClosed = true;
+});
+
+test("task group completion and late cancel do not cancel unrelated same-scope work", async (t) => {
+  const unrelated = parkedGroupBranch();
+  const { runtime, snapshot } = await fixture(t, {
+    beforeCleanup() { unrelated.cleanup.resolve(); },
+  });
+  const scope = unwrap(runtime.enterScope("group-isolation"));
+  const other = unwrap(scope.runTask(unrelated.work));
+  await bounded(unrelated.entered.promise);
+  const group = unwrap(scope.joinTasks([() => 1, () => 2]));
+  const result = unwrap(await bounded(group.completed));
+  assert.deepEqual(Array.from(result), [1, 2]);
+  unwrap(await group.cancel());
+  assert.equal(snapshot().tasks.total, 1);
+  let aborted = false;
+  void unrelated.aborted.promise.then(() => { aborted = true; });
+  await nextTurn();
+  assert.equal(aborted, false);
+  const cancelling = other.cancel();
+  await bounded(unrelated.aborted.promise);
+  unrelated.cleanup.resolve();
+  unwrap(await bounded(cancelling));
+  assert.equal(snapshot().tasks.total, 0);
+  unwrap(await scope.closeAsync());
+});
+
+test("reentrant scope close during group admission owns the in-progress child and starts no callbacks", async (t) => {
+  let scope;
+  let closing;
+  let calls = 0;
+  const { runtime, snapshot } = await fixture(t, {
+    spawnInterceptor(request) {
+      if (request.label === "reentrant-group:1") closing = scope.closeAsync();
+    },
+  });
+  scope = unwrap(runtime.enterScope("reentrant-group-owner"));
+  const group = unwrap(scope.joinTasks([
+    () => { calls += 1; }, () => { calls += 1; }, () => { calls += 1; },
+  ], { label: "reentrant-group" }));
+  assert.ok(closing, "the close actually interleaved a task admission");
+  const result = await bounded(group.completed);
+  assert.equal(result.outcome, "cancelled");
+  assert.equal(result.cancellation.kind, "scope_close");
+  unwrap(await bounded(closing));
+  assert.equal(calls, 0);
+  assert.equal(snapshot().tasks.total, 0);
 });

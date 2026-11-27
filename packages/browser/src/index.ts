@@ -194,6 +194,16 @@ export interface BrowserOperationHandle<T> {
   cancel(): Promise<BrowserOutcome<void>>;
 }
 
+/** Return every asynchronous effect that this task group must join. */
+export type BrowserTaskWork<T> = (signal: AbortSignal) => T | PromiseLike<T>;
+
+export interface BrowserTaskRaceWinner<T> {
+  /** Input index of the first observed successful completion. */
+  readonly index: number;
+  /** The exact callback value; Outcome-shaped values remain ordinary values. */
+  readonly value: T;
+}
+
 export type BrowserScopeBodyCompletion<T = unknown> =
   | { readonly kind: "returned"; readonly outcome: BrowserOutcome<T> }
   | { readonly kind: "threw"; readonly error: unknown };
@@ -7044,6 +7054,211 @@ function startBrowserOperation<T>(
   return OutcomeFactory.ok(Object.freeze({ completed, cancel: () => owner.stop("operation_cancel") }));
 }
 
+function startBrowserTaskGroup<T>(
+  scope: CoreRegionHandle, version: AbiVersion | null,
+  work: readonly BrowserTaskWork<T>[], label: string | undefined, join: true,
+): BrowserOutcome<BrowserOperationHandle<readonly T[]>>;
+function startBrowserTaskGroup<T>(
+  scope: CoreRegionHandle, version: AbiVersion | null,
+  work: readonly BrowserTaskWork<T>[], label: string | undefined, join: false,
+): BrowserOutcome<BrowserOperationHandle<BrowserTaskRaceWinner<T>>>;
+function startBrowserTaskGroup<T>(
+  scope: CoreRegionHandle, version: AbiVersion | null,
+  work: readonly BrowserTaskWork<T>[], label: string | undefined, join: boolean,
+): BrowserOutcome<BrowserOperationHandle<readonly T[] | BrowserTaskRaceWinner<T>>> {
+  type Failure = Exclude<BrowserOutcome<never>, { outcome: "ok" }>;
+  type Selection = readonly T[] | BrowserTaskRaceWinner<T>;
+  const callbacks: BrowserTaskWork<T>[] = [];
+  try {
+    if (!Array.isArray(work)) throw new TypeError();
+    const count = work.length;
+    // Bound the snapshot before touching any caller-controlled array element.
+    if (!Number.isInteger(count) || count < (join ? 0 : 1) || count > 64
+        || (label !== undefined && typeof label !== "string")) throw new TypeError();
+    for (let index = 0; index < count; index += 1) {
+      const callback = work[index];
+      if (typeof callback !== "function") throw new TypeError();
+      callbacks.push(callback);
+    }
+  } catch {
+    return OutcomeFactory.err("compatibility_rejected", "permanent",
+      "Task groups require an array of " + (join ? "0" : "1") + "..64 functions and an optional string label.");
+  }
+  const scopeKey = browserWebTransportStateKey(scope);
+  if (!browserMessageScopeIsTracked(scopeKey) || browserOwnerIsClosing(scopeKey)) {
+    return OutcomeFactory.err("capability_denied", "transient", "Task group owner is closing or unavailable.");
+  }
+  if (callbacks.length === 0) {
+    return OutcomeFactory.ok(Object.freeze({
+      completed: Promise.resolve(OutcomeFactory.ok(Object.freeze([]) as readonly T[])),
+      cancel: () => Promise.resolve(OutcomeFactory.ok(undefined)),
+    }));
+  }
+
+  interface Member {
+    handle: BrowserOperationHandle<T>;
+    terminal: Promise<BrowserOutcome<T>>;
+    outcome?: BrowserOutcome<T>;
+    expectedCancellation: boolean;
+    cleanup: Promise<BrowserOutcome<void>> | null;
+  }
+  const members: Member[] = [];
+  const rank = (outcome: Failure) => outcome.outcome === "panicked" ? 3
+    : outcome.outcome === "cancelled" ? 2 : 1;
+  let failure: Failure | null = null;
+  let winner: BrowserTaskRaceWinner<T> | null = null;
+  let stopping = false;
+  let finished = false;
+  let published = false;
+  let attempt: Promise<BrowserOutcome<void>> | null = null;
+  let publish!: (outcome: BrowserOutcome<Selection>) => void;
+  const completed = new Promise<BrowserOutcome<Selection>>(resolve => { publish = resolve; });
+  const internalFailure = () => OutcomeFactory.err("internal_failure", "unknown",
+    "Browser task group completion or retirement failed.") as Failure;
+  const observeFailure = (outcome: Failure) => {
+    if (failure === null || rank(outcome) > rank(failure)) failure = outcome;
+  };
+  const observeMember = (member: Member, outcome: BrowserOutcome<T>) => {
+    member.outcome = outcome;
+    if (outcome.outcome !== "ok"
+        && !(member.expectedCancellation && outcome.outcome === "cancelled"
+          && outcome.cancellation.kind === "operation_cancel")) {
+      observeFailure(outcome);
+    }
+  };
+  const cancelMember = (member: Member): Promise<BrowserOutcome<void>> => {
+    if (member.cleanup) return member.cleanup;
+    // Only cancellation requested by this group is expected loser cleanup.
+    // Scope/runtime cancellation and genuine callback failures stay visible.
+    member.expectedCancellation ||= member.outcome === undefined;
+    try {
+      member.cleanup = Promise.resolve(member.handle.cancel()).catch(internalFailure);
+    } catch {
+      member.cleanup = Promise.resolve(internalFailure());
+    }
+    return member.cleanup;
+  };
+
+  function retire(): Promise<BrowserOutcome<void>> {
+    if (finished) return Promise.resolve(OutcomeFactory.ok(undefined));
+    if (attempt) return attempt;
+    stopping = true;
+    let resolve!: (outcome: BrowserOutcome<void>) => void;
+    const current = new Promise<BrowserOutcome<void>>(done => { resolve = done; });
+    // An abort listener may reenter group or owner cancellation.
+    attempt = current;
+    for (const member of members) cancelMember(member);
+    void (async () => {
+      // Admission is synchronous. Include a member whose taskSpawn reentered
+      // owner close before that newly admitted handle reached this array.
+      await Promise.resolve();
+      let receipt: BrowserOutcome<void>;
+      try {
+        const receipts = await Promise.all(members.map(cancelMember));
+        const outcomes = await Promise.all(members.map(member => member.terminal));
+        for (let index = 0; index < members.length; index += 1) {
+          observeMember(members[index]!, outcomes[index]!);
+        }
+        let refused: Failure | null = null;
+        for (const result of receipts) {
+          if (result.outcome !== "ok") {
+            observeFailure(result);
+            if (refused === null || rank(result) > rank(refused)) refused = result;
+          }
+        }
+        receipt = refused ?? OutcomeFactory.ok(undefined);
+        if (receipt.outcome === "ok") {
+          finished = true;
+          BROWSER_OPERATIONS.delete(owner);
+        }
+        if (!published) {
+          let result: BrowserOutcome<Selection>;
+          if (failure !== null) result = failure;
+          else if (join) {
+            const values: T[] = [];
+            for (const outcome of outcomes) {
+              if (outcome.outcome === "ok") values.push(outcome.value);
+            }
+            result = values.length === callbacks.length
+              ? OutcomeFactory.ok(Object.freeze(values)) : internalFailure();
+          } else {
+            result = winner === null ? internalFailure() : OutcomeFactory.ok(winner);
+          }
+          published = true;
+          publish(result);
+        }
+      } catch {
+        receipt = internalFailure();
+        observeFailure(receipt as Failure);
+        if (!published) {
+          published = true;
+          publish(failure!);
+        }
+      } finally {
+        for (const member of members) member.cleanup = null;
+        if (attempt === current) attempt = null;
+      }
+      resolve(receipt);
+    })();
+    return current;
+  }
+
+  const owner: BrowserOperationOwner = {
+    ancestry: browserOwnerAncestry(scopeKey),
+    stop(kind) {
+      if (!finished && !published) {
+        observeFailure(OutcomeFactory.cancelled({
+          kind, phase: "completed", origin_region: scopeKey, origin_task: null,
+          timestamp_nanos: 0, message: "Browser task group cancelled.", truncated: false,
+        }) as Failure);
+      }
+      return retire();
+    },
+  };
+  // Register before admitting children so even reentrant owner close sees the
+  // group. Individual operations retain their own independent ABI ownership.
+  BROWSER_OPERATIONS.add(owner);
+  try {
+    for (let index = 0; index < callbacks.length && !stopping; index += 1) {
+      const admitted = startBrowserOperation(scope, version, callbacks[index]!,
+        (label ?? (join ? "browser-task-join" : "browser-task-race")) + ":" + index);
+      if (admitted.outcome !== "ok") {
+        observeFailure(admitted);
+        // Abort before deferred callback entry, then expose rollback through
+        // completed. Returning an error here would abandon asynchronous drain.
+        void retire();
+        break;
+      }
+      const member: Member = {
+        handle: admitted.value,
+        terminal: admitted.value.completed.catch(internalFailure),
+        expectedCancellation: false,
+        cleanup: null,
+      };
+      members.push(member);
+      if (stopping) cancelMember(member);
+      void member.terminal.then(outcome => {
+        observeMember(member, outcome);
+        if (stopping) return;
+        if (!join && outcome.outcome === "ok") {
+          winner = Object.freeze({ index, value: outcome.value });
+        }
+        if (!join || outcome.outcome !== "ok"
+            || members.every(candidate => candidate.outcome !== undefined)) {
+          void retire();
+        }
+      });
+    }
+  } catch {
+    observeFailure(internalFailure());
+    void retire();
+  }
+  return OutcomeFactory.ok(Object.freeze({
+    completed,
+    cancel: () => owner.stop(join ? "task_join_cancel" : "task_race_cancel"),
+  }));
+}
+
 async function stopBrowserOperations(
   owners: Set<string>, kind: string, released = false,
 ): Promise<BrowserOutcome<void>> {
@@ -7616,6 +7831,63 @@ export class RegionHandle {
       const version = snapshotOwnerCloseVersion(options.consumerVersion ?? this.consumerVersion);
       return startBrowserOperation(scope, version, work, options.label);
     } catch (error) { return ownerCloseFailure("run_task", error); }
+  }
+
+  /**
+   * Race 1..64 callbacks admitted as independent tasks in this region.
+   *
+   * The first observed terminal result selects the race; already-settled
+   * completions are observed in input order. A successful result contains its
+   * input index and exact callback value. Every loser is aborted and joined,
+   * including asynchronous finally blocks, before completed resolves. Genuine
+   * loser panics and refused retirement remain failures; expected loser
+   * cancellation does not replace a winner. Failure severity is
+   * Panicked > Cancelled > Err. An owner/group cancellation before delivery
+   * cancels the whole race, including a winner awaiting loser cleanup.
+   *
+   * All functions are snapshotted and checked before any task is admitted.
+   * Synchronous Ok transfers ownership to the returned group handle; it does
+   * not promise that every branch was admitted. A later admission refusal
+   * aborts all earlier tasks before callback entry and resolves completed with
+   * the failure only after their cleanup attempt. A refused cleanup retains
+   * real owners for an explicit cancel() or enclosing closeAsync() retry.
+   *
+   * Like runTask, callbacks must return all asynchronous work to be joined
+   * and observe their private signal. Work started outside that returned
+   * promise is outside group draining and keeps its original scope owner.
+   * No new scope, timer, retry, or host authority is created.
+   */
+  raceTasks<T>(
+    work: readonly BrowserTaskWork<T>[],
+    options: BrowserScopeOptions = {},
+  ): BrowserOutcome<BrowserOperationHandle<BrowserTaskRaceWinner<T>>> {
+    const lane = this.runtime?.laneAvailabilityOutcome("race region-owned browser operations");
+    if (lane) return lane;
+    try {
+      const scope = snapshotRegionHandle(this.core);
+      const version = snapshotOwnerCloseVersion(options.consumerVersion ?? this.consumerVersion);
+      return startBrowserTaskGroup(scope, version, work, options.label, false);
+    } catch (error) { return ownerCloseFailure("race_tasks", error); }
+  }
+
+  /**
+   * Join 0..64 callbacks, returning exact values in input order. Empty input
+   * is a successful identity in a live scope. The first failure cancels all
+   * remaining work and joins cleanup before delivery. Shares raceTasks'
+   * admission, cancellation, ownership and retryable-retirement contract.
+   * Outcome-shaped callback values are ordinary values, not group failures.
+   */
+  joinTasks<T>(
+    work: readonly BrowserTaskWork<T>[],
+    options: BrowserScopeOptions = {},
+  ): BrowserOutcome<BrowserOperationHandle<readonly T[]>> {
+    const lane = this.runtime?.laneAvailabilityOutcome("join region-owned browser operations");
+    if (lane) return lane;
+    try {
+      const scope = snapshotRegionHandle(this.core);
+      const version = snapshotOwnerCloseVersion(options.consumerVersion ?? this.consumerVersion);
+      return startBrowserTaskGroup(scope, version, work, options.label, true);
+    } catch (error) { return ownerCloseFailure("join_tasks", error); }
   }
 
   spawnTask(

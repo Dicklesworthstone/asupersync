@@ -306,6 +306,66 @@ abort and never settles keeps retirement pending. Do not await
 callback promise. Request cancellation from an event handler or another
 external owner, and let the callback observe its signal.
 
+### Structured joins and races inside application tasks
+
+The callback's scope also provides `joinTasks` and `raceTasks` for arbitrary
+JavaScript work. Each branch receives its own `AbortSignal` and has a real
+task entry in that scope. A join returns values in input order. A race selects
+the first observed terminal result and, on success, returns `{ index, value }`.
+Both wait for cancelled siblings' returned promises and asynchronous `finally`
+blocks before delivering a result. A loser cleanup panic remains a failure.
+
+For example, a React task can select a document replica without leaving the
+other request running after completion, replacement, cancellation or unmount:
+
+```tsx
+import { useReactTask, unwrapOutcome } from "@asupersync/react";
+
+function ReplicaPreview({ primary, backup }: { primary: string; backup: string }) {
+  const task = useReactTask(async (_signal, scope) => {
+    const group = unwrapOutcome(scope.raceTasks(
+      [primary, backup].map(url => async signal => {
+        const response = await fetch(url, { signal });
+        if (!response.ok) throw new Error("HTTP " + response.status);
+        return response.text();
+      }),
+      { label: "document-replicas" },
+    ));
+    const winner = unwrapOutcome(await group.completed);
+    return winner.value;
+  }, [primary, backup]);
+
+  return <pre>{task.outcome?.outcome === "ok" ? task.outcome.value : task.status}</pre>;
+}
+```
+
+This example uses native fetch authority, as in `DocumentPreview` above.
+`joinTasks` accepts 0–64 callbacks; an empty join succeeds. `raceTasks` accepts
+1–64 callbacks. Inputs are copied and validated before admission. A synchronous
+`ok` means the group handle owns completion and rollback; inspect `completed`
+for the actual result. If a later task admission fails, no branch callback
+starts, and the admitted prefix is cancelled and joined before that failure
+is delivered.
+
+`group.cancel()` signals every pending branch before waiting for any of them.
+Its result describes retirement separately from `group.completed`; a refused
+retirement retains the actual owners for another explicit `cancel()` or
+enclosing `closeAsync()` attempt. Retry does not rerun callbacks. Expected
+loser cancellation does not replace a race winner, while outer cancellation
+before delivery and genuine cleanup failures remain visible. A race selects
+the first terminal result, including failure; it is not a first-success retry.
+
+Return every asynchronous effect that the group must join. Callback values,
+including objects shaped like an `Outcome`, are preserved as values. The
+groups create no additional scopes: work outside a callback's returned promise
+keeps its original scope ownership and is outside group draining. React's
+invocation-scope cleanup still drains those scope-owned descendants.
+
+`scripts/test_browser_scope_async.mjs` exercises these groups against the
+checked-in JavaScript/WASM ownership ledger, including partial admission,
+loser cleanup, cancellation races, and real retained tasks after injected ABI
+refusals. This is Node execution, not browser-engine or Rust executor evidence.
+
 ### Real React and packaged-WASM task harness
 
 The task integration harness uses React's actual renderer, the complete
