@@ -359,7 +359,6 @@ impl OracleSuite {
             parent: Option<crate::types::RegionId>,
             state: RegionState,
             budget: crate::types::Budget,
-            created_at: Time,
         }
 
         fn walk_regions(
@@ -618,12 +617,12 @@ impl OracleSuite {
             BTreeMap::new();
 
         for (_, region) in state.regions_iter() {
+            self.region_tree.observe_runtime_region(region);
             let snapshot = RegionSnapshot {
                 id: region.id,
                 parent: region.parent,
                 state: region.state(),
                 budget: region.budget(),
-                created_at: region.created_at(),
             };
             regions.insert(snapshot.id, snapshot);
             children.entry(snapshot.id).or_default();
@@ -663,8 +662,6 @@ impl OracleSuite {
             let Some(snapshot) = regions.get(region_id) else {
                 continue;
             };
-            self.region_tree
-                .on_region_create(snapshot.id, snapshot.parent, snapshot.created_at);
             self.deadline_monotone.on_region_create(
                 snapshot.id,
                 snapshot.parent,

@@ -191,6 +191,19 @@ impl RegionTreeOracle {
         }
     }
 
+    /// Copies both sides of a runtime record independently so a missing or
+    /// stale membership can be detected by `check`.
+    pub(super) fn observe_runtime_region(&mut self, region: &crate::record::RegionRecord) {
+        self.regions.insert(
+            region.id,
+            RegionTreeEntry {
+                parent: region.parent,
+                subregions: region.child_ids().into_iter().collect(),
+                created_at: region.created_at(),
+            },
+        );
+    }
+
     /// Records that a subregion was explicitly added to a parent.
     ///
     /// This is typically called automatically by `on_region_create`, but

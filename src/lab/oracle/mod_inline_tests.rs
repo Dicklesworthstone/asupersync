@@ -180,6 +180,65 @@ fn hydration_classifies_handed_off_and_dropped_replies() {
 }
 
 #[test]
+fn lab_report_checks_actual_region_memberships() {
+    use crate::lab::{LabConfig, LabRuntime};
+    use crate::types::Budget;
+
+    let tree_passes = |lab: &mut LabRuntime| {
+        lab.report()
+            .oracle_report
+            .entry("region_tree")
+            .unwrap()
+            .passed
+    };
+    let mut lab = LabRuntime::new(LabConfig::new(31));
+    let root = lab.state.create_root_region(Budget::INFINITE);
+    let child = lab
+        .state
+        .create_child_region(root, Budget::INFINITE)
+        .unwrap();
+    let sibling = lab
+        .state
+        .create_child_region(root, Budget::INFINITE)
+        .unwrap();
+    assert!(tree_passes(&mut lab));
+
+    lab.state.region(root).unwrap().remove_child(child);
+    assert!(!tree_passes(&mut lab));
+    assert!(matches!(
+        lab.oracles.region_tree.check(),
+        Err(RegionTreeViolation::ParentChildMismatch { region, parent })
+            if region == child && parent == root
+    ));
+
+    lab.state.region(root).unwrap().add_child(child).unwrap();
+    lab.state.region(sibling).unwrap().add_child(child).unwrap();
+    assert!(!tree_passes(&mut lab));
+    assert!(matches!(
+        lab.oracles.region_tree.check(),
+        Err(RegionTreeViolation::ParentChildMismatch { region, parent })
+            if region == child && parent == sibling
+    ));
+
+    let phantom = crate::types::RegionId::new_for_test(100, 0);
+    lab.state.region(sibling).unwrap().remove_child(child);
+    lab.state
+        .region(sibling)
+        .unwrap()
+        .add_child(phantom)
+        .unwrap();
+    assert!(!tree_passes(&mut lab));
+    assert!(matches!(
+        lab.oracles.region_tree.check(),
+        Err(RegionTreeViolation::PhantomSubregion { parent, phantom_child })
+            if parent == sibling && phantom_child == phantom
+    ));
+
+    lab.state.region(sibling).unwrap().remove_child(phantom);
+    assert!(tree_passes(&mut lab));
+}
+
+#[test]
 fn hydrate_temporal_from_state_replays_finalizer_history() {
     init_test("hydrate_temporal_from_state_replays_finalizer_history");
     let mut state = crate::runtime::RuntimeState::new();
