@@ -1822,7 +1822,10 @@ impl Drop for NatsCancelWakerGuard {
 /// Each deadline has its own timer and clock. Absolute instants from different
 /// drivers cannot be ordered together: firing a foreign-clock timer early and
 /// discarding it would leave its real owner deadline permanently unarmed.
-async fn nats_io<T, E>(cx: &Cx, future: impl Future<Output = Result<T, E>>) -> Result<T, NatsError>
+pub(super) async fn nats_io<T, E>(
+    cx: &Cx,
+    future: impl Future<Output = Result<T, E>>,
+) -> Result<T, NatsError>
 where
     NatsError: From<E>,
 {

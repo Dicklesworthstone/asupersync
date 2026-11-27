@@ -3573,6 +3573,499 @@ fn audit_jetstream_pull_semantics_compliance() {
     );
 }
 
+mod paced_pull_tests {
+    use super::*;
+    use crate::runtime::{RootDrainOutcome, RuntimeBuilder};
+    use crate::time::{TimerDriverHandle, VirtualClock};
+    use crate::types::CancelKind;
+    use std::future::Future;
+    use std::io::{Read, Write};
+    use std::task::{Context, Poll, Wake, Waker};
+
+    fn consumer() -> Consumer {
+        Consumer {
+            stream: "ORDERS".to_string(),
+            name: "processor".to_string(),
+            prefix: "$JS.API".to_string(),
+            pending_acks: Arc::new(AtomicUsize::new(0)),
+            max_ack_pending: 1000,
+            pull_rate_limiter: PullRateLimiter::new(),
+        }
+    }
+
+    #[test]
+    fn paced_admission_waits_without_escalating_or_spending_credit() {
+        let limiter = PullRateLimiter::new();
+        let global = Mutex::new(GlobalPullRateTracker::new());
+        let clock = || {
+            assert!(limiter.state.try_lock().is_err());
+            assert!(global.try_lock().is_err());
+            5_000_000_000
+        };
+        assert_eq!(
+            limiter.reserve_paced_pull(&global, 100, clock),
+            Ok((100, 204_800))
+        );
+        for _ in 0..16 {
+            assert_eq!(
+                limiter.reserve_paced_pull(&global, 100, || 5_001_000_000),
+                Err(Duration::from_millis(49)),
+            );
+        }
+        let state = limiter.state.lock().unwrap();
+        assert_eq!(state.last_pull_ns, Some(5_000_000_000));
+        assert_eq!(state.rapid_request_count, 0);
+        assert_eq!(state.current_backoff_ms, 0);
+        assert!(!state.rate_limiting_active);
+        drop(state);
+        let mut tracker = global.lock().unwrap();
+        assert_eq!(tracker.recent_pulls.len(), 1);
+        assert_eq!(tracker.estimated_memory_usage, 204_800);
+        tracker.release(204_800);
+        drop(tracker);
+        assert_eq!(
+            limiter.reserve_paced_pull(&global, 100, || 5_050_000_000),
+            Ok((100, 204_800)),
+        );
+    }
+
+    #[test]
+    fn paced_admission_preserves_existing_backoff_and_batch_bounds() {
+        let limiter = PullRateLimiter::new();
+        let global = Mutex::new(GlobalPullRateTracker::new());
+        assert!(limiter.check_pull_request(0).is_ok());
+        assert_eq!(limiter.check_pull_request(1), Err(Duration::from_millis(100)));
+        assert_eq!(
+            limiter.reserve_paced_pull(&global, 1, || 50_000_000),
+            Err(Duration::from_millis(50)),
+        );
+        assert_eq!(limiter.state.lock().unwrap().rapid_request_count, 1);
+        assert_eq!(global.lock().unwrap().estimated_memory_usage, 0);
+        assert_eq!(
+            limiter.reserve_paced_pull(&global, 1, || 100_000_000),
+            Ok((1, 2048)),
+        );
+        global.lock().unwrap().release(2048);
+        // A sufficiently quiet interval resets the existing backoff before
+        // calculating the admitted batch, just as the immediate API does.
+        assert_eq!(
+            limiter.reserve_paced_pull(&global, 100, || 301_000_000),
+            Ok((100, 204_800)),
+        );
+        assert!(!limiter.is_rate_limiting_active());
+    }
+
+    #[test]
+    fn paced_global_rate_and_memory_waits_do_not_consume_local_admission() {
+        let limiter = PullRateLimiter::new();
+        let global = Mutex::new(GlobalPullRateTracker::new());
+        for _ in 0..GLOBAL_PULL_RATE_LIMIT {
+            global
+                .lock()
+                .unwrap()
+                .check_global_pull_request(0, 0)
+                .unwrap();
+        }
+        assert_eq!(
+            limiter.reserve_paced_pull(&global, 2, || 0),
+            Err(Duration::from_secs(1)),
+        );
+        assert_eq!(
+            limiter.reserve_paced_pull(&global, 2, || 999_999_999),
+            Err(Duration::from_nanos(1)),
+        );
+        assert!(limiter.state.lock().unwrap().last_pull_ns.is_none());
+        assert_eq!(global.lock().unwrap().estimated_memory_usage, 0);
+        assert_eq!(
+            limiter.reserve_paced_pull(&global, 2, || 1_000_000_000),
+            Ok((2, 4096)),
+        );
+        assert_eq!(global.lock().unwrap().recent_pulls.len(), 1);
+
+        let limiter = PullRateLimiter::new();
+        let memory_limit = MEMORY_PRESSURE_THRESHOLD_MB * 1_024 * 1_024;
+        let global = Mutex::new(GlobalPullRateTracker::new());
+        global.lock().unwrap().estimated_memory_usage = memory_limit;
+        assert_eq!(
+            limiter.reserve_paced_pull(&global, 1, || 0),
+            Err(Duration::from_millis(500)),
+        );
+        assert!(limiter.state.lock().unwrap().last_pull_ns.is_none());
+        assert!(global.lock().unwrap().recent_pulls.is_empty());
+        assert_eq!(global.lock().unwrap().estimated_memory_usage, memory_limit);
+        global.lock().unwrap().release(2048);
+        assert_eq!(limiter.reserve_paced_pull(&global, 1, || 0), Ok((1, 2048)));
+        assert_eq!(global.lock().unwrap().estimated_memory_usage, memory_limit);
+    }
+
+    #[test]
+    fn concurrent_paced_admission_reserves_only_one_interval() {
+        let limiter = PullRateLimiter::new();
+        let global = Mutex::new(GlobalPullRateTracker::new());
+        let barrier = std::sync::Barrier::new(16);
+        let results = std::thread::scope(|scope| {
+            let callers: Vec<_> = (0..16)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        limiter.reserve_paced_pull(&global, 1, || 5_000_000_000)
+                    })
+                })
+                .collect();
+            callers
+                .into_iter()
+                .map(|caller| caller.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert!(
+            results
+                .iter()
+                .filter_map(|result| result.as_ref().err())
+                .all(|delay| *delay == Duration::from_millis(50))
+        );
+        assert_eq!(global.lock().unwrap().estimated_memory_usage, 2048);
+        assert_eq!(global.lock().unwrap().recent_pulls.len(), 1);
+        assert!(!limiter.is_rate_limiting_active());
+    }
+
+    #[derive(Default)]
+    struct CountWake(std::sync::atomic::AtomicUsize);
+
+    impl Wake for CountWake {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::AcqRel);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    fn virtual_context(budget: Budget) -> (Cx, Arc<VirtualClock>, TimerDriverHandle) {
+        let clock = Arc::new(VirtualClock::new());
+        let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+        let cx = Cx::new_with_drivers(
+            RegionId::new_for_test(0, 1),
+            TaskId::new_for_test(0, 0),
+            budget,
+            None,
+            None,
+            None,
+            Some(timer.clone()),
+            None,
+        );
+        (cx, clock, timer)
+    }
+
+    fn hold_admission(consumer: &Consumer) {
+        let mut state = consumer.pull_rate_limiter.state.lock().unwrap();
+        // Keep admission unavailable independent of machine load. Arithmetic
+        // and ordinary clock progress are covered separately above; here the
+        // oracle is which timer and cancellation source can release the wait.
+        state.last_pull_ns = Some(u64::MAX);
+        state.current_backoff_ms = MAX_PULL_BACKOFF_MS;
+    }
+
+    #[test]
+    fn paced_wait_uses_owner_deadline_without_virtual_rate_limit_spin() {
+        let consumer = consumer();
+        hold_admission(&consumer);
+        let (owner, clock, timer) =
+            virtual_context(Budget::new().with_deadline(Time::from_millis(100)));
+        let (driver, foreign_clock, foreign_timer) = virtual_context(Budget::INFINITE);
+        let _current = Cx::set_current(Some(driver.clone()));
+        let counter = Arc::new(CountWake::default());
+        let waker = Waker::from(Arc::clone(&counter));
+        let mut task = Context::from_waker(&waker);
+        let mut waiting = Box::pin(consumer.reserve_paced_pull(&owner, 1));
+        assert!(waiting.as_mut().poll(&mut task).is_pending());
+        assert_eq!(timer.next_deadline(), Some(Time::from_millis(100)));
+        assert!(
+            foreign_timer.is_empty(),
+            "quota waits must not use virtual time"
+        );
+        foreign_clock.advance_to(Time::from_secs(10_000));
+        assert_eq!(foreign_timer.process_timers(), 0);
+        assert!(waiting.as_mut().poll(&mut task).is_pending());
+
+        let before = counter.0.load(Ordering::Acquire);
+        clock.advance_to(Time::from_millis(100));
+        assert_eq!(timer.process_timers(), 1);
+        assert!(counter.0.load(Ordering::Acquire) > before);
+        assert!(matches!(
+            waiting.as_mut().poll(&mut task),
+            Poll::Ready(Err(JsError::Nats(NatsError::Cancelled)))
+        ));
+        assert_eq!(owner.cancel_reason().unwrap().kind, CancelKind::Deadline);
+        drop(waiting);
+        assert!(timer.is_empty());
+        assert!(foreign_timer.is_empty());
+        assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+        assert!(driver.inner.read().cancel_waker_registrations.is_empty());
+        assert_eq!(
+            consumer.pull_rate_limiter.state.lock().unwrap().last_pull_ns,
+            Some(u64::MAX)
+        );
+    }
+
+    #[test]
+    fn dropped_paced_wait_retires_observers_and_invalid_batches_spend_nothing() {
+        let consumer = consumer();
+        let (owner, _, timer) =
+            virtual_context(Budget::new().with_deadline(Time::from_secs(3600)));
+        let mut task = Context::from_waker(Waker::noop());
+        for batch in [0, MAX_PULL_BATCH + 1, usize::MAX] {
+            let mut invalid = Box::pin(consumer.reserve_paced_pull(&owner, batch));
+            assert!(matches!(
+                invalid.as_mut().poll(&mut task),
+                Poll::Ready(Err(JsError::InvalidConfig(_)))
+            ));
+            assert!(
+                consumer
+                    .pull_rate_limiter
+                    .state
+                    .lock()
+                    .unwrap()
+                    .last_pull_ns
+                    .is_none()
+            );
+        }
+        hold_admission(&consumer);
+        let mut waiting = Box::pin(consumer.reserve_paced_pull(&owner, 1));
+        assert!(waiting.as_mut().poll(&mut task).is_pending());
+        assert!(!owner.inner.read().cancel_waker_registrations.is_empty());
+        assert_eq!(timer.pending_count(), 1);
+        drop(waiting);
+        assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+        assert!(timer.is_empty());
+        assert_eq!(
+            consumer.pull_rate_limiter.state.lock().unwrap().last_pull_ns,
+            Some(u64::MAX)
+        );
+    }
+
+    fn accept_peer(listener: &std::net::TcpListener) -> std::net::TcpStream {
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking peer accept");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "paced-pull peer was never connected"
+                    );
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(error) => panic!("accept paced-pull peer: {error}"),
+            }
+        };
+        stream.set_nonblocking(false).expect("blocking test peer");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .write_all(
+                b"INFO {\"server_id\":\"paced-pull\",\"proto\":1,\"max_payload\":1048576}\r\n",
+            )
+            .unwrap();
+        assert!(read_crlf_line(&mut stream).starts_with(b"CONNECT "));
+        stream
+    }
+
+    #[test]
+    fn native_paced_pulls_consume_and_ack_repeated_batches() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let peer = std::thread::spawn(move || {
+            let mut stream = accept_peer(&listener);
+            for sequence in 1..=3 {
+                let subscribe = String::from_utf8(read_crlf_line(&mut stream)).unwrap();
+                let parts: Vec<_> = subscribe.split_whitespace().collect();
+                assert_eq!(parts.len(), 3);
+                assert_eq!(parts[0], "SUB");
+                let (inbox, sid) = (parts[1], parts[2]);
+                let publish = String::from_utf8(read_crlf_line(&mut stream)).unwrap();
+                assert!(
+                    publish.starts_with("PUB $JS.API.CONSUMER.MSG.NEXT.ORDERS.processor ")
+                );
+                let length = parse_pub_payload_len(&publish);
+                let mut body = vec![0; length + 2];
+                stream.read_exact(&mut body).unwrap();
+                let request: serde_json::Value =
+                    serde_json::from_slice(&body[..length]).unwrap();
+                assert_eq!(request["batch"], 1);
+                assert_eq!(request["expires"], 1_000_000_000);
+                let reply =
+                    format!("$JS.ACK.ORDERS.processor.1.{sequence}.{sequence}.123.0");
+                write!(
+                    stream,
+                    "MSG {inbox} {sid} {reply} 1\r\n{sequence}\r\n"
+                )
+                .unwrap();
+                assert_eq!(
+                    read_crlf_line(&mut stream),
+                    format!("UNSUB {sid}\r\n").as_bytes()
+                );
+                assert_eq!(
+                    read_crlf_line(&mut stream),
+                    format!("PUB {reply} 4\r\n").as_bytes()
+                );
+                let mut ack = [0; 6];
+                stream.read_exact(&mut ack).unwrap();
+                assert_eq!(&ack, b"+ACK\r\n");
+            }
+            let mut byte = [0];
+            assert_eq!(stream.read(&mut byte).unwrap(), 0);
+        });
+        let runtime = RuntimeBuilder::current_thread().build().unwrap();
+        runtime.block_on(async {
+            let cx = Cx::current().expect("native paced-pull context");
+            let mut client = NatsClient::connect_with_config(
+                &cx,
+                NatsConfig {
+                    host: addr.ip().to_string(),
+                    port: addr.port(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            let consumer = consumer();
+            let mut admissions = Vec::new();
+            for sequence in 1..=3 {
+                let messages = consumer
+                    .pull_paced_with_timeout(&mut client, &cx, 1, Duration::from_secs(1))
+                    .await
+                    .expect("repeated consumption waits instead of failing its rate limit");
+                assert_eq!(messages.len(), 1);
+                assert_eq!(messages[0].sequence, sequence);
+                assert_eq!(messages[0].payload, sequence.to_string().as_bytes());
+                assert_eq!(consumer.pending_acks(), 1);
+                admissions.push(
+                    consumer
+                        .pull_rate_limiter
+                        .state
+                        .lock()
+                        .unwrap()
+                        .last_pull_ns
+                        .unwrap(),
+                );
+                messages[0].ack(&mut client, &cx).await.unwrap();
+                assert_eq!(consumer.pending_acks(), 0);
+            }
+            assert!(
+                admissions
+                    .windows(2)
+                    .all(|pair| pair[1] - pair[0] >= 50_000_000)
+            );
+            assert!(!consumer.pull_rate_limiter.is_rate_limiting_active());
+            client.close(&cx).await.unwrap();
+        });
+        peer.join().expect("paced-pull protocol peer");
+        assert_eq!(
+            runtime.shutdown_drained(Duration::from_secs(3)).outcome,
+            RootDrainOutcome::Quiescent
+        );
+        assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn native_paced_pull_cancellation_wakes_before_any_request_is_sent() {
+        for cancel_driver in [false, true] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let (release, released) = std::sync::mpsc::channel();
+            let peer = std::thread::spawn(move || {
+                let mut stream = accept_peer(&listener);
+                let _ = released.recv_timeout(Duration::from_secs(8));
+                let mut rest = Vec::new();
+                stream
+                    .read_to_end(&mut rest)
+                    .expect("read cancelled peer close");
+                rest
+            });
+            let owner: Cx = Cx::for_testing();
+            let operation_owner = owner.clone();
+            let (parked, parked_rx) = std::sync::mpsc::channel();
+            let (finished, result_rx) = std::sync::mpsc::channel();
+            let runtime = RuntimeBuilder::new().worker_threads(1).build().unwrap();
+            let task = runtime.handle().spawn(async move {
+                let driver = Cx::current().expect("native pacing driver");
+                let mut client = NatsClient::connect_with_config(
+                    &operation_owner,
+                    NatsConfig {
+                        host: addr.ip().to_string(),
+                        port: addr.port(),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+                let consumer = consumer();
+                hold_admission(&consumer);
+                let owner_before = operation_owner.inner.read().cancel_waker_registrations.len();
+                let driver_before = driver.inner.read().cancel_waker_registrations.len();
+                let mut parked = Some(parked);
+                let result = {
+                    let mut pull =
+                        std::pin::pin!(consumer.pull_paced(&mut client, &operation_owner, 1));
+                    std::future::poll_fn(|task_cx| {
+                        let result = pull.as_mut().poll(task_cx);
+                        if result.is_pending()
+                            && let Some(parked) = parked.take()
+                        {
+                            parked.send(driver.clone()).unwrap();
+                        }
+                        result
+                    })
+                    .await
+                };
+                let observers_retired = owner_before
+                    == operation_owner.inner.read().cancel_waker_registrations.len()
+                    && driver_before == driver.inner.read().cancel_waker_registrations.len();
+                let admission_unchanged =
+                    consumer.pull_rate_limiter.state.lock().unwrap().last_pull_ns
+                        == Some(u64::MAX);
+                drop(client);
+                let _ = finished.send((
+                    matches!(result, Err(JsError::Nats(NatsError::Cancelled))),
+                    observers_retired,
+                    admission_unchanged,
+                ));
+            });
+            let witness = parked_rx.recv_timeout(Duration::from_secs(3));
+            if let Ok(driver) = &witness {
+                if cancel_driver {
+                    driver.cancel_with(CancelKind::Shutdown, Some("stop pacing driver"));
+                } else {
+                    owner.cancel_with(CancelKind::User, Some("stop queued pull"));
+                }
+            }
+            let result = result_rx.recv_timeout(Duration::from_secs(2));
+            // Cleanup before the assertions also bounds a regressed wait.
+            owner.cancel_fast(CancelKind::User);
+            let _ = release.send(());
+            drop(task);
+            let drained = runtime.shutdown_timeout(Duration::from_secs(3));
+            let wire = peer.join().expect("cancelled paced-pull peer");
+            assert!(witness.is_ok(), "paced pull never parked");
+            assert_eq!(result, Ok((true, true, true)));
+            assert!(
+                wire.is_empty(),
+                "a waiting pull sent a NATS request: {wire:?}"
+            );
+            assert!(drained, "paced cancellation did not retire native work");
+        }
+    }
+}
+
 /// AUDIT MODULE: JetStream DoS protection and rate limiting compliance
 ///
 /// AUDIT FINDING: DoS protection implemented against pull batch size attacks

@@ -230,6 +230,52 @@ impl PullRateLimiter {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .rate_limiting_active
     }
+
+    /// Paced callers wait without escalating backoff or spending either quota.
+    /// Hold both admission locks until the process timestamp and both bounds
+    /// have been checked, so a global refusal cannot consume the local interval.
+    fn reserve_paced_pull(
+        &self,
+        global: &Mutex<GlobalPullRateTracker>,
+        requested_batch: usize,
+        clock: impl FnOnce() -> u64,
+    ) -> Result<(usize, u64), Duration> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut global = global
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let now_ns = clock();
+        let elapsed_ns = state
+            .last_pull_ns
+            .map_or(u64::MAX, |last| now_ns.saturating_sub(last));
+        let interval_ns = state
+            .current_backoff_ms
+            .max(MIN_PULL_INTERVAL_MS)
+            .saturating_mul(1_000_000);
+        if elapsed_ns < interval_ns {
+            return Err(Duration::from_nanos(interval_ns - elapsed_ns));
+        }
+
+        let reset_backoff = elapsed_ns / 1_000_000 > state.current_backoff_ms.saturating_mul(2);
+        let effective_batch = clamp_pull_batch_for_pressure(
+            requested_batch,
+            state.rate_limiting_active && !reset_backoff,
+            global.estimated_memory_usage / (1_024 * 1_024),
+        );
+        let estimated_batch_memory = effective_batch as u64 * 2048;
+        global.check_global_pull_request_inner(now_ns, estimated_batch_memory, true)?;
+
+        state.last_pull_ns = Some(now_ns);
+        if reset_backoff {
+            state.rapid_request_count = 0;
+            state.current_backoff_ms = 0;
+            state.rate_limiting_active = false;
+        }
+        Ok((effective_batch, estimated_batch_memory))
+    }
 }
 
 impl GlobalPullRateTracker {
@@ -245,6 +291,15 @@ impl GlobalPullRateTracker {
         &mut self,
         now_ns: u64,
         estimated_batch_memory: u64,
+    ) -> Result<(), Duration> {
+        self.check_global_pull_request_inner(now_ns, estimated_batch_memory, false)
+    }
+
+    fn check_global_pull_request_inner(
+        &mut self,
+        now_ns: u64,
+        estimated_batch_memory: u64,
+        paced: bool,
     ) -> Result<(), Duration> {
         // Keep the FIFO ordered even if an injected clock regresses. Production
         // also samples its process clock while holding the global tracker lock.
@@ -266,6 +321,12 @@ impl GlobalPullRateTracker {
 
         // Check global rate limit
         if recent_count >= GLOBAL_PULL_RATE_LIMIT as usize {
+            if paced {
+                let oldest = self.recent_pulls.front().copied().unwrap_or(now_ns);
+                return Err(Duration::from_nanos(
+                    1_000_000_000 - now_ns.saturating_sub(oldest),
+                ));
+            }
             warn!(
                 "JetStream global pull rate limit exceeded: {} requests/second (limit: {})",
                 recent_count, GLOBAL_PULL_RATE_LIMIT
@@ -281,11 +342,13 @@ impl GlobalPullRateTracker {
             return Err(Duration::from_millis(500));
         };
         if new_memory_usage > MEMORY_PRESSURE_THRESHOLD_MB * 1_024 * 1_024 {
-            warn!(
-                "JetStream memory pressure detected: {}MB estimated usage (threshold: {}MB)",
-                new_memory_usage / (1_024 * 1_024),
-                MEMORY_PRESSURE_THRESHOLD_MB
-            );
+            if !paced {
+                warn!(
+                    "JetStream memory pressure detected: {}MB estimated usage (threshold: {}MB)",
+                    new_memory_usage / (1_024 * 1_024),
+                    MEMORY_PRESSURE_THRESHOLD_MB
+                );
+            }
             return Err(Duration::from_millis(500)); // Longer delay for memory pressure
         }
 
@@ -1943,6 +2006,95 @@ impl Consumer {
             .await
     }
 
+    /// Pull a batch, waiting for local and process-wide admission capacity.
+    ///
+    /// Unlike [`Self::pull`], ordinary repeated calls wait for the existing
+    /// per-consumer interval, backoff, global rate limit and memory allowance
+    /// instead of returning a rate-limit error. The batch cap and pressure
+    /// clamping are unchanged. Waiting does not increase the backoff, reserve
+    /// memory, subscribe an inbox or publish a request.
+    ///
+    /// Cancellation and budget deadlines are observed while admission is
+    /// pending. Use [`Self::pull_paced_with_timeout`] to select the broker wait
+    /// after admission; the default is the same as [`Self::pull`].
+    pub async fn pull_paced(
+        &self,
+        client: &mut NatsClient,
+        cx: &Cx,
+        batch: usize,
+    ) -> Result<Vec<JsMessage>, JsError> {
+        self.pull_paced_with_timeout(client, cx, batch, Self::DEFAULT_PULL_TIMEOUT)
+            .await
+    }
+
+    /// Pull with cancellation-aware pacing before the request reaches NATS.
+    ///
+    /// `pull_timeout` begins after admission and has the same meaning as in
+    /// [`Self::pull_with_timeout`], including zero disabling request expiry.
+    /// A context budget deadline bounds admission as well as the transport
+    /// operation. Each context's cancellation deadline stays on its own clock.
+    /// Shared rate quotas and their wake timers use the monotonic process
+    /// clock, so advancing an unrelated or virtual clock cannot bypass them
+    /// or create a virtual-time retry loop. All pacing timers share the
+    /// existing process timer; no thread is created per waiting pull.
+    ///
+    /// Callers compete for capacity when awakened; admission is not FIFO.
+    /// Global rate pressure waits until the oldest admission expires; memory
+    /// pressure is rechecked every 500 ms. Dropping or cancelling a waiting
+    /// call spends no admission or memory credit. Once admitted, the request
+    /// counts against rate limits, and its memory reservation is released on
+    /// completion, error, cancellation or drop, as with the immediate APIs.
+    pub async fn pull_paced_with_timeout(
+        &self,
+        client: &mut NatsClient,
+        cx: &Cx,
+        batch: usize,
+        pull_timeout: Duration,
+    ) -> Result<Vec<JsMessage>, JsError> {
+        let (effective_batch, reservation) = self.reserve_paced_pull(cx, batch).await?;
+        self.pull_reserved(client, cx, effective_batch, pull_timeout, reservation)
+            .await
+    }
+
+    async fn reserve_paced_pull(
+        &self,
+        cx: &Cx,
+        batch: usize,
+    ) -> Result<(usize, GlobalPullReservation), JsError> {
+        super::nats::nats_io(cx, async {
+            // nats_io checks the explicit owner's clock and cancellation
+            // before validation, including driverless owners polled by a
+            // different runtime. Keep the existing typed validation error.
+            if let Err(error) = validate_pull_batch_size(batch) {
+                return Ok::<_, NatsError>(Err(error));
+            }
+            loop {
+                match self.pull_rate_limiter.reserve_paced_pull(
+                    &GLOBAL_PULL_RATE_TRACKER,
+                    batch,
+                    || crate::time::raw_wall_now().as_nanos(),
+                ) {
+                    Ok((effective_batch, estimated_batch_memory)) => {
+                        return Ok(Ok((
+                            effective_batch,
+                            GlobalPullReservation(estimated_batch_memory),
+                        )));
+                    }
+                    Err(delay) => {
+                        // Quotas are shared by unrelated runtimes. Their wake
+                        // must not borrow an ambient virtual clock; nats_io
+                        // separately arms each owner's budget and cancellation.
+                        let mut timer = std::pin::pin!(crate::time::Sleep::with_wall_clock(
+                            crate::time::raw_wall_now() + delay,
+                        ));
+                        std::future::poll_fn(|task| timer.as_mut().poll_deadline(task)).await;
+                    }
+                }
+            }
+        })
+        .await?
+    }
+
     /// Pull a batch of messages with a timeout.
     ///
     /// A zero duration disables the client-side timeout and sets JetStream
@@ -1989,8 +2141,20 @@ impl Consumer {
                 )));
             }
         }
-        let _reservation = GlobalPullReservation(estimated_batch_memory);
+        let reservation = GlobalPullReservation(estimated_batch_memory);
 
+        self.pull_reserved(client, cx, effective_batch, pull_timeout, reservation)
+            .await
+    }
+
+    async fn pull_reserved(
+        &self,
+        client: &mut NatsClient,
+        cx: &Cx,
+        effective_batch: usize,
+        pull_timeout: Duration,
+        _reservation: GlobalPullReservation,
+    ) -> Result<Vec<JsMessage>, JsError> {
         let subject = format!(
             "{}.CONSUMER.MSG.NEXT.{}.{}",
             self.prefix, self.stream, self.name
