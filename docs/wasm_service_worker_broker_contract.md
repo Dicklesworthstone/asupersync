@@ -135,6 +135,21 @@ legacy descriptors by replaying the request before execution. Hosts without
 this capability can still persist and list work. Completion requires a versioned
 receipt. It records no tombstone and leaves future readmission to the application.
 
+When several dispatchers can observe the same descriptor, each can call
+`claimBrokerWork(observed, nextLeaseEpoch)` **before** starting the external
+operation. The application supplies a strictly higher safe integer epoch.
+The broker checks the observed revision, lease, registration, and handoff
+inside the transaction that publishes the new lease. One contender receives
+the updated descriptor. A stale contender receives `null` and skips dispatch.
+Pass the winning descriptor to `completeBrokerWork()` after the operation.
+Claims require IndexedDB or the namespace Web Lock on localStorage, and a
+host with `crypto.randomUUID()`. A failed commit rejects the claim.
+
+A worker can crash after a successful claim or after performing the external
+effect. Recovery can claim the latest descriptor at a higher epoch. Carry
+the event's idempotency key into the external operation when retries must
+avoid duplicate effects.
+
 `deleteBrokerWork()`, `clearRegistration()`, and
 `clearBrokerState()` remain explicit, unconditional cleanup operations rather
 than lease-fenced worker completion.

@@ -692,6 +692,7 @@ export type BrowserServiceWorkerBrokerOperation =
   | "list_work"
   | "persist_work"
   | "complete_work"
+  | "claim_work"
   | "delete_work"
   | "list_handoffs"
   | "persist_handoff"
@@ -813,6 +814,11 @@ export interface BrowserServiceWorkerBrokerDescriptor {
   sourceEventKind: string;
   updatedAtMs: number;
 }
+
+/** A durable work observation, returned by listing, persisting or claiming work. */
+export type BrowserServiceWorkerBrokerWorkReceipt = Pick<
+  BrowserServiceWorkerBrokerDescriptor, "brokerWorkId" | "leaseEpoch" | "completionRevision"
+>;
 
 export interface BrowserServiceWorkerBrokerHandoffRequest {
   artifactNamespace: string;
@@ -8943,6 +8949,7 @@ async function runBrowserStorageTransaction<T>(
   namespace: string,
   mode: "readonly" | "readwrite",
   execute: (transaction: BrowserStorageTransaction, finish: (value: T) => void) => void,
+  requireCrossRealmLock = false,
 ): Promise<T> {
   // Callers validate their own host contract. In particular, a bounded broker
   // may use durable storage without admitting a service-worker direct runtime.
@@ -9136,13 +9143,16 @@ async function runBrowserStorageTransaction<T>(
     return result!;
   };
   const navigator = storage.globalObject?.navigator as {
-    locks?: { request<V>(name: string, options: { mode: "exclusive" | "shared" }, callback: () => V): Promise<V> };
+    locks?: { request<V>(name: string, options: { mode: "exclusive" | "shared" }, callback: () => V | PromiseLike<V>): Promise<V> };
   } | undefined;
   if (typeof navigator?.locks?.request === "function") {
-    return navigator.locks.request(`asupersync:artifact:${prefix}`, {
+    // Surface synchronous transaction failures as rejected promises so the
+    // lock manager releases ownership on both fulfillment and rejection.
+    return navigator.locks.request<T>(`asupersync:artifact:${prefix}`, {
       mode: mode === "readonly" ? "shared" : "exclusive",
-    }, run);
+    }, async () => run());
   }
+  if (requireCrossRealmLock) throw new Error("claiming broker work in localStorage requires Web Locks");
   // Older hosts without Web Locks retain same-realm serialization only.
   // The staged index preserves readable references after each host mutation,
   // not multi-key crash atomicity: interrupted replacement may lose evicted
@@ -10341,7 +10351,7 @@ export class BrowserServiceWorkerBrokerStore {
   ): Promise<T> {
     this.assertSupported();
     try {
-      return await runBrowserStorageTransaction(this, this.namespace, mode, execute);
+      return await runBrowserStorageTransaction(this, this.namespace, mode, execute, operation === "claim_work");
     } catch (error) {
       if (this.isBrokerOperationError(error)) throw error;
       throw this.operationError(operation,
@@ -10493,7 +10503,7 @@ export class BrowserServiceWorkerBrokerStore {
     request: ReturnType<BrowserServiceWorkerBrokerStore["prepareWork"]>,
     work: BrowserServiceWorkerBrokerDescriptor | null,
     handoff: BrowserServiceWorkerBrokerHandoffRecord | null,
-    operation: "persist_work" | "persist_handoff" | "complete_work",
+    operation: "persist_work" | "persist_handoff" | "claim_work" | "complete_work",
   ): void {
     if (request.capabilityManifestVersion !== registration.capabilityManifestVersion) {
       throw this.operationError(operation, "capability_manifest_mismatch_on_restart",
@@ -10693,12 +10703,7 @@ export class BrowserServiceWorkerBrokerStore {
             finish(existing);
             return;
           }
-          const crypto = this.globalObject?.crypto as Pick<Crypto, "randomUUID"> | undefined;
-          const revision = crypto?.randomUUID?.();
-          if (revision !== undefined && !isBrokerCompletionRevision(revision)) {
-            throw this.operationError("persist_work", "serialization_failed",
-              "service-worker broker crypto returned an invalid work revision", brokerWorkId);
-          }
+          const revision = this.workRevision("persist_work", brokerWorkId);
           if (replay && revision === undefined) { finish(existing); return; }
           const descriptor: BrowserServiceWorkerBrokerDescriptor = {
             ...prepared,
@@ -10717,34 +10722,80 @@ export class BrowserServiceWorkerBrokerStore {
     }, brokerWorkId);
   }
 
-  /** Remove only the pending descriptor observed before executing the work. */
-  async completeBrokerWork(
-    receipt: Pick<BrowserServiceWorkerBrokerDescriptor, "brokerWorkId" | "leaseEpoch" | "completionRevision">,
-  ): Promise<boolean> {
+  private workRevision(operation: "persist_work" | "claim_work", id: string): string | undefined {
+    const crypto = this.globalObject?.crypto as Pick<Crypto, "randomUUID"> | undefined;
+    const revision = crypto?.randomUUID?.();
+    if (revision !== undefined && !isBrokerCompletionRevision(revision)) {
+      throw this.operationError(operation, "serialization_failed",
+        "service-worker broker crypto returned an invalid work revision", id);
+    }
+    return revision;
+  }
+
+  private async updateObservedWork<T>(
+    operation: "claim_work" | "complete_work",
+    receipt: BrowserServiceWorkerBrokerWorkReceipt,
+    apply: (transaction: BrowserStorageTransaction, work: BrowserServiceWorkerBrokerDescriptor) => T,
+  ): Promise<T | null> {
     const { brokerWorkId, leaseEpoch, completionRevision } = receipt;
     const id = normalizeBrowserServiceWorkerBrokerString(brokerWorkId, "service-worker broker broker_work_id");
     if (!isBrokerCompletionRevision(completionRevision) || !Number.isSafeInteger(leaseEpoch) || leaseEpoch < 0) {
-      throw this.operationError("complete_work", "broker_restart_reconciliation_failed",
-        "completion requires a versioned receipt from persistBrokerWork() or listPendingWork()", id);
+      throw this.operationError(operation, "broker_restart_reconciliation_failed",
+        "a versioned broker work receipt is required", id);
     }
-    return this.transaction("complete_work", "readwrite", (transaction, finish) => {
-      this.readRegistrationInTransaction(transaction, "complete_work", (registration) => {
+    return this.transaction(operation, "readwrite", (transaction, finish) => {
+      this.readRegistrationInTransaction(transaction, operation, (registration) => {
         if (!registration) {
-          throw this.operationError("complete_work", "broker_bootstrap_failure",
-            "completion requires an active service-worker broker registration", id);
+          throw this.operationError(operation, "broker_bootstrap_failure",
+            "an active service-worker broker registration is required", id);
         }
-        this.readWorkFence(transaction, "complete_work", id, (work, handoff) => {
+        this.readWorkFence(transaction, operation, id, (work, handoff) => {
           if (!work || work.completionRevision !== completionRevision || work.leaseEpoch !== leaseEpoch ||
               (handoff !== null && handoff.leaseEpoch > leaseEpoch)) {
-            finish(false);
+            finish(null);
             return;
           }
-          this.validateWorkFence(registration, work, work, handoff, "complete_work");
-          transaction.delete(`${BROWSER_SERVICE_WORKER_BROKER_WORK_PREFIX}${id}`);
-          finish(true);
+          this.validateWorkFence(registration, work, work, handoff, operation);
+          finish(apply(transaction, work));
         });
       });
     }, id);
+  }
+
+  /**
+   * Conditionally advance an observed descriptor to an application-supplied
+   * higher lease epoch before dispatch. Only the successful claimant receives
+   * the new descriptor. A missing or superseded observation returns null.
+   */
+  async claimBrokerWork(
+    receipt: BrowserServiceWorkerBrokerWorkReceipt,
+    nextLeaseEpoch: number,
+  ): Promise<BrowserServiceWorkerBrokerDescriptor | null> {
+    return this.updateObservedWork("claim_work", receipt, (transaction, work) => {
+      if (!Number.isSafeInteger(nextLeaseEpoch) || nextLeaseEpoch <= work.leaseEpoch) {
+        throw this.operationError("claim_work", "broker_restart_reconciliation_failed",
+          "claiming work requires a strictly higher safe lease epoch", work.brokerWorkId);
+      }
+      const completionRevision = this.workRevision("claim_work", work.brokerWorkId);
+      if (completionRevision === undefined) {
+        throw this.operationError("claim_work", "serialization_failed",
+          "claiming work requires crypto.randomUUID() to issue a versioned receipt", work.brokerWorkId);
+      }
+      const claimed = {
+        ...work, leaseEpoch: nextLeaseEpoch, completionRevision, updatedAtMs: this.snapshotTimestamp("claim_work"),
+      };
+      this.writeRecord(transaction, `${BROWSER_SERVICE_WORKER_BROKER_WORK_PREFIX}${work.brokerWorkId}`,
+        claimed, "claim_work", work.brokerWorkId);
+      return claimed;
+    });
+  }
+
+  /** Remove only the pending descriptor observed before executing the work. */
+  async completeBrokerWork(receipt: BrowserServiceWorkerBrokerWorkReceipt): Promise<boolean> {
+    return (await this.updateObservedWork("complete_work", receipt, (transaction, work) => {
+      transaction.delete(`${BROWSER_SERVICE_WORKER_BROKER_WORK_PREFIX}${work.brokerWorkId}`);
+      return true;
+    })) === true;
   }
 
   async deleteBrokerWork(brokerWorkId: string): Promise<boolean> {

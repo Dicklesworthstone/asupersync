@@ -16,6 +16,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { createRequire, stripTypeScriptTypes } from "node:module";
 import { dirname, resolve } from "node:path";
 import { test } from "node:test";
+import { locks } from "node:worker_threads";
 import { fileURLToPath } from "node:url";
 import { createContext, runInNewContext, SourceTextModule, SyntheticModule } from "node:vm";
 
@@ -1210,6 +1211,49 @@ async function brokerEnvironment(backend) {
 }
 
 for (const backend of ["indexeddb", "localstorage"]) {
+  test(`${backend}: broker claim gives exactly one contender the observed work revision`, async () => {
+    const env = await brokerEnvironment(backend);
+    if (backend === "localstorage") env.brokerHost.navigator = { locks };
+    const first = env.first, second = env.broker();
+    const original = await first.persistBrokerWork(brokerWork());
+    const observed = (await second.listPendingWork())[0];
+    const results = await Promise.all([
+      first.claimBrokerWork(original, 2), second.claimBrokerWork(observed, 3),
+    ]);
+    const winners = results.filter(value => value !== null);
+    assert.equal(winners.length, 1);
+    const winner = winners[0];
+    assert.equal(winner.leaseEpoch, results[0] ? 2 : 3);
+    assert.notEqual(winner.completionRevision, original.completionRevision);
+    assert.equal(winner.createdAtMs, original.createdAtMs);
+    assert.deepEqual(brokerRecord(winner.metadata), brokerRecord(original.metadata));
+    assert.equal(await second.completeBrokerWork(original), false);
+    assert.equal(await first.completeBrokerWork(winner), true);
+    assert.equal(await second.claimBrokerWork(winner, 5), null);
+    const replacement = await first.persistBrokerWork(brokerWork());
+    assert.equal(await first.claimBrokerWork(original, 2), null);
+    assert.equal(await first.completeBrokerWork(replacement), true);
+  });
+
+  test(`${backend}: broker claim checks handoff, epoch and publication before dispatch`, async () => {
+    const env = await brokerEnvironment(backend);
+    if (backend === "localstorage") env.brokerHost.navigator = { locks };
+    const work = await env.first.persistBrokerWork(brokerWork());
+    for (const epoch of [1, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      await assert.rejects(env.first.claimBrokerWork(work, epoch),
+        error => brokerError(error, "broker_restart_reconciliation_failed"));
+    }
+    env.failSet(key => key === "broker_work:work-1");
+    await assert.rejects(env.first.claimBrokerWork(work, 2), error => brokerError(error, "storage_failed"));
+    assert.deepEqual(brokerRecord((await env.first.listPendingWork())[0]), brokerRecord(work));
+    delete env.brokerHost.crypto;
+    await assert.rejects(env.first.claimBrokerWork(work, 2), error => brokerError(error, "serialization_failed"));
+    env.brokerHost.crypto = webcrypto;
+    const handoff = await env.first.persistDurableHandoff(brokerWork({ leaseEpoch: 2 }));
+    assert.equal(await env.first.claimBrokerWork(work, 3), null);
+    assert.deepEqual(brokerRecord((await env.first.listDurableHandoffs())[0]), brokerRecord(handoff));
+  });
+
   test(`${backend}: completion compares the durable revision across restarts and ID reuse`, async () => {
     const { first, broker } = await brokerEnvironment(backend);
     const request = brokerWork();
@@ -1614,4 +1658,12 @@ test("localstorage: broker Web Locks fence independent SDK realms and snapshot q
   assert.equal(record.leaseEpoch, 3);
   assert.equal(record.metadata.nested.accepted, true);
   assert.equal(requests.at(-1).mode, "shared");
+});
+
+
+test("localstorage: broker claim requires cross-realm exclusion before updating the lease", async () => {
+  const env = await brokerEnvironment("localstorage");
+  const work = await env.first.persistBrokerWork(brokerWork());
+  await assert.rejects(env.first.claimBrokerWork(work, 2), error => brokerError(error, "storage_failed"));
+  assert.equal((await env.first.listPendingWork())[0].completionRevision, work.completionRevision);
 });
