@@ -630,7 +630,7 @@ fn steal_foreign_cohort_after_visits_the_other_cohorts_in_turn() {
     let mut cursor = 0;
     let mut served = Vec::new();
     while let Some((task, kind)) = affinity.steal_foreign_cohort_after(0, &mut cursor) {
-        assert_eq!(kind, BlockingTaskDequeueKind::Spill);
+        assert_eq!(kind, BlockingTaskDequeueKind::Foreign);
         inner.pending_count.fetch_sub(1, Ordering::Relaxed);
         served.push(task.preferred_cohort);
     }
@@ -640,6 +640,37 @@ fn steal_foreign_cohort_after_visits_the_other_cohorts_in_turn() {
         "cohort 2 is served before cohort 1's second task",
     );
     assert_eq!(blocking_pool_affinity_metrics(&inner).spill_dispatches, 3);
+}
+
+#[test]
+fn foreign_cohort_turns_do_not_starve_global_work() {
+    let interval = 2 * FOREIGN_COHORT_TURN_INTERVAL;
+    let inner = test_blocking_inner_with_affinity(
+        BlockingPoolAffinityProfile::CohortBiased {
+            local_queue_soft_limit: 4 * interval,
+            spill_check_interval: interval,
+        },
+        Some(2),
+    );
+    let order = Arc::new(StdMutex::new(Vec::new()));
+    let mut global = labelled_cohort_task(0, usize::MAX, &order);
+    global.preferred_cohort = None;
+    assert!(try_enqueue_task(&inner, global));
+    for label in 0..2 * interval {
+        for cohort in [0, 1] {
+            assert!(try_enqueue_task(
+                &inner,
+                labelled_cohort_task(cohort, label, &order),
+            ));
+        }
+    }
+
+    let ran = drain_as_cohort_worker(&inner, 0, &order);
+    let position = ran.iter().position(|&label| label == usize::MAX).unwrap();
+    // A foreign turn can coincide with the scheduled global check, delaying
+    // it by one dispatch. It must never restart the whole wait interval.
+    assert!(position <= interval + 1, "global job ran at {position}");
+    assert_eq!(ran.len(), 4 * interval + 1);
 }
 
 #[test]

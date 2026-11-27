@@ -352,7 +352,7 @@ impl BlockingPoolAffinityState {
             if let Some(task) = queue.pop() {
                 self.cohort_pending_counts[idx].fetch_sub(1, Ordering::Relaxed);
                 self.spill_dispatches.fetch_add(1, Ordering::Relaxed);
-                return Some((task, BlockingTaskDequeueKind::Spill));
+                return Some((task, BlockingTaskDequeueKind::Foreign));
             }
         }
         None
@@ -453,6 +453,7 @@ enum BlockingTaskDequeueKind {
     Global,
     Local,
     Spill,
+    Foreign,
 }
 
 /// A task submitted to the blocking pool.
@@ -1884,7 +1885,7 @@ const FOREIGN_COHORT_TURN_INTERVAL: usize = 16;
 #[allow(clippy::significant_drop_tightening)] // Condvar wait pattern intentionally holds and rechecks under mutex.
 fn blocking_worker_loop(inner: &BlockingPoolInner, assigned_cohort: Option<usize>) -> bool {
     let mut idle_since: Option<Instant> = None;
-    let mut local_dispatch_streak = 0usize;
+    let mut cohort_dispatch_streak = 0usize;
     let mut dispatches_since_foreign_turn = 0usize;
     let mut foreign_cursor = 0usize;
 
@@ -1894,7 +1895,7 @@ fn blocking_worker_loop(inner: &BlockingPoolInner, assigned_cohort: Option<usize
             && inner
                 .affinity
                 .as_ref()
-                .is_some_and(|affinity| local_dispatch_streak < affinity.spill_check_interval);
+                .is_some_and(|affinity| cohort_dispatch_streak < affinity.spill_check_interval);
         let foreign_turn = match (assigned_cohort, inner.affinity.as_ref()) {
             (Some(cohort), Some(affinity))
                 if dispatches_since_foreign_turn >= FOREIGN_COHORT_TURN_INTERVAL =>
@@ -1909,8 +1910,12 @@ fn blocking_worker_loop(inner: &BlockingPoolInner, assigned_cohort: Option<usize
         {
             idle_since = None; // Reset idle timer since we got work
             dispatches_since_foreign_turn = dispatches_since_foreign_turn.saturating_add(1);
-            local_dispatch_streak = match dequeue_kind {
-                BlockingTaskDequeueKind::Local => local_dispatch_streak.saturating_add(1),
+            // A foreign turn serves a cohort queue. Counting it as a global
+            // turn could continually postpone unhinted and spilled jobs.
+            cohort_dispatch_streak = match dequeue_kind {
+                BlockingTaskDequeueKind::Local | BlockingTaskDequeueKind::Foreign => {
+                    cohort_dispatch_streak.saturating_add(1)
+                }
                 BlockingTaskDequeueKind::Global | BlockingTaskDequeueKind::Spill => 0,
             };
 
@@ -2122,7 +2127,7 @@ impl BlockingPoolAffinityState {
                 self.cohort_pending_counts[idx].fetch_sub(1, Ordering::Relaxed);
                 self.spill_dispatches.fetch_add(1, Ordering::Relaxed);
                 *cursor = (idx + 1) % self.cohort_count;
-                return Some((task, BlockingTaskDequeueKind::Spill));
+                return Some((task, BlockingTaskDequeueKind::Foreign));
             }
         }
         None
