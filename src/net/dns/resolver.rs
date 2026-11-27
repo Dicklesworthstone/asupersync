@@ -37,12 +37,9 @@
 //! timer thread. Only `Resolver` lookups are routed; `TcpStream::connect` by host name and
 //! `net::lookup_host` still refuse.
 //!
-//! Reading the system resolver configuration is blocking work too. A resolver with no explicit
-//! nameservers takes its nameservers from `/etc/resolv.conf`, and `lookup_mx`, `lookup_srv` and
-//! `lookup_txt` read that file before they schedule anything. On a forbidden pool they refuse first
-//! with the same error as `spawn_blocking_dns`: the file is never opened. A cached, special-use or
-//! literal `lookup_ip` answer never reaches the file, a resolver with explicit nameservers never
-//! reads it, and an open pool or no pool keeps reading it as before.
+//! Record-specific lookups that discover nameservers in `/etc/resolv.conf` read it on the
+//! same blocking worker as the wire query. Admission, cancellation, and the lookup timeout
+//! cover that discovery step too. Explicit nameservers bypass the system configuration.
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
@@ -331,7 +328,7 @@ impl Resolver {
             return Err(DnsError::Timeout);
         }
         let host = host.to_string();
-        let nameservers = self.effective_nameservers()?;
+        let nameservers = validate_configured_nameservers(&self.config.nameservers)?;
         let entropy = Arc::clone(&self.entropy);
         let abandoned = Arc::new(AtomicBool::new(false));
         let stop = Arc::clone(&abandoned);
@@ -530,51 +527,24 @@ impl Resolver {
         if let Some(cx) = self.forbidden_native_owner() {
             return native::erase_native(self.lookup_mx_native(&cx, domain)).await;
         }
-        self.refuse_system_config_read()?;
-        let domain = domain.to_string();
-        let nameservers = self.effective_nameservers()?;
-        let retries = self.config.retries;
-        let timeout = self.config.timeout;
-        let entropy = Arc::clone(&self.entropy);
-        if timeout.is_zero() {
-            return Err(DnsError::Timeout);
-        }
-        let abandoned = Arc::new(AtomicBool::new(false));
-        let stop = Arc::clone(&abandoned);
-        let _abandon = AbandonOnDrop(abandoned);
-
-        let lookup = Box::pin(spawn_blocking_dns(move || {
-            let answers = Self::query_records_sync(
-                &domain,
-                DnsQueryType::Mx,
-                &nameservers,
-                retries,
-                timeout,
-                entropy.as_ref(),
-                stop.as_ref(),
-            )?;
-            let mut records = Vec::new();
-            for answer in answers {
-                if let DnsRecordData::Mx {
+        let answers = self.lookup_blocking_records(domain, DnsQueryType::Mx).await?;
+        let mut records = Vec::new();
+        for answer in answers {
+            if let DnsRecordData::Mx {
+                preference,
+                exchange,
+            } = answer.data
+            {
+                records.push(crate::net::dns::MxRecord {
                     preference,
                     exchange,
-                } = answer.data
-                {
-                    records.push(crate::net::dns::MxRecord {
-                        preference,
-                        exchange,
-                    });
-                }
+                });
             }
-            if records.is_empty() {
-                return Err(DnsError::NoRecords(domain));
-            }
-            Ok(LookupMx::new(records))
-        }));
-
-        self.timeout_future(timeout, lookup)
-            .await
-            .unwrap_or(Err(DnsError::Timeout))
+        }
+        if records.is_empty() {
+            return Err(DnsError::NoRecords(domain.to_owned()));
+        }
+        Ok(LookupMx::new(records))
     }
 
     /// Looks up SRV records.
@@ -584,55 +554,28 @@ impl Resolver {
         if let Some(cx) = self.forbidden_native_owner() {
             return native::erase_native(self.lookup_srv_native(&cx, name)).await;
         }
-        self.refuse_system_config_read()?;
-        let name = name.to_string();
-        let nameservers = self.effective_nameservers()?;
-        let retries = self.config.retries;
-        let timeout = self.config.timeout;
-        let entropy = Arc::clone(&self.entropy);
-        if timeout.is_zero() {
-            return Err(DnsError::Timeout);
-        }
-        let abandoned = Arc::new(AtomicBool::new(false));
-        let stop = Arc::clone(&abandoned);
-        let _abandon = AbandonOnDrop(abandoned);
-
-        let lookup = Box::pin(spawn_blocking_dns(move || {
-            let answers = Self::query_records_sync(
-                &name,
-                DnsQueryType::Srv,
-                &nameservers,
-                retries,
-                timeout,
-                entropy.as_ref(),
-                stop.as_ref(),
-            )?;
-            let mut records = Vec::new();
-            for answer in answers {
-                if let DnsRecordData::Srv {
+        let answers = self.lookup_blocking_records(name, DnsQueryType::Srv).await?;
+        let mut records = Vec::new();
+        for answer in answers {
+            if let DnsRecordData::Srv {
+                priority,
+                weight,
+                port,
+                target,
+            } = answer.data
+            {
+                records.push(crate::net::dns::SrvRecord {
                     priority,
                     weight,
                     port,
                     target,
-                } = answer.data
-                {
-                    records.push(crate::net::dns::SrvRecord {
-                        priority,
-                        weight,
-                        port,
-                        target,
-                    });
-                }
+                });
             }
-            if records.is_empty() {
-                return Err(DnsError::NoRecords(name));
-            }
-            Ok(LookupSrv::new(records))
-        }));
-
-        self.timeout_future(timeout, lookup)
-            .await
-            .unwrap_or(Err(DnsError::Timeout))
+        }
+        if records.is_empty() {
+            return Err(DnsError::NoRecords(name.to_owned()));
+        }
+        Ok(LookupSrv::new(records))
     }
 
     /// Looks up TXT records.
@@ -642,44 +585,17 @@ impl Resolver {
         if let Some(cx) = self.forbidden_native_owner() {
             return native::erase_native(self.lookup_txt_native(&cx, name)).await;
         }
-        self.refuse_system_config_read()?;
-        let name = name.to_string();
-        let nameservers = self.effective_nameservers()?;
-        let retries = self.config.retries;
-        let timeout = self.config.timeout;
-        let entropy = Arc::clone(&self.entropy);
-        if timeout.is_zero() {
-            return Err(DnsError::Timeout);
+        let answers = self.lookup_blocking_records(name, DnsQueryType::Txt).await?;
+        let mut records = Vec::new();
+        for answer in answers {
+            if let DnsRecordData::Txt(text) = answer.data {
+                records.push(text);
+            }
         }
-        let abandoned = Arc::new(AtomicBool::new(false));
-        let stop = Arc::clone(&abandoned);
-        let _abandon = AbandonOnDrop(abandoned);
-
-        let lookup = Box::pin(spawn_blocking_dns(move || {
-            let answers = Self::query_records_sync(
-                &name,
-                DnsQueryType::Txt,
-                &nameservers,
-                retries,
-                timeout,
-                entropy.as_ref(),
-                stop.as_ref(),
-            )?;
-            let mut records = Vec::new();
-            for answer in answers {
-                if let DnsRecordData::Txt(text) = answer.data {
-                    records.push(text);
-                }
-            }
-            if records.is_empty() {
-                return Err(DnsError::NoRecords(name));
-            }
-            Ok(LookupTxt::new(records))
-        }));
-
-        self.timeout_future(timeout, lookup)
-            .await
-            .unwrap_or(Err(DnsError::Timeout))
+        if records.is_empty() {
+            return Err(DnsError::NoRecords(name.to_owned()));
+        }
+        Ok(LookupTxt::new(records))
     }
 
     /// Clears the DNS cache.
@@ -698,24 +614,57 @@ impl Resolver {
         self.cache.stats()
     }
 
-    fn effective_nameservers(&self) -> Result<Vec<SocketAddr>, DnsError> {
-        if !self.config.nameservers.is_empty() {
-            return validate_configured_nameservers(&self.config.nameservers);
+    async fn lookup_blocking_records(
+        &self,
+        name: &str,
+        kind: DnsQueryType,
+    ) -> Result<Vec<DnsAnswer>, DnsError> {
+        let configured = validate_configured_nameservers(&self.config.nameservers)?;
+        if configured.is_empty() {
+            // Preserve the system path's admission error even at a zero timeout.
+            refuse_blocking_dns()?;
         }
-        Ok((self.system_config_reader)())
-    }
+        let timeout = self.config.timeout;
+        if timeout.is_zero() {
+            return Err(DnsError::Timeout);
+        }
+        let started = Instant::now();
+        let read_system = self.system_config_reader;
+        let retries = self.config.retries;
+        let entropy = Arc::clone(&self.entropy);
+        let name = name.to_owned();
+        let abandoned = Arc::new(AtomicBool::new(false));
+        let stop = Arc::clone(&abandoned);
+        let _abandon = AbandonOnDrop(abandoned);
 
-    /// Refuses, before the system resolver configuration is read, on a forbidden blocking pool.
-    ///
-    /// Without explicit nameservers `effective_nameservers` opens `/etc/resolv.conf`, which is blocking
-    /// file I/O on the polling thread and runs before `spawn_blocking_dns` can refuse. A forbidden pool
-    /// gets the same error here, so the file is never touched; every other configuration returns `Ok` and
-    /// is unchanged.
-    fn refuse_system_config_read(&self) -> Result<(), DnsError> {
-        if self.config.nameservers.is_empty() && current_pool_forbids_blocking() {
-            return refuse_blocking_dns();
-        }
-        Ok(())
+        let lookup = Box::pin(spawn_blocking_dns(move || {
+            check_dns_abandoned(Some(stop.as_ref()))?;
+            if started.elapsed() >= timeout {
+                return Err(DnsError::Timeout);
+            }
+            let nameservers = if configured.is_empty() {
+                read_system()
+            } else {
+                configured
+            };
+            check_dns_abandoned(Some(stop.as_ref()))?;
+            let remaining = timeout.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                return Err(DnsError::Timeout);
+            }
+            Self::query_records_sync(
+                &name,
+                kind,
+                &nameservers,
+                retries,
+                remaining,
+                entropy.as_ref(),
+                stop.as_ref(),
+            )
+        }));
+        self.timeout_future(timeout, lookup)
+            .await
+            .unwrap_or(Err(DnsError::Timeout))
     }
 
     /// Replaces the system resolver configuration reader, so tests can count the reads.

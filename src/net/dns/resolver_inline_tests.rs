@@ -3110,11 +3110,14 @@ fn forbidden_pool_record_lookups_without_nameservers_never_read_system_config() 
     // The reader is a plain `fn`, so the trap is a per-test counter and a per-test address cell.
     static READS: AtomicUsize = AtomicUsize::new(0);
     static NAMESERVER: std::sync::OnceLock<SocketAddr> = std::sync::OnceLock::new();
+    static POLLER: std::sync::OnceLock<thread::ThreadId> = std::sync::OnceLock::new();
     fn trap_reader() -> Vec<SocketAddr> {
+        assert_ne!(POLLER.get(), Some(&thread::current().id()));
         READS.fetch_add(1, Ordering::SeqCst);
         NAMESERVER.get().copied().into_iter().collect()
     }
     init_test("forbidden_pool_record_lookups_without_nameservers_never_read_system_config");
+    POLLER.set(thread::current().id()).unwrap();
     let server = TestDnsServer::start(record_zone(), false);
     NAMESERVER.set(server.addr).expect("the trap is armed once");
     // No explicit nameservers: every record lookup takes them from the (trapped) system configuration.
@@ -3126,6 +3129,16 @@ fn forbidden_pool_record_lookups_without_nameservers_never_read_system_config() 
     })
     .with_system_config_reader(trap_reader);
     let expected = crate::runtime::spawn_blocking::forbidden_io_error().to_string();
+
+    {
+        let cx: Cx = Cx::for_testing();
+        let _current = Cx::set_current(Some(cx));
+        let _restricted = Cx::push_restriction(crate::cx::cap::CapMask::none());
+        for result in future::block_on(record_lookup_results(&resolver)) {
+            assert!(matches!(result, Err(DnsError::Io(message)) if message.contains("ASUP-E009")));
+        }
+        assert_eq!(READS.load(Ordering::SeqCst), 0);
+    }
 
     let forbidden = forbidden_blocking_pool();
     {
