@@ -691,6 +691,7 @@ export type BrowserServiceWorkerBrokerOperation =
   | "set_lifecycle"
   | "list_work"
   | "persist_work"
+  | "complete_work"
   | "delete_work"
   | "list_handoffs"
   | "persist_handoff"
@@ -797,6 +798,8 @@ export interface BrowserServiceWorkerBrokerDescriptorRequest {
 }
 
 export interface BrowserServiceWorkerBrokerDescriptor {
+  /** Opaque version for conditional completion, when the host provides crypto.randomUUID(). */
+  completionRevision?: string;
   artifactNamespace: string;
   brokerWorkId: string;
   capabilityManifestVersion: string;
@@ -10070,6 +10073,11 @@ function parseBrowserServiceWorkerBrokerRegistration(
   };
 }
 
+function isBrokerCompletionRevision(value: unknown): value is string {
+  return typeof value === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(value);
+}
+
 function parseBrowserServiceWorkerBrokerDescriptor(
   value: unknown,
 ): BrowserServiceWorkerBrokerDescriptor {
@@ -10077,6 +10085,9 @@ function parseBrowserServiceWorkerBrokerDescriptor(
     throw new Error("service-worker broker descriptor must be an object");
   }
   const candidate = value as Partial<BrowserServiceWorkerBrokerDescriptor>;
+  if (candidate.completionRevision !== undefined && !isBrokerCompletionRevision(candidate.completionRevision)) {
+    throw new Error("service-worker broker descriptor has an invalid completion revision");
+  }
   if (
     candidate.requestedLane !== BROWSER_SERVICE_WORKER_BROKER_LANE ||
     typeof candidate.artifactNamespace !== "string" ||
@@ -10097,6 +10108,7 @@ function parseBrowserServiceWorkerBrokerDescriptor(
     BROWSER_BRIDGE_ONLY_FALLBACK_TARGET,
   );
   return {
+    ...(candidate.completionRevision === undefined ? {} : { completionRevision: candidate.completionRevision }),
     artifactNamespace: normalizeBrowserServiceWorkerBrokerString(
       candidate.artifactNamespace,
       "service-worker broker artifact_namespace",
@@ -10450,7 +10462,7 @@ export class BrowserServiceWorkerBrokerStore {
     request: ReturnType<BrowserServiceWorkerBrokerStore["prepareWork"]>,
     work: BrowserServiceWorkerBrokerDescriptor | null,
     handoff: BrowserServiceWorkerBrokerHandoffRecord | null,
-    operation: "persist_work" | "persist_handoff",
+    operation: "persist_work" | "persist_handoff" | "complete_work",
   ): void {
     if (request.capabilityManifestVersion !== registration.capabilityManifestVersion) {
       throw this.operationError(operation, "capability_manifest_mismatch_on_restart",
@@ -10643,19 +10655,28 @@ export class BrowserServiceWorkerBrokerStore {
         this.readWorkFence(transaction, "persist_work", brokerWorkId, (existing, handoff) => {
           this.validateWorkFence(registration, prepared, existing, handoff, "persist_work");
           const fallbackTarget = prepared.fallbackTarget ?? registration.fallbackTarget;
-          if (existing && existing.leaseEpoch === prepared.leaseEpoch &&
-              existing.fallbackTarget === fallbackTarget &&
-              JSON.stringify(existing.metadata) === JSON.stringify(prepared.metadata)) {
+          const replay = existing && existing.leaseEpoch === prepared.leaseEpoch &&
+            existing.fallbackTarget === fallbackTarget &&
+            JSON.stringify(existing.metadata) === JSON.stringify(prepared.metadata);
+          if (replay && existing.completionRevision !== undefined) {
             finish(existing);
             return;
           }
+          const crypto = this.globalObject?.crypto as Pick<Crypto, "randomUUID"> | undefined;
+          const revision = crypto?.randomUUID?.();
+          if (revision !== undefined && !isBrokerCompletionRevision(revision)) {
+            throw this.operationError("persist_work", "serialization_failed",
+              "service-worker broker crypto returned an invalid work revision", brokerWorkId);
+          }
+          if (replay && revision === undefined) { finish(existing); return; }
           const descriptor: BrowserServiceWorkerBrokerDescriptor = {
             ...prepared,
+            ...(revision === undefined ? {} : { completionRevision: revision }),
             createdAtMs: existing?.createdAtMs ?? now,
             fallbackTarget,
             fallbackLaneId: browserServiceWorkerBrokerFallbackLaneId(fallbackTarget),
             requestedLane: BROWSER_SERVICE_WORKER_BROKER_LANE,
-            updatedAtMs: now,
+            updatedAtMs: replay ? existing.updatedAtMs : now,
           };
           this.writeRecord(transaction, `${BROWSER_SERVICE_WORKER_BROKER_WORK_PREFIX}${brokerWorkId}`,
             descriptor, "persist_work", brokerWorkId);
@@ -10663,6 +10684,36 @@ export class BrowserServiceWorkerBrokerStore {
         });
       });
     }, brokerWorkId);
+  }
+
+  /** Remove only the pending descriptor observed before executing the work. */
+  async completeBrokerWork(
+    receipt: Pick<BrowserServiceWorkerBrokerDescriptor, "brokerWorkId" | "leaseEpoch" | "completionRevision">,
+  ): Promise<boolean> {
+    const { brokerWorkId, leaseEpoch, completionRevision } = receipt;
+    const id = normalizeBrowserServiceWorkerBrokerString(brokerWorkId, "service-worker broker broker_work_id");
+    if (!isBrokerCompletionRevision(completionRevision) || !Number.isSafeInteger(leaseEpoch) || leaseEpoch < 0) {
+      throw this.operationError("complete_work", "broker_restart_reconciliation_failed",
+        "completion requires a versioned receipt from persistBrokerWork() or listPendingWork()", id);
+    }
+    return this.transaction("complete_work", "readwrite", (transaction, finish) => {
+      this.readRegistrationInTransaction(transaction, "complete_work", (registration) => {
+        if (!registration) {
+          throw this.operationError("complete_work", "broker_bootstrap_failure",
+            "completion requires an active service-worker broker registration", id);
+        }
+        this.readWorkFence(transaction, "complete_work", id, (work, handoff) => {
+          if (!work || work.completionRevision !== completionRevision || work.leaseEpoch !== leaseEpoch ||
+              (handoff !== null && handoff.leaseEpoch > leaseEpoch)) {
+            finish(false);
+            return;
+          }
+          this.validateWorkFence(registration, work, work, handoff, "complete_work");
+          transaction.delete(`${BROWSER_SERVICE_WORKER_BROKER_WORK_PREFIX}${id}`);
+          finish(true);
+        });
+      });
+    }, id);
   }
 
   async deleteBrokerWork(brokerWorkId: string): Promise<boolean> {

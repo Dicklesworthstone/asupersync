@@ -11,7 +11,7 @@
  * These are not browser-engine or packaged-WASM tests.
  */
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, webcrypto } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { createRequire, stripTypeScriptTypes } from "node:module";
 import { dirname, resolve } from "node:path";
@@ -1163,6 +1163,7 @@ async function brokerEnvironment(backend) {
   const env = await environment(backend);
   const host = {
     ...env.host,
+    crypto: webcrypto,
     window: undefined,
     document: undefined,
     clients: { claim: async () => undefined, matchAll: async () => [] },
@@ -1180,6 +1181,51 @@ async function brokerEnvironment(backend) {
 }
 
 for (const backend of ["indexeddb", "localstorage"]) {
+  test(`${backend}: completion compares the durable revision across restarts and ID reuse`, async () => {
+    const { first, broker } = await brokerEnvironment(backend);
+    const request = brokerWork();
+    const original = await first.persistBrokerWork(request);
+    assert.equal(typeof original.completionRevision, "string");
+    assert.equal((await broker().listPendingWork())[0].completionRevision, original.completionRevision);
+    assert.equal((await broker().persistBrokerWork(request)).completionRevision, original.completionRevision);
+    await first.deleteBrokerWork(original.brokerWorkId);
+    const recreated = await broker().persistBrokerWork(request);
+    assert.equal(recreated.createdAtMs, original.createdAtMs, "clock and work identity deliberately repeat");
+    assert.notEqual(recreated.completionRevision, original.completionRevision);
+    assert.equal(await broker().completeBrokerWork(original), false);
+    const updated = await broker().persistBrokerWork(brokerWork({ metadata: { progress: "updated" } }));
+    assert.equal(await first.completeBrokerWork(recreated), false);
+    assert.deepEqual((await Promise.all([first.completeBrokerWork(updated), broker().completeBrokerWork(updated)])).sort(),
+      [false, true]);
+    assert.equal((await broker().listPendingWork()).length, 0);
+  });
+
+  test(`${backend}: completion respects newer handoffs and leaves restart evidence intact`, async () => {
+    const { first, broker } = await brokerEnvironment(backend);
+    const work = await first.persistBrokerWork(brokerWork());
+    const receipt = await first.persistDurableHandoff(brokerWork({ leaseEpoch: 2 }));
+    assert.equal(await broker().completeBrokerWork(work), false);
+    const current = await first.persistBrokerWork(brokerWork({ leaseEpoch: 2 }));
+    assert.equal(await first.completeBrokerWork({ ...current, leaseEpoch: 1 }), false);
+    assert.equal(await broker().completeBrokerWork(current), true);
+    assert.deepEqual(brokerRecord((await first.listDurableHandoffs())[0]), brokerRecord(receipt));
+  });
+
+  test(`${backend}: unversioned descriptors stay readable and can be upgraded before execution`, async () => {
+    const { first, broker, brokerHost } = await brokerEnvironment(backend);
+    const upgraded = broker();
+    delete brokerHost.crypto;
+    const old = await first.persistBrokerWork(brokerWork());
+    assert.equal(old.completionRevision, undefined);
+    await assert.rejects(first.completeBrokerWork(old), error => brokerError(error, "broker_restart_reconciliation_failed"));
+    assert.equal((await first.listPendingWork()).length, 1);
+    brokerHost.crypto = webcrypto;
+    const current = await upgraded.persistBrokerWork(brokerWork());
+    assert.equal(current.updatedAtMs, old.updatedAtMs);
+    assert.equal(typeof current.completionRevision, "string");
+    assert.equal(await upgraded.completeBrokerWork(current), true);
+  });
+
   test(`${backend}: broker rejects stale work without replacing newer durable progress`, async () => {
     const { first, broker } = await brokerEnvironment(backend);
     await first.persistBrokerWork(brokerWork({ leaseEpoch: 2, metadata: { progress: "new owner" } }));

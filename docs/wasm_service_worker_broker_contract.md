@@ -118,7 +118,21 @@ descriptor or execute it. Both records remain available for application-owned
 reconciliation, including an older handoff retained beside a newer descriptor.
 The SDK does not allocate leases or promise exactly-once delivery. Lifecycle
 states are recorded labels; the embedding application still owns admission and
-execution policy. `deleteBrokerWork()`, `clearRegistration()`, and
+execution policy.
+
+Workers can retain the descriptor returned by `persistBrokerWork()` or
+`listPendingWork()` before starting work and pass it to `completeBrokerWork()`
+after finishing. Completion removes the matching pending descriptor in one
+transaction. It returns `false` for a missing or superseded descriptor or a
+newer handoff epoch. The handoff record remains available for reconciliation.
+A changed descriptor and a deleted then recreated work ID receive fresh opaque
+revisions, even at the same clock reading and epoch. Identical replays preserve
+the revision across restarts. Hosts with `crypto.randomUUID()` can upgrade
+legacy descriptors by replaying the request before execution. Hosts without
+this capability can still persist and list work. Completion requires a versioned
+receipt. It records no tombstone and leaves future readmission to the application.
+
+`deleteBrokerWork()`, `clearRegistration()`, and
 `clearBrokerState()` remain explicit, unconditional cleanup operations rather
 than lease-fenced worker completion.
 
