@@ -6921,6 +6921,13 @@ function startBrowserOperation<T>(
   const controller = new AbortController();
   const signal = controller.signal;
   const abort = controller.abort.bind(controller);
+  // Capture native accessors before work can shadow signal.reason. A matching
+  // name or cause on an arbitrary exception is not proof of cancellation.
+  const signalPrototype = typeof AbortSignal === "function" ? AbortSignal.prototype : null;
+  const readSignalAborted = signalPrototype === null ? undefined
+    : Object.getOwnPropertyDescriptor(signalPrototype, "aborted")?.get?.bind(signal);
+  const readSignalReason = signalPrototype === null ? undefined
+    : Object.getOwnPropertyDescriptor(signalPrototype, "reason")?.get?.bind(signal);
   if (unavailable()) return OutcomeFactory.err("capability_denied", "transient", "Operation owner is closing or unavailable.");
   // A synchronous ABI close can remove the child's live lineage before its
   // JavaScript callback finishes. Ancestors must still be able to join it.
@@ -6946,8 +6953,16 @@ function startBrowserOperation<T>(
         const value = await work(signal);
         if (cancelKind === null) return OutcomeFactory.ok(value);
       }
-    } catch {
-      if (cancelKind === null) return { outcome: "panicked", message: "Browser operation threw or rejected." };
+    } catch (error) {
+      let ownCancellation = false;
+      if (cancelKind !== null && readSignalAborted && readSignalReason) {
+        try {
+          ownCancellation = readSignalAborted() === true && error === readSignalReason();
+        } catch {
+          // An unverifiable rejection must not hide a callback panic.
+        }
+      }
+      if (!ownCancellation) return { outcome: "panicked", message: "Browser operation threw or rejected." };
     } finally {
       bodyDone = true;
     }
@@ -7579,6 +7594,9 @@ export class RegionHandle {
    * its returned promise (including finally blocks) before retiring the task.
    * Return all work that needs to be joined. A callback that ignores abort
    * can keep closeAsync pending, as can awaiting its own owner's closeAsync.
+   * Cancellation dominates a late returned value. A thrown or rejected value,
+   * including an asynchronous cleanup failure, remains Panicked unless it is
+   * the exact reason from this operation's own AbortSignal.
    * Synchronous close requests cancellation without waiting for JS cleanup.
    */
   runTask<T>(

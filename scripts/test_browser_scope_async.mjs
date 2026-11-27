@@ -569,6 +569,115 @@ for (const owner of ["scope", "runtime"]) {
   });
 }
 
+
+for (const owner of ["manual", "scope", "runtime"]) {
+  test("runTask preserves a panic during asynchronous cleanup after " + owner + " cancellation", async t => {
+    const started = deferred(), sawAbort = deferred(), cleanup = deferred();
+    let closedRuntime = false, stopped = false, inspected = 0;
+    const { runtime, snapshot } = await fixture(t, {
+      beforeCleanup: () => cleanup.resolve(), runtimeAlreadyClosed: () => closedRuntime,
+    });
+    const scope = unwrap(runtime.enterScope("cancelled-operation-panic"));
+    const child = unwrap(scope.enterScope("cancelled-operation-child"));
+    const thrown = Object.freeze({
+      get name() { inspected++; throw new Error("do not classify by exception name"); },
+      get cause() { inspected++; throw new Error("do not inspect arbitrary causes"); },
+      toString() { inspected++; throw new Error("do not stringify a callback failure"); },
+    });
+    const handle = unwrap(child.runTask(async signal => {
+      started.resolve();
+      try {
+        await new Promise(resolve => signal.addEventListener("abort", resolve, { once: true }));
+      } finally {
+        sawAbort.resolve();
+        await cleanup.promise;
+        throw thrown;
+      }
+    }));
+    await bounded(started.promise);
+    const stopping = (owner === "manual" ? handle.cancel()
+      : (owner === "runtime" ? runtime : scope).closeAsync()).then(result => {
+      stopped = true;
+      if (owner === "runtime") closedRuntime = result.outcome === "ok";
+      return result;
+    });
+    await bounded(sawAbort.promise);
+    await nextTurn();
+    assert.equal(stopped, false, "retirement must join the pending finally block");
+    assert.equal(snapshot().tasks.total, 1, "the callback still owns its ledger entry");
+    cleanup.resolve();
+    const outcome = await bounded(handle.completed);
+    assert.equal(outcome.outcome, "panicked");
+    assert.equal(outcome.message, "Browser operation threw or rejected.");
+    unwrap(await bounded(stopping));
+    assert.equal(inspected, 0);
+    assert.equal(snapshot().tasks.total, 0, "the panic must still retire the admitted task");
+  });
+}
+
+for (const source of ["reason", "throwIfAborted"]) {
+  test("runTask preserves cooperative cancellation from its native signal " + source, async t => {
+    const started = deferred();
+    const { runtime, snapshot } = await fixture(t);
+    const scope = unwrap(runtime.enterScope("operation-signal-rejection"));
+    const handle = unwrap(scope.runTask(async signal => {
+      started.resolve(signal);
+      await new Promise(resolve => signal.addEventListener("abort", resolve, { once: true }));
+      if (source === "reason") throw signal.reason;
+      signal.throwIfAborted();
+      assert.fail("the private signal must be aborted");
+    }));
+    const signal = await bounded(started.promise);
+    unwrap(await bounded(handle.cancel()));
+    const outcome = await bounded(handle.completed);
+    assert.equal(signal.aborted, true);
+    assert.equal(signal.reason.name, "AbortError", "native default abort semantics are retained");
+    assert.equal(outcome.outcome, "cancelled");
+    assert.equal(outcome.cancellation.kind, "operation_cancel");
+    assert.equal(snapshot().tasks.total, 0);
+  });
+}
+
+test("runTask cannot disguise a cleanup panic with a shadowed signal reason", async t => {
+  const started = deferred();
+  let reasonReads = 0;
+  const { runtime, snapshot } = await fixture(t);
+  const scope = unwrap(runtime.enterScope("operation-forged-abort-reason"));
+  const forged = Object.freeze({ name: "AbortError", message: "not the private signal reason" });
+  const handle = unwrap(scope.runTask(async signal => {
+    Object.defineProperty(signal, "reason", { get() { reasonReads++; return forged; } });
+    started.resolve();
+    await new Promise(resolve => signal.addEventListener("abort", resolve, { once: true }));
+    throw forged;
+  }));
+  await bounded(started.promise);
+  unwrap(await bounded(handle.cancel()));
+  assert.equal((await bounded(handle.completed)).outcome, "panicked");
+  assert.equal(reasonReads, 0, "classification must use the captured native reason accessor");
+  assert.equal(snapshot().tasks.total, 0);
+});
+
+test("runTask keeps typed Outcomes as values and cancellation dominates late returns", async t => {
+  const { runtime, snapshot } = await fixture(t);
+  const scope = unwrap(runtime.enterScope("operation-outcome-values"));
+  const value = Object.freeze({ outcome: "panicked", message: "ordinary application data" });
+  const ready = unwrap(scope.runTask(() => value));
+  assert.strictEqual(unwrap(await bounded(ready.completed)), value);
+
+  const started = deferred();
+  const late = unwrap(scope.runTask(async signal => {
+    started.resolve();
+    await new Promise(resolve => signal.addEventListener("abort", resolve, { once: true }));
+    return value;
+  }));
+  await bounded(started.promise);
+  unwrap(await bounded(late.cancel()));
+  const outcome = await bounded(late.completed);
+  assert.equal(outcome.outcome, "cancelled");
+  assert.equal(outcome.cancellation.kind, "operation_cancel");
+  assert.equal(snapshot().tasks.total, 0);
+});
+
 test("runTask retains a refused publication and retries only its ledger release", async t => {
   let attempts = 0, executions = 0;
   const { runtime, snapshot } = await fixture(t, {
