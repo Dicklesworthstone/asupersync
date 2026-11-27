@@ -24,6 +24,45 @@ fn root_reexport_derives_the_public_owned_trait() {
     );
 }
 
+#[derive(Debug, Default, Eq, PartialEq, asupersync::ProtoMessage)]
+struct Envelope {
+    #[proto(message, optional, tag = 1)]
+    child: Option<PublicDerive>,
+}
+
+#[test]
+fn optional_message_survives_a_failed_incremental_merge() {
+    let limits = ProtobufWireLimits::default();
+    let child = PublicDerive {
+        name: "retained".to_owned(),
+        values: vec![1],
+    };
+    let mut envelope = Envelope { child: Some(child) };
+
+    // The wrong wire type fails before reading any child fields.
+    assert!(envelope.merge_from_bytes(&[0x08, 1], limits).is_err());
+    let present = envelope.child.as_ref().expect("existing optional child");
+    assert_eq!(present.name, "retained");
+    assert_eq!(present.values, [1]);
+
+    // A valid repeated item precedes a truncated string inside the child.
+    let partial = [0x0a, 5, 0x10, 7, 0x0a, 2, b'x'];
+    assert!(envelope.merge_from_bytes(&partial, limits).is_err());
+    envelope
+        .merge_from_bytes(&[0x0a, 2, 0x10, 3], limits)
+        .expect("resume with a valid fragment");
+    let present = envelope.child.unwrap();
+    assert_eq!(present.name, "retained");
+    assert_eq!(present.values, [1, 7, 3]);
+
+    let mut empty = Envelope::default();
+    assert!(empty.merge_from_bytes(&partial, limits).is_err());
+    assert!(
+        empty.child.is_none(),
+        "failed first occurrence stays absent"
+    );
+}
+
 #[test]
 fn authoring_contract_pins_grammar_fixtures_and_keep_boundary() {
     let docs = include_str!("../docs/protobuf_owned_authoring.md");

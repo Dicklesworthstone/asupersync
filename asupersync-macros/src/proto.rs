@@ -1049,14 +1049,17 @@ fn decode_field(spec: &FieldSpec) -> Result<TokenStream2> {
                 (Cardinality::Optional, Kind::Message) => {
                     let inner = single_type_argument(&spec.ty, "Option", span)?;
                     quote! {
-                        let mut __proto_nested: #inner =
-                            self.#ident.take().unwrap_or_default();
-                        ::asupersync::grpc::protobuf::merge_nested_message(
-                            &mut __proto_nested,
-                            field,
-                            decoder,
-                        )?;
-                        self.#ident = ::core::option::Option::Some(__proto_nested);
+                        if let ::core::option::Option::Some(present) = &mut self.#ident {
+                            ::asupersync::grpc::protobuf::merge_nested_message(
+                                present, field, decoder,
+                            )?;
+                        } else {
+                            let mut __proto_nested: #inner = ::core::default::Default::default();
+                            ::asupersync::grpc::protobuf::merge_nested_message(
+                                &mut __proto_nested, field, decoder,
+                            )?;
+                            self.#ident = ::core::option::Option::Some(__proto_nested);
+                        }
                     }
                 }
                 (Cardinality::Repeated, Kind::Message) => {
