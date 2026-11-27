@@ -58,6 +58,11 @@ impl WaitOptions {
 
 #[derive(Args, Clone, Copy, Debug)]
 pub(super) struct CreateOptions {
+    /// Reopen an existing header-only receiver and empty data inode under the same
+    /// storage ceilings. Explicitly authorize a new pre-handshake attempt budget.
+    /// With --intent, both original slots must still be zero. Never creates files.
+    #[arg(long)]
+    reopen_unstarted: bool,
     /// Lifetime attempts for this receiver, including accepts and failed handshakes.
     #[arg(long)]
     attempts: u32,
@@ -222,7 +227,7 @@ fn execute(
     // target is refused here, before the inbox is loaded, charged or written,
     // so a refusal never strands an empty, unusable pair.
     let targets = [Some(&journal_path), Some(&data_path), intent_path.as_ref()];
-    if create.is_some()
+    if create.is_some_and(|options| !options.reopen_unstarted)
         && targets
             .into_iter()
             .flatten()
@@ -260,22 +265,34 @@ fn execute(
         .ok_or_else(|| invalid("selected inbox missing"))?;
     let (journal, attempts) = match create {
         Some(options) => {
-            // One data entry, not the two aliases used by LiveFileSink. Charge
-            // before any file can be created; never refund an uncertain write.
-            inbox.reserve_private_file(config.max_transfer_bytes, None)?;
+            // The startup scan already counts the original empty data inode
+            // on re-admission. Reserve its full growth but no second entry.
+            let existing = options.reopen_unstarted.then_some(0);
+            inbox.reserve_private_file(config.max_transfer_bytes, existing)?;
             let journal = if let Some(intent) = &intent_path {
-                ReceiverJournalFile::create_new_compact(
-                    &journal_path,
-                    &data_path,
-                    intent,
-                    options.compact_limits(config.max_transfer_bytes)?,
-                )?
+                let limits = options.compact_limits(config.max_transfer_bytes)?;
+                if options.reopen_unstarted {
+                    ReceiverJournalFile::open_unstarted_compact(
+                        &journal_path,
+                        &data_path,
+                        intent,
+                        limits,
+                    )?
+                } else {
+                    ReceiverJournalFile::create_new_compact(
+                        &journal_path,
+                        &data_path,
+                        intent,
+                        limits,
+                    )?
+                }
             } else {
-                ReceiverJournalFile::create_new(
-                    &journal_path,
-                    &data_path,
-                    options.limits(config.max_transfer_bytes)?,
-                )?
+                let limits = options.limits(config.max_transfer_bytes)?;
+                if options.reopen_unstarted {
+                    ReceiverJournalFile::open_unstarted(&journal_path, &data_path, limits)?
+                } else {
+                    ReceiverJournalFile::create_new(&journal_path, &data_path, limits)?
+                }
             };
             (journal, options.attempts)
         }

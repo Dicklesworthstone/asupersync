@@ -976,6 +976,43 @@ fn receiver_snapshot_exhaustion_prevents_data_writes_and_remains_exhausted_on_re
 }
 
 #[test]
+fn killed_before_first_handshake_receiver_can_reopen_empty_inode_and_complete() {
+    let fixture = Fixture::new();
+    let wal = fixture.unique("receiver-wal");
+    let data = fixture.inbox.join("transfer.data");
+    let bytes = b"one original entry";
+    let mut config = fixture.receiver_config(1, bytes.len());
+    config["clients"][0]["max_retained_entries"] = json!(1);
+    let mut receiver = fixture.receiver(&config, &wal, &data, Some(32), 25);
+    assert!(receiver.until("ready")["checkpoint"].is_null());
+    receiver.crash();
+    let inode = std::fs::metadata(&data).unwrap().ino();
+    let header = std::fs::read(&wal).unwrap();
+    let mut command = fixture.receiver_command(&config, &wal, &data, Some((32, 1_048_576)), 25);
+    command.arg("--reopen-unstarted");
+    let mut reopened = fixture.launch(command);
+    let ready = reopened.until("ready");
+    assert!(ready["checkpoint"].is_null());
+    assert_eq!(std::fs::read(&wal).unwrap(), header);
+    let address = ready["address"].as_str().unwrap().parse().unwrap();
+    let mut sender = fixture.sender(
+        &fixture.sender_config(address, 1, bytes.len()),
+        &fixture.unique("sender-wal"),
+        &fixture.source(bytes),
+        true,
+        25,
+    );
+    let sent = sender.until("send_result");
+    assert!(sender.exit().success());
+    let received = reopened.until("receiver_journal_attempt");
+    assert_eq!(received["checkpoint"]["phase"], "committed");
+    assert_eq!(received["transfer"]["receipt"], sent["transfer"]["receipt"]);
+    reopened.stop(true);
+    assert_eq!(std::fs::read(&data).unwrap(), bytes);
+    assert_eq!(std::fs::metadata(&data).unwrap().ino(), inode);
+}
+
+#[test]
 fn preflight_never_recreates_history_and_tls_refusal_never_creates_a_checkpoint() {
     let fixture = Fixture::new();
     let wal = fixture.unique("receiver-wal");

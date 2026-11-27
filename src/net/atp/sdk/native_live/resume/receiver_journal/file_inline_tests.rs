@@ -16,6 +16,85 @@ fn limits() -> ReceiverFileLimits {
         max_journal_bytes: 65536,
     }
 }
+#[test]
+fn unstarted_open_keeps_pristine_files_and_refuses_all_started_evidence() {
+    for compact in [false, true] {
+        for evidence in ["none", "history", "torn", "data", "budget", "held"] {
+            let (journal, data) = files();
+            let intent = journal.with_extension("intent");
+            let open = |limits: ReceiverFileLimits| {
+                if compact {
+                    ReceiverJournalFile::open_unstarted_compact(
+                        &journal,
+                        &data,
+                        &intent,
+                        ReceiverCompactFileLimits {
+                            max_data_bytes: limits.max_data_bytes,
+                            max_snapshots: limits.max_snapshots,
+                            max_journal_bytes: limits.max_journal_bytes,
+                        },
+                    )
+                } else {
+                    ReceiverJournalFile::open_unstarted(&journal, &data, limits)
+                }
+            };
+            let mut limits = limits();
+            assert!(open(limits).is_err());
+            assert!(!journal.exists());
+            let store = if compact {
+                ReceiverJournalFile::create_new_compact(
+                    &journal,
+                    &data,
+                    &intent,
+                    ReceiverCompactFileLimits {
+                        max_data_bytes: limits.max_data_bytes,
+                        max_snapshots: limits.max_snapshots,
+                        max_journal_bytes: limits.max_journal_bytes,
+                    },
+                )
+                .unwrap()
+            } else {
+                ReceiverJournalFile::create_new(&journal, &data, limits).unwrap()
+            };
+            match evidence {
+                "history" => store.storage.append(checkpoints().0).unwrap(),
+                "torn" => OpenOptions::new()
+                    .append(true)
+                    .open(&journal)
+                    .unwrap()
+                    .write_all(&[0])
+                    .unwrap(),
+                "data" => append_data(&store, b"x"),
+                "budget" => limits.max_snapshots += 1,
+                "held" => {
+                    assert!(open(limits).is_err());
+                    continue;
+                }
+                _ => {}
+            }
+            drop(store);
+            let bytes = std::fs::read(&journal).unwrap();
+            let inode = std::fs::metadata(&data).unwrap().ino();
+            if evidence == "none" {
+                let reopened = open(limits).unwrap();
+                assert!(reopened.latest.is_none());
+                drop(reopened);
+                if compact {
+                    let file = OpenOptions::new().write(true).open(&intent).unwrap();
+                    use std::os::unix::fs::FileExt;
+                    file.write_all_at(&[1], file.metadata().unwrap().len() - 1)
+                        .unwrap();
+                    assert!(open(limits).is_err());
+                }
+            } else {
+                assert!(open(limits).is_err(), "{evidence}");
+            }
+            assert_eq!(std::fs::read(&journal).unwrap(), bytes);
+            assert_eq!(std::fs::metadata(&data).unwrap().ino(), inode);
+        }
+    }
+}
+
 fn checkpoints() -> (ReceiverCheckpoint, ReceiverCheckpoint, ReceiverCheckpoint) {
     let hello = Hello {
         nonce: [9; 32],

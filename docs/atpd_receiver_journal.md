@@ -45,6 +45,15 @@ atpd-live resume-receiver \
   --retry-delay-ms 250 --proof-recovery-secs 30
 ```
 
+If the receiver exits after creating its files and before recording the first
+authenticated handshake, rerun the original `receive-journaled` command with
+`--reopen-unstarted`. Use the original storage limits and paths, including
+`--intent` for a compact journal. This opens the original locked inodes and
+requires a valid header, zero data bytes, and (for compact journals) pristine
+intent slots. The supplied client authorization and `--attempts` apply afresh:
+the header contains no session identity or count of pre-handshake failures.
+A receiver with a recorded checkpoint continues through `resume-receiver`.
+
 If initial binding used port zero, preserve the actual `ready.address` in the
 receiver settings before restarting. The sender retains its original endpoint;
 recovery does not redirect it. Missing, torn, unresolved, identity-mismatched, or

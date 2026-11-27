@@ -45,7 +45,7 @@ type Failure = (io::ErrorKind, Option<i32>);
 type Job<T> = Pin<Box<dyn Future<Output = io::Result<T>> + Send>>;
 
 /// Explicit persistent storage ceilings; neither is reset on reopen.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReceiverFileLimits {
     /// Maximum data-file length, independent of the journal byte budget.
     pub max_data_bytes: u64,
@@ -180,13 +180,24 @@ struct Storage {
     limits: ReceiverFileLimits,
     state: Mutex<State>,
 }
+#[derive(Clone, Copy)]
+enum OpenMode {
+    Create(ReceiverFileLimits),
+    Resume,
+    Unstarted(ReceiverFileLimits),
+}
+
 impl Storage {
     fn open(
         journal_path: &Path,
         data_path: &Path,
-        create: Option<ReceiverFileLimits>,
+        mode: OpenMode,
         intent_path: Option<&Path>,
     ) -> io::Result<Self> {
+        let create = match mode {
+            OpenMode::Create(limits) => Some(limits),
+            OpenMode::Resume | OpenMode::Unstarted(_) => None,
+        };
         let validate_limits = |limits: ReceiverFileLimits| {
             if intent_path.is_some() {
                 ReceiverCompactFileLimits {
@@ -321,6 +332,19 @@ impl Storage {
             return Err(invalid());
         }
         let slots = intent.as_ref().map(compact::Intent::slots).transpose()?;
+        if let OpenMode::Unstarted(expected) = mode {
+            // Admit only the pristine state created before the first authenticated
+            // checkpoint. Never interpret partial history or a prepared epoch as empty.
+            if length != header_length as u64
+                || metadata.len() != 0
+                || limits != expected
+                || slots.as_ref().is_some_and(|slots| {
+                    slots.iter().any(|slot| slot.iter().any(|byte| *byte != 0))
+                })
+            {
+                return Err(invalid());
+            }
+        }
         let max_checkpoint = if intent.is_some() {
             compact::MAX_CHECKPOINT
         } else {
@@ -369,7 +393,7 @@ impl Storage {
             state.records += 1;
             state.bytes += record.len() as u64 + 32;
         }
-        if create.is_none() && state.latest.is_none() {
+        if matches!(mode, OpenMode::Resume) && state.latest.is_none() {
             return Err(invalid());
         }
         identity(&state.file, &journal_path, &journal_directory, true)?;
@@ -635,7 +659,12 @@ impl ReceiverJournalFile {
     /// Create both private files without replacing either path. Partial failures retain files.
     pub fn create_new(journal: &Path, data: &Path, limits: ReceiverFileLimits) -> io::Result<Self> {
         Ok(Self {
-            storage: Arc::new(Storage::open(journal, data, Some(limits), None)?),
+            storage: Arc::new(Storage::open(
+                journal,
+                data,
+                OpenMode::Create(limits),
+                None,
+            )?),
             pending: None,
             latest: None,
             failure: None,
@@ -644,14 +673,7 @@ impl ReceiverJournalFile {
     /// Read the entire protected WAL and bind the exact original data inode. No repairs.
     /// Payload revalidation occurs in bind_restored before a socket is created.
     pub fn open_existing(journal: &Path, data: &Path) -> io::Result<Self> {
-        let storage = Arc::new(Storage::open(journal, data, None, None)?);
-        let latest = storage.state.lock().latest.clone();
-        Ok(Self {
-            storage,
-            pending: None,
-            latest,
-            failure: None,
-        })
+        Self::reopen(journal, data, None, OpenMode::Resume)
     }
     /// Create the compact metadata profile with a third, fixed-size intent file.
     ///
@@ -676,7 +698,7 @@ impl ReceiverJournalFile {
             storage: Arc::new(Storage::open(
                 journal,
                 data,
-                Some(limits.storage_limits()),
+                OpenMode::Create(limits.storage_limits()),
                 Some(intent),
             )?),
             pending: None,
@@ -695,7 +717,48 @@ impl ReceiverJournalFile {
     /// tail byte before binding a socket. Incomplete or corrupted history is
     /// refused; neither snapshot nor byte budgets are reset.
     pub fn open_existing_compact(journal: &Path, data: &Path, intent: &Path) -> io::Result<Self> {
-        let storage = Arc::new(Storage::open(journal, data, None, Some(intent))?);
+        Self::reopen(journal, data, Some(intent), OpenMode::Resume)
+    }
+
+    /// Re-admit a V1 file pair after a crash before its first checkpoint.
+    ///
+    /// The journal must contain only its valid creation header, its bound data
+    /// inode must be empty, and all three supplied ceilings must match the header.
+    /// Missing, partial or started histories are refused without modifying them.
+    /// Call `bind_new` with an explicitly authorized client and attempt budget.
+    /// Pre-handshake attempts have no durable counter in this profile.
+    pub fn open_unstarted(
+        journal: &Path,
+        data: &Path,
+        limits: ReceiverFileLimits,
+    ) -> io::Result<Self> {
+        Self::reopen(journal, data, None, OpenMode::Unstarted(limits))
+    }
+
+    /// Re-admit a header-only compact journal under the same conditions as
+    /// [`Self::open_unstarted`]. Both slots of its original intent inode
+    /// must still contain only their initial zero bytes.
+    pub fn open_unstarted_compact(
+        journal: &Path,
+        data: &Path,
+        intent: &Path,
+        limits: ReceiverCompactFileLimits,
+    ) -> io::Result<Self> {
+        Self::reopen(
+            journal,
+            data,
+            Some(intent),
+            OpenMode::Unstarted(limits.storage_limits()),
+        )
+    }
+
+    fn reopen(
+        journal: &Path,
+        data: &Path,
+        intent: Option<&Path>,
+        mode: OpenMode,
+    ) -> io::Result<Self> {
+        let storage = Arc::new(Storage::open(journal, data, mode, intent)?);
         let latest = storage.state.lock().latest.clone();
         Ok(Self {
             storage,
