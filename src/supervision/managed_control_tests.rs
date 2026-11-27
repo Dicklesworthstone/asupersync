@@ -676,6 +676,7 @@ fn native_stop_child_fences_identity_dependencies_and_permanent_retirement() {
                 let retired = Arc::new(AtomicUsize::new(0));
                 let finalized = Arc::new(AtomicUsize::new(0));
                 let managed = SupervisorBuilder::new("controlled-stop")
+                    .with_restart_policy(policy)
                     .child(deferred("base"))
                     .child(deferred("dependent").depends_on("base"))
                     .child(deferred("peer"))
@@ -779,6 +780,7 @@ fn native_queued_stop_shares_capacity_and_can_be_withdrawn_without_repolling() {
             let (release, released) = std::sync::mpsc::sync_channel(1);
             let released = Arc::new(Mutex::new(released));
             let managed = SupervisorBuilder::new("controlled-stop-queued")
+                .with_restart_policy(RestartPolicy::OneForAll)
                 .child(deferred("target"))
                 .child(deferred("blocker"))
                 .compile()
@@ -1103,6 +1105,7 @@ fn native_failed_stop_preserves_cleanup_failure_and_retires_factory_once() {
                 let retired = Arc::new(AtomicUsize::new(0));
                 let finalized = Arc::new(AtomicUsize::new(0));
                 let managed = SupervisorBuilder::new("controlled-stop-failure")
+                    .with_restart_policy(RestartPolicy::OneForAll)
                     .child(deferred("worker"))
                     .compile()
                     .unwrap()
@@ -1159,5 +1162,651 @@ fn native_failed_stop_preserves_cleanup_failure_and_retires_factory_once() {
                 assert!(cx.checkpoint().is_ok(), "failure stays in the owned subtree");
             });
         }
+    }
+}
+
+#[test]
+fn native_requested_restart_reuses_policy_order_names_and_generation_fences() {
+    for sharded in [false, true] {
+        for policy in [
+            RestartPolicy::OneForOne,
+            RestartPolicy::OneForAll,
+            RestartPolicy::RestForOne,
+        ] {
+            native_case(sharded, move |cx, native| async move {
+                let registry = Arc::new(Mutex::new(crate::cx::registry::NameRegistry::new()));
+                let log = Arc::new(Mutex::new(Vec::<(&'static str, ManagedGeneration)>::new()));
+                let finalized = Arc::new(AtomicUsize::new(0));
+                let expected_drained = match policy {
+                    RestartPolicy::OneForOne => 1,
+                    RestartPolicy::OneForAll => 4,
+                    RestartPolicy::RestForOne => 3,
+                };
+                let (peer_finalized, peer_gate) = oneshot::channel::<()>();
+                let peer_gate = Arc::new(Mutex::new(Some(peer_gate)));
+                let (ready, mut readiness) = mpsc::channel::<(&'static str, u64)>(16);
+                let mut builder = SupervisorBuilder::new("controlled-requested-restart")
+                    .with_restart_policy(policy);
+                let mut bindings = Vec::new();
+                for name in ["first", "middle", "last", "temporary", "dormant"] {
+                    let registration = format!("restart-{name}");
+                    let mut spec = deferred(name).with_registration(NameRegistrationPolicy::Register {
+                        name: registration.clone(),
+                        collision: NameCollisionPolicy::Fail,
+                    });
+                    if name == "middle" {
+                        spec = spec.depends_on("first");
+                    } else if name == "last" {
+                        spec = spec.depends_on("middle");
+                    }
+                    builder = builder.child(spec);
+                    let mode = match name {
+                        "middle" => ManagedRestartMode::Transient,
+                        "temporary" => ManagedRestartMode::Temporary,
+                        _ => ManagedRestartMode::Permanent,
+                    };
+                    let log = Arc::clone(&log);
+                    let registry = Arc::clone(&registry);
+                    let finalized = Arc::clone(&finalized);
+                    let peer_gate = Arc::clone(&peer_gate);
+                    let ready = ready.clone();
+                    bindings.push(ManagedChildBinding::new(
+                        name,
+                        mode,
+                        move |child: Cx, generation: ManagedGeneration| {
+                            assert_eq!(registry.lock().whereis(&registration), Some(generation.task));
+                            if generation.number > 1 {
+                                assert_eq!(
+                                    finalized.load(Ordering::SeqCst),
+                                    expected_drained,
+                                    "all selected old regions close before any factory restarts"
+                                );
+                            }
+                            log.lock().push((name, generation));
+                            let gate = if name == "middle"
+                                && generation.number == 1
+                                && policy != RestartPolicy::OneForOne
+                            {
+                                Some(peer_gate.lock().take().unwrap())
+                            } else {
+                                None
+                            };
+                            let ready = ready.clone();
+                            async move {
+                                let mut cancelled = Box::pin(until_cancelled(&child));
+                                let mut witnessed = false;
+                                let outcome = poll_fn(|task| {
+                                    let result = cancelled.as_mut().poll(task);
+                                    if result.is_pending() && !witnessed {
+                                        witnessed = true;
+                                        ready.try_send((name, generation.number)).unwrap();
+                                    }
+                                    result
+                                })
+                                .await;
+                                if let Some(mut gate) = gate {
+                                    // This is a real sibling REGION finalizer receipt.
+                                    // Joining only the source before reverse drain deadlocks.
+                                    gate.recv_uninterruptible().await.unwrap();
+                                }
+                                outcome
+                            }
+                        },
+                    ));
+                }
+                let managed = builder
+                    .compile()
+                    .unwrap()
+                    .bind_managed_with_registry(bindings, config(policy, 1), Arc::clone(&registry))
+                    .unwrap();
+                let (mut supervisor, control) = managed
+                    .spawn_controlled(&cx, NonZeroUsize::new(2).unwrap())
+                    .unwrap();
+                let mut generations = Vec::new();
+                let mut peer_finalized = Some(peer_finalized);
+                for name in ["first", "middle", "last", "temporary"] {
+                    let generation = control.activate(&cx, name).await.unwrap();
+                    generations.push((name, generation));
+                    let counter = Arc::clone(&finalized);
+                    let peer = (name == "last").then(|| peer_finalized.take().unwrap());
+                    assert!(
+                        native.register_sync_finalizer_for_testing(generation.region, move || {
+                            counter.fetch_add(1, Ordering::SeqCst);
+                            if let Some(peer) = peer {
+                                let _ = peer.send_blocking(());
+                            }
+                        })
+                    );
+                }
+                let mut parked = Vec::new();
+                for _ in 0..4 {
+                    let (name, number) = readiness.recv(&cx).await.unwrap();
+                    assert_eq!(number, 1);
+                    parked.push(name);
+                }
+                parked.sort_unstable();
+                assert_eq!(parked, vec!["first", "last", "middle", "temporary"]);
+                let original = generations[1].1;
+                assert!(matches!(
+                    control.restart_child(&cx, "missing", original).await,
+                    Err(ManagedChildControlError::UnknownChild { .. })
+                ));
+                assert!(matches!(
+                    control.restart_child(&cx, "dormant", original).await,
+                    Err(ManagedChildControlError::NotRunning { .. })
+                ));
+                assert!(matches!(
+                    control.restart_child(&cx, "temporary", generations[3].1).await,
+                    Err(ManagedChildControlError::RestartDisabled { .. })
+                ));
+                assert!(matches!(
+                    control.restart_child(&cx, "middle", generations[0].1).await,
+                    Err(ManagedChildControlError::StaleGeneration { .. })
+                ));
+                assert_eq!(finalized.load(Ordering::SeqCst), 0);
+                let withdrawn = cx.derive_cancel_scope();
+                withdrawn.cancel_with(CancelKind::User, Some("withdraw restart before admission"));
+                assert!(matches!(
+                    control.restart_child(&withdrawn, "middle", original).await,
+                    Err(ManagedChildControlError::Cancelled { may_have_applied: false, .. })
+                ));
+                let replacement = control.restart_child(&cx, "middle", original).await.unwrap();
+                assert_eq!(replacement.number, 2);
+                assert_ne!(replacement.region, original.region);
+                assert_ne!(replacement.task, original.task);
+                assert_eq!(registry.lock().whereis("restart-middle"), Some(replacement.task));
+                let expected = match policy {
+                    RestartPolicy::OneForOne => vec!["middle"],
+                    RestartPolicy::OneForAll => vec!["first", "middle", "last"],
+                    RestartPolicy::RestForOne => vec!["middle", "last"],
+                };
+                let actual: Vec<_> = log
+                    .lock()
+                    .iter()
+                    .filter(|(_, generation)| generation.number == 2)
+                    .map(|(name, _)| *name)
+                    .collect();
+                assert_eq!(actual, expected);
+                assert_eq!(finalized.load(Ordering::SeqCst), expected_drained);
+                assert!(matches!(
+                    control.restart_child(&cx, "middle", original).await,
+                    Err(ManagedChildControlError::StaleGeneration { actual, .. })
+                        if actual == replacement
+                ));
+                assert_eq!(log.lock().len(), 4 + expected.len(), "retry cannot replace successor");
+                supervisor.abort();
+                let report = supervisor.join().await.unwrap();
+                assert_eq!(report.started, (4 + expected.len()) as u64);
+                assert_eq!(report.joined, report.started);
+                assert_eq!(report.restart_batches, 1);
+                assert_eq!(report.escalations, 0);
+                assert!(registry.lock().is_empty());
+                assert!(matches!(
+                    control.restart_child(&cx, "middle", replacement).await,
+                    Err(ManagedChildControlError::Closed)
+                ));
+                assert!(cx.checkpoint().is_ok());
+            });
+        }
+    }
+}
+
+#[test]
+fn native_requested_restart_stop_refusal_drains_and_retires_selected_group() {
+    for sharded in [false, true] {
+        for policy in [
+            RestartPolicy::OneForOne,
+            RestartPolicy::OneForAll,
+            RestartPolicy::RestForOne,
+        ] {
+            native_case(sharded, move |cx, native| async move {
+                let starts = Arc::new(AtomicUsize::new(0));
+                let retired = Arc::new(AtomicUsize::new(0));
+                let finalized = Arc::new(AtomicUsize::new(0));
+                let managed = SupervisorBuilder::new("controlled-restart-stop-refusal")
+                    .with_restart_policy(policy)
+                    .child(deferred("first"))
+                    .child(deferred("middle"))
+                    .child(deferred("last"))
+                    .child(deferred("dormant"))
+                    .compile()
+                    .unwrap()
+                    .bind_managed(
+                        ["first", "middle", "last", "dormant"]
+                            .into_iter()
+                            .map(|name| {
+                                ManagedChildBinding::new(
+                                    name,
+                                    ManagedRestartMode::Permanent,
+                                    TrackedFactory {
+                                        starts: Arc::clone(&starts),
+                                        retired: Arc::clone(&retired),
+                                    },
+                                )
+                            })
+                            .collect(),
+                        config(policy, 0).with_escalation(EscalationPolicy::Stop),
+                    )
+                    .unwrap();
+                let (mut supervisor, control) = managed
+                    .spawn_controlled(&cx, NonZeroUsize::new(2).unwrap())
+                    .unwrap();
+                let mut source = None;
+                for name in ["first", "middle", "last"] {
+                    let generation = control.activate(&cx, name).await.unwrap();
+                    if name == "middle" {
+                        source = Some(generation);
+                    }
+                    let finalized = Arc::clone(&finalized);
+                    assert!(
+                        native.register_sync_finalizer_for_testing(generation.region, move || {
+                            finalized.fetch_add(1, Ordering::SeqCst);
+                        })
+                    );
+                }
+                let source = source.unwrap();
+                assert!(matches!(
+                    control.restart_child(&cx, "middle", source).await,
+                    Err(ManagedChildControlError::RestartRefused {
+                        refusal: BudgetRefusal::WindowExhausted { max_restarts: 0, .. },
+                        ..
+                    })
+                ));
+                let selected = match policy {
+                    RestartPolicy::OneForOne => 1,
+                    RestartPolicy::OneForAll => 3,
+                    RestartPolicy::RestForOne => 2,
+                };
+                assert_eq!(finalized.load(Ordering::SeqCst), selected);
+                assert_eq!(retired.load(Ordering::SeqCst), selected);
+                assert!(matches!(
+                    control.restart_child(&cx, "middle", source).await,
+                    Err(ManagedChildControlError::NotRunning { .. })
+                ));
+                assert!(matches!(
+                    control.activate(&cx, "missing").await,
+                    Err(ManagedActivationError::UnknownChild { .. })
+                ));
+                assert_eq!(starts.load(Ordering::SeqCst), 3, "refused siblings cannot resurrect");
+                control.activate(&cx, "dormant").await.unwrap();
+                supervisor.abort();
+                let report = supervisor.join().await.unwrap();
+                assert_eq!((report.started, report.joined, report.restart_batches), (4, 4, 0));
+                assert_eq!(report.escalations, 0);
+                assert_eq!(retired.load(Ordering::SeqCst), 4);
+                assert_eq!(finalized.load(Ordering::SeqCst), 3);
+                assert!(cx.checkpoint().is_ok(), "Stop keeps parent authority live");
+            });
+        }
+    }
+}
+
+#[test]
+fn native_requested_restart_backoff_cancellation_keeps_cleanup_owned() {
+    for sharded in [false, true] {
+        native_case(sharded, |cx, native| async move {
+            let parent = cx.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+            let starts = Arc::new(AtomicUsize::new(0));
+            let retired = Arc::new(AtomicUsize::new(0));
+            let finalized = Arc::new(AtomicUsize::new(0));
+            let managed = SupervisorBuilder::new("controlled-restart-backoff")
+                .child(deferred("worker"))
+                .compile()
+                .unwrap()
+                .bind_managed(
+                    vec![ManagedChildBinding::new(
+                        "worker",
+                        ManagedRestartMode::Transient,
+                        TrackedFactory {
+                            starts: Arc::clone(&starts),
+                            retired: Arc::clone(&retired),
+                        },
+                    )],
+                    config(RestartPolicy::OneForOne, 8)
+                        .with_backoff(BackoffStrategy::Fixed(Duration::from_secs(60))),
+                )
+                .unwrap();
+            let (mut supervisor, control) = managed
+                .spawn_controlled(parent.cx(), NonZeroUsize::new(1).unwrap())
+                .unwrap();
+            let generation = control.activate(&cx, "worker").await.unwrap();
+            let finalizer = Arc::clone(&finalized);
+            assert!(
+                native.register_sync_finalizer_for_testing(generation.region, move || {
+                    finalizer.fetch_add(1, Ordering::SeqCst);
+                })
+            );
+            let timer = cx.timer_driver().expect("native runtime timer");
+            let before = timer.pending_count();
+            let request_cx = cx.derive_cancel_scope();
+            let mut restart = Box::pin(control.restart_child(&request_cx, "worker", generation));
+            poll_fn(|task| {
+                assert!(restart.as_mut().poll(task).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            let witness_deadline = cx.now() + Duration::from_secs(5);
+            while timer.pending_count() == before {
+                assert!(cx.now() < witness_deadline, "backoff timer was not registered");
+                crate::runtime::yield_now().await;
+            }
+            assert!(
+                timer.next_deadline().unwrap() > cx.now() + Duration::from_secs(30),
+                "the controller is parked on its actual 60-second backoff"
+            );
+            assert_eq!(finalized.load(Ordering::SeqCst), 1);
+            assert_eq!(starts.load(Ordering::SeqCst), 1);
+            request_cx.cancel_with(CancelKind::User, Some("stop observing owned restart backoff"));
+            assert!(matches!(
+                restart.await,
+                Err(ManagedChildControlError::Cancelled { may_have_applied: true, .. })
+            ));
+            assert_eq!(retired.load(Ordering::SeqCst), 0, "caller cancellation does not retire controller work");
+            parent.cancel(CancelReason::user("cancel actual restart backoff")).unwrap();
+            let report = supervisor.join().await.unwrap();
+            assert!(report.outcome.is_cancelled(), "{report:?}");
+            assert_eq!((report.started, report.joined, report.restart_batches), (1, 1, 0));
+            assert_eq!(starts.load(Ordering::SeqCst), 1, "parent cancellation forbids resurrection");
+            assert_eq!(retired.load(Ordering::SeqCst), 1);
+            assert_eq!(timer.pending_count(), before, "backoff registration is withdrawn");
+            parent.close().await.unwrap();
+            assert!(cx.checkpoint().is_ok());
+        });
+    }
+}
+
+#[test]
+fn native_requested_restarts_consume_intensity_and_escalate_once() {
+    for sharded in [false, true] {
+        native_case(sharded, |cx, _| async move {
+            let parent = cx.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+            let starts = Arc::new(AtomicUsize::new(0));
+            let retired = Arc::new(AtomicUsize::new(0));
+            let managed = SupervisorBuilder::new("controlled-restart-intensity")
+                .child(deferred("worker"))
+                .compile()
+                .unwrap()
+                .bind_managed(
+                    vec![ManagedChildBinding::new(
+                        "worker",
+                        ManagedRestartMode::Transient,
+                        TrackedFactory {
+                            starts: Arc::clone(&starts),
+                            retired: Arc::clone(&retired),
+                        },
+                    )],
+                    config(RestartPolicy::OneForOne, 1)
+                        .with_escalation(EscalationPolicy::Escalate),
+                )
+                .unwrap();
+            let (mut supervisor, control) = managed
+                .spawn_controlled(parent.cx(), NonZeroUsize::new(1).unwrap())
+                .unwrap();
+            let first = control.activate(&cx, "worker").await.unwrap();
+            let second = control.restart_child(&cx, "worker", first).await.unwrap();
+            assert!(matches!(
+                control.restart_child(&cx, "worker", second).await,
+                Err(ManagedChildControlError::RestartRefused {
+                    refusal: BudgetRefusal::WindowExhausted { max_restarts: 1, .. },
+                    ..
+                })
+            ));
+            let report = supervisor.join().await.unwrap();
+            assert!(matches!(
+                report.outcome,
+                Outcome::Err(ManagedSupervisorError::RestartLimit { .. })
+            ));
+            assert_eq!((report.started, report.joined, report.restart_batches), (2, 2, 1));
+            assert_eq!(report.escalations, 1);
+            assert_eq!(starts.load(Ordering::SeqCst), 2);
+            assert_eq!(retired.load(Ordering::SeqCst), 1);
+            parent.close().await.unwrap();
+            assert!(cx.checkpoint().is_ok(), "escalation stays in the controller parent");
+        });
+    }
+}
+
+#[test]
+fn native_requested_restart_uses_shared_allowance_and_refusal_fence() {
+    use crate::cx::dynamic_supervisor::{SharedRestartConfig, SharedRestartDomain};
+
+    for sharded in [false, true] {
+        native_case(sharded, |cx, _| async move {
+            let domain = Arc::new(SharedRestartDomain::new(
+                SharedRestartConfig::new(1, Duration::from_secs(60))
+                    .with_backoff(BackoffStrategy::None),
+            ));
+            let starts = Arc::new(AtomicUsize::new(0));
+            let retired = Arc::new(AtomicUsize::new(0));
+            let mut managed = SupervisorBuilder::new("controlled-restart-shared")
+                .child(deferred("worker"))
+                .compile()
+                .unwrap()
+                .bind_managed(
+                    vec![ManagedChildBinding::new(
+                        "worker",
+                        ManagedRestartMode::Transient,
+                        TrackedFactory {
+                            starts: Arc::clone(&starts),
+                            retired: Arc::clone(&retired),
+                        },
+                    )],
+                    config(RestartPolicy::OneForOne, 8),
+                )
+                .unwrap();
+            managed.set_shared_restarts(Arc::clone(&domain));
+            let (mut supervisor, control) = managed
+                .spawn_controlled(&cx, NonZeroUsize::new(1).unwrap())
+                .unwrap();
+            let first = control.activate(&cx, "worker").await.unwrap();
+            let second = control.restart_child(&cx, "worker", first).await.unwrap();
+            assert_eq!(domain.status().admitted, 1);
+            assert!(matches!(domain.admit(), RestartVerdict::Denied { .. }));
+            assert!(matches!(
+                control.restart_child(&cx, "worker", second).await,
+                Err(ManagedChildControlError::Closed)
+            ));
+            let report = supervisor.join().await.unwrap();
+            assert!(matches!(
+                report.outcome,
+                Outcome::Err(ManagedSupervisorError::SharedRestartLimit { .. })
+            ));
+            assert_eq!((report.started, report.joined, report.restart_batches), (2, 2, 1));
+            assert_eq!(domain.status().admitted, 1, "no private manual-restart allowance");
+            assert_eq!(starts.load(Ordering::SeqCst), 2);
+            assert_eq!(retired.load(Ordering::SeqCst), 1);
+            assert!(cx.checkpoint().is_ok());
+        });
+    }
+}
+
+#[test]
+fn native_requested_restart_optional_dependency_skip_settles_without_replacement() {
+    for sharded in [false, true] {
+        native_case(sharded, |cx, native| async move {
+            let starts = Arc::new(AtomicUsize::new(0));
+            let retired = Arc::new(AtomicUsize::new(0));
+            let (release_base, base_gate) = oneshot::channel();
+            let base_gate = Arc::new(Mutex::new(Some(base_gate)));
+            let managed = SupervisorBuilder::new("controlled-restart-optional")
+                .child(deferred("base"))
+                .child(deferred("worker").depends_on("base").with_required(false))
+                .compile()
+                .unwrap()
+                .bind_managed(
+                    vec![
+                        ManagedChildBinding::new(
+                            "base",
+                            ManagedRestartMode::Temporary,
+                            move |child: Cx, _: ManagedGeneration| {
+                                let mut gate = base_gate.lock().take().unwrap();
+                                async move {
+                                    gate.recv(&child).await.unwrap();
+                                    Outcome::<(), &'static str>::Ok(())
+                                }
+                            },
+                        ),
+                        ManagedChildBinding::new(
+                            "worker",
+                            ManagedRestartMode::Transient,
+                            TrackedFactory {
+                                starts: Arc::clone(&starts),
+                                retired: Arc::clone(&retired),
+                            },
+                        ),
+                    ],
+                    config(RestartPolicy::OneForOne, 8),
+                )
+                .unwrap();
+            let (mut supervisor, control) = managed
+                .spawn_controlled(&cx, NonZeroUsize::new(1).unwrap())
+                .unwrap();
+            let base = control.activate(&cx, "base").await.unwrap();
+            let worker = control.activate(&cx, "worker").await.unwrap();
+            let (closed, mut base_closed) = oneshot::channel();
+            assert!(
+                native.register_sync_finalizer_for_testing(base.region, move || {
+                    closed.send_blocking(()).unwrap();
+                })
+            );
+            release_base.send_blocking(()).unwrap();
+            base_closed.recv(&cx).await.unwrap();
+            assert!(matches!(
+                control.restart_child(&cx, "worker", worker).await,
+                Err(ManagedChildControlError::RestartFailed { .. })
+            ));
+            assert_eq!(starts.load(Ordering::SeqCst), 1);
+            assert_eq!(retired.load(Ordering::SeqCst), 1);
+            assert!(matches!(
+                control.activate(&cx, "missing").await,
+                Err(ManagedActivationError::UnknownChild { .. })
+            ));
+            drop(control);
+            let report = supervisor.join().await.unwrap();
+            assert!(report.outcome.is_ok(), "{report:?}");
+            assert_eq!((report.started, report.joined, report.restart_batches), (2, 2, 0));
+        });
+    }
+}
+
+#[test]
+fn native_requested_restart_cleanup_failure_settles_after_shutdown() {
+    for sharded in [false, true] {
+        native_case(sharded, |cx, native| async move {
+            let parent = cx.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+            let starts = Arc::new(AtomicUsize::new(0));
+            let retired = Arc::new(AtomicUsize::new(0));
+            let finalized = Arc::new(AtomicUsize::new(0));
+            let managed = SupervisorBuilder::new("controlled-restart-cleanup-failure")
+                .child(deferred("worker"))
+                .compile()
+                .unwrap()
+                .bind_managed(
+                    vec![ManagedChildBinding::new(
+                        "worker",
+                        ManagedRestartMode::Transient,
+                        TrackedFactory {
+                            starts: Arc::clone(&starts),
+                            retired: Arc::clone(&retired),
+                        },
+                    )],
+                    config(RestartPolicy::OneForOne, 8),
+                )
+                .unwrap();
+            let (mut supervisor, control) = managed
+                .spawn_controlled(parent.cx(), NonZeroUsize::new(1).unwrap())
+                .unwrap();
+            let worker = control.activate(&cx, "worker").await.unwrap();
+            let finalizer = Arc::clone(&finalized);
+            assert!(
+                native.register_sync_finalizer_for_testing(worker.region, move || {
+                    finalizer.fetch_add(1, Ordering::SeqCst);
+                    panic!("requested restart cleanup failure");
+                })
+            );
+            assert!(matches!(
+                control.restart_child(&cx, "worker", worker).await,
+                Err(ManagedChildControlError::RestartFailed { .. })
+            ));
+            assert_eq!(finalized.load(Ordering::SeqCst), 1);
+            assert_eq!(retired.load(Ordering::SeqCst), 1);
+            let report = supervisor.join().await.unwrap();
+            assert!(report.outcome.is_panicked(), "{report:?}");
+            assert_eq!((report.started, report.joined, report.restart_batches), (1, 1, 0));
+            assert_eq!(report.escalations, 1);
+            assert!(matches!(report.children[0].cleanup_outcome, Some(Outcome::Panicked(_))));
+            assert_eq!(starts.load(Ordering::SeqCst), 1);
+            parent.close().await.unwrap();
+            assert!(cx.checkpoint().is_ok());
+        });
+    }
+}
+
+#[test]
+fn native_requested_restart_retirement_panic_dominates_allowance_refusal() {
+    struct RefusedRetirement {
+        finalized: Arc<AtomicUsize>,
+        retired: Arc<AtomicUsize>,
+    }
+
+    impl ManagedChildFactory<&'static str> for RefusedRetirement {
+        fn start(&self, child: Cx, _: ManagedGeneration) -> ManagedChildFuture<&'static str> {
+            Box::pin(async move { until_cancelled(&child).await })
+        }
+
+        fn retired(&self) {
+            assert_eq!(self.finalized.load(Ordering::SeqCst), 1);
+            assert_eq!(self.retired.fetch_add(1, Ordering::SeqCst), 0);
+            panic!("retirement failed after requested restart refusal");
+        }
+    }
+
+    for sharded in [false, true] {
+        native_case(sharded, |cx, native| async move {
+            let finalized = Arc::new(AtomicUsize::new(0));
+            let retired = Arc::new(AtomicUsize::new(0));
+            let managed = SupervisorBuilder::new("controlled-restart-refused-retirement")
+                .child(deferred("worker"))
+                .compile()
+                .unwrap()
+                .bind_managed(
+                    vec![ManagedChildBinding::new(
+                        "worker",
+                        ManagedRestartMode::Transient,
+                        RefusedRetirement {
+                            finalized: Arc::clone(&finalized),
+                            retired: Arc::clone(&retired),
+                        },
+                    )],
+                    config(RestartPolicy::OneForOne, 0)
+                        .with_escalation(EscalationPolicy::Stop),
+                )
+                .unwrap();
+            let (mut supervisor, control) = managed
+                .spawn_controlled(&cx, NonZeroUsize::new(1).unwrap())
+                .unwrap();
+            let worker = control.activate(&cx, "worker").await.unwrap();
+            let finalizer = Arc::clone(&finalized);
+            assert!(
+                native.register_sync_finalizer_for_testing(worker.region, move || {
+                    finalizer.fetch_add(1, Ordering::SeqCst);
+                })
+            );
+            assert!(matches!(
+                control.restart_child(&cx, "worker", worker).await,
+                Err(ManagedChildControlError::RestartFailed { .. })
+            ));
+            let report = supervisor.join().await.unwrap();
+            assert!(report.outcome.is_panicked(), "{report:?}");
+            assert_eq!((report.started, report.joined, report.restart_batches), (1, 1, 0));
+            assert_eq!(report.escalations, 0);
+            assert!(
+                report.children[0].cleanup_outcome.as_ref().is_none_or(Outcome::is_ok),
+                "the generation drained successfully before retirement failed"
+            );
+            assert_eq!(finalized.load(Ordering::SeqCst), 1);
+            assert_eq!(retired.load(Ordering::SeqCst), 1);
+            assert!(cx.checkpoint().is_ok());
+        });
     }
 }

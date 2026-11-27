@@ -5,7 +5,7 @@
 //! binding can be activated, at most once. Automatic generation replacement
 //! then follows the binding's ordinary restart mode and the supervisor policy.
 
-use super::{ChildName, ManagedGeneration};
+use super::{BudgetRefusal, ChildName, ManagedGeneration};
 use crate::channel::{mpsc, oneshot};
 use crate::cx::Cx;
 use crate::types::CancelReason;
@@ -75,7 +75,7 @@ pub enum ManagedActivationError {
     },
 }
 
-/// Refusal or interrupted observation of an individual child stop.
+/// Refusal or interrupted observation of an individual child lifecycle command.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ManagedChildControlError {
@@ -85,9 +85,9 @@ pub enum ManagedChildControlError {
     /// The controller stopped or no longer accepts commands.
     #[error("managed supervisor control is closed")]
     Closed,
-    /// A cancelled queued request cannot stop a child.
+    /// A cancelled queued request cannot change a child's lifecycle.
     ///
-    /// After claim, the supervisor finishes the stop even when its caller
+    /// After claim, the supervisor owns the operation even when its caller
     /// stops waiting. This flag describes ownership, not completed cleanup.
     #[error("managed child control cancelled (may_have_applied={may_have_applied}): {reason:?}")]
     Cancelled {
@@ -113,7 +113,7 @@ pub enum ManagedChildControlError {
     StaleGeneration {
         /// The configured child name.
         child: ChildName,
-        /// The generation the caller intended to stop.
+        /// The generation the caller intended to control.
         expected: ManagedGeneration,
         /// The generation currently owned by the controller.
         actual: ManagedGeneration,
@@ -135,15 +135,43 @@ pub enum ManagedChildControlError {
         /// The configured child name.
         child: ChildName,
     },
+    /// Temporary children never enter a replacement generation.
+    #[error("managed child restart is disabled: {child}")]
+    RestartDisabled {
+        /// The configured child name.
+        child: ChildName,
+    },
+    /// A local or shared restart allowance refused the requested batch.
+    ///
+    /// The failure is published after the policy's required cleanup. Refusal
+    /// under Stop retires the selected group; escalation can stop the tree.
+    #[error("managed child restart allowance refused {child}: {refusal:?}")]
+    RestartRefused {
+        /// The configured child name.
+        child: ChildName,
+        /// The actual restart accounting refusal.
+        refusal: BudgetRefusal,
+    },
+    /// The requested policy batch did not produce a replacement for this child.
+    ///
+    /// Cancellation, cleanup failure or a failed start can prevent replacement.
+    /// The supervisor retains affected work and terminal outcomes; optional
+    /// siblings follow their ordinary policy. This error is not a successful
+    /// replacement or quiescence receipt.
+    #[error("managed child could not be restarted: {child}")]
+    RestartFailed {
+        /// The configured child name.
+        child: ChildName,
+    },
 }
 
-/// A cloneable capability to activate and stop configured children.
+/// A cloneable capability to activate, stop and restart configured children.
 ///
 /// Clones share a bounded mailbox. At most the configured number of commands
 /// wait in it, plus one command owned by the controller. Calls refuse a full
 /// mailbox immediately; they do not create an unbounded capacity-waiter list.
 /// Cancelled queued commands retain their slot until the controller dequeues
-/// them, and cannot start or stop a child.
+/// them, and cannot change a child's lifecycle.
 ///
 /// The caller's `Cx` controls request cancellation. Child regions, budgets,
 /// names and restart intensity belong to the supervisor's `Cx`. Dropping the
@@ -225,20 +253,64 @@ impl ManagedSupervisorControl {
         child: &str,
         expected: ManagedGeneration,
     ) -> Result<ManagedGeneration, ManagedChildControlError> {
+        self.control_child(cx, child, expected, ControlRequest::Stop)
+            .await
+    }
+
+    /// Restart a current generation using the supervisor's configured strategy.
+    ///
+    /// The expected identity fences delayed commands from restarting a newer
+    /// generation. Temporary, dormant and permanently stopped bindings cannot
+    /// be restarted. An explicit request restarts a Transient source even when
+    /// its orderly shutdown succeeds; collateral children keep their own modes.
+    ///
+    /// Once claimed, this operation cancels every owned generation selected by
+    /// OneForOne, OneForAll or RestForOne before awaiting any child. It then uses
+    /// the same local and shared restart allowance, backoff, dependency order,
+    /// name ownership and escalation as automatic recovery. Claim is not an
+    /// admission preflight: a refused restart can leave children stopped or
+    /// stop the supervisor. Under the local Stop escalation policy, refusal
+    /// drains and permanently retires the entire selected group.
+    ///
+    /// Success returns the actual replacement identity after all selected old
+    /// generations drain and the controller finishes the replacement batch.
+    /// Optional siblings retain their ordinary start/refusal policy. Success
+    /// observes factory entry, not application readiness or continued health.
+    ///
+    /// Dropping or cancelling before claim withdraws this request. After claim,
+    /// the supervisor owns the batch even if its caller stops waiting. Parent
+    /// cancellation during drain or backoff prevents replacement admission.
+    pub async fn restart_child(
+        &self,
+        cx: &Cx,
+        child: &str,
+        expected: ManagedGeneration,
+    ) -> Result<ManagedGeneration, ManagedChildControlError> {
+        self.control_child(cx, child, expected, ControlRequest::Restart)
+            .await
+    }
+
+    async fn control_child(
+        &self,
+        cx: &Cx,
+        child: &str,
+        expected: ManagedGeneration,
+        kind: fn(ChildControlRequest) -> ControlRequest,
+    ) -> Result<ManagedGeneration, ManagedChildControlError> {
         if cx.checkpoint().is_err() {
             return Err(stop_cancelled(cx, false));
         }
         let (reply, mut response) = oneshot::channel();
         let state = Arc::new(AtomicU8::new(QUEUED));
         let guard = ActivationGuard(Arc::clone(&state));
-        let command = StopRequest {
+        let command = kind(ChildControlRequest {
             child: child.into(),
             expected,
             caller: cx.clone(),
             state,
             reply,
-        };
-        match self.sender.try_send(ControlRequest::Stop(command)) {
+        });
+        match self.sender.try_send(command) {
             Ok(()) => {}
             Err(mpsc::SendError::Full(_)) => return Err(ManagedChildControlError::Full),
             Err(mpsc::SendError::Disconnected(_)) => return Err(ManagedChildControlError::Closed),
@@ -309,7 +381,7 @@ impl ActivationRequest {
     }
 }
 
-pub(crate) struct StopRequest {
+pub(crate) struct ChildControlRequest {
     pub(crate) child: ChildName,
     pub(crate) expected: ManagedGeneration,
     caller: Cx,
@@ -317,13 +389,13 @@ pub(crate) struct StopRequest {
     reply: oneshot::Sender<Result<ManagedGeneration, ManagedChildControlError>>,
 }
 
-impl StopRequest {
+impl ChildControlRequest {
     pub(crate) fn claim(&self) -> bool {
         claim_request(&self.caller, &self.state)
     }
 
     pub(crate) fn complete(self, result: Result<ManagedGeneration, ManagedChildControlError>) {
-        // Terminal cleanup receipts do not depend on either Cx remaining live.
+        // Lifecycle receipts do not depend on either Cx remaining live.
         let _ = self.reply.send_blocking(result);
     }
 }
@@ -350,7 +422,8 @@ fn claim_request(caller: &Cx, state: &AtomicU8) -> bool {
 
 pub(crate) enum ControlRequest {
     Activate(ActivationRequest),
-    Stop(StopRequest),
+    Stop(ChildControlRequest),
+    Restart(ChildControlRequest),
 }
 
 pub(crate) type ControlReceiver = mpsc::Receiver<ControlRequest>;

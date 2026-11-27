@@ -1830,8 +1830,8 @@ mod managed_control_tests;
 
 mod managed {
     use super::managed_control::{
-        ActivationRequest, ControlReceiver, ControlRequest, ManagedActivationError,
-        ManagedChildControlError, ManagedSupervisorControl, StopRequest,
+        ActivationRequest, ChildControlRequest, ControlReceiver, ControlRequest,
+        ManagedActivationError, ManagedChildControlError, ManagedSupervisorControl,
     };
     use super::managed_names::{GenerationName, RegistrationFailure};
     use super::{
@@ -2508,10 +2508,17 @@ mod managed {
         Control(ControlRequest),
     }
 
+    struct RequestedRestart {
+        request: ChildControlRequest,
+        affected: Vec<usize>,
+        refusal: Option<BudgetRefusal>,
+    }
+
     struct Controller<E> {
         supervisor: ManagedSupervisor<E>,
         cx: Cx,
         control: Option<ControlReceiver>,
+        restart_request: Option<RequestedRestart>,
         root: Option<ChildRegion>,
         running: Vec<Option<RunningChild<E>>>,
         latest: Vec<Option<ManagedChildCompletion<E>>>,
@@ -2580,6 +2587,7 @@ mod managed {
             Self {
                 cx: cx.clone(),
                 control: None,
+                restart_request: None,
                 root: None,
                 running: (0..count).map(|_| None).collect(),
                 latest: (0..count).map(|_| None).collect(),
@@ -3398,37 +3406,53 @@ mod managed {
             }
         }
 
-        async fn stop_child(&mut self, request: StopRequest) {
-            let Some(index) = self
-                .supervisor
-                .children
-                .iter()
-                .position(|child| child.name == request.child)
-            else {
-                let child = request.child.clone();
-                request.complete(Err(ManagedChildControlError::UnknownChild { child }));
-                return;
-            };
-            let child = self.supervisor.children[index].name.clone();
-            let current = self.running[index].as_ref().and_then(|running| {
+        fn current_generation(&self, index: usize) -> Option<ManagedGeneration> {
+            self.running[index].as_ref().and_then(|running| {
                 running
                     .start_observed
                     .then(|| running.publication.lock().identity)
                     .flatten()
-            });
-            let Some(actual) = current else {
-                request.complete(Err(ManagedChildControlError::NotRunning { child }));
-                return;
-            };
+            })
+        }
+
+        fn controlled_index(
+            &self,
+            request: &ChildControlRequest,
+        ) -> Result<usize, ManagedChildControlError> {
+            let child = request.child.clone();
+            let index = self
+                .supervisor
+                .children
+                .iter()
+                .position(|spec| spec.name == child)
+                .ok_or_else(|| ManagedChildControlError::UnknownChild {
+                    child: child.clone(),
+                })?;
+            let actual = self
+                .current_generation(index)
+                .ok_or_else(|| ManagedChildControlError::NotRunning {
+                    child: child.clone(),
+                })?;
             if actual != request.expected {
-                let expected = request.expected;
-                request.complete(Err(ManagedChildControlError::StaleGeneration {
+                return Err(ManagedChildControlError::StaleGeneration {
                     child,
-                    expected,
+                    expected: request.expected,
                     actual,
-                }));
-                return;
+                });
             }
+            Ok(index)
+        }
+
+        async fn stop_child(&mut self, request: ChildControlRequest) {
+            let index = match self.controlled_index(&request) {
+                Ok(index) => index,
+                Err(error) => {
+                    request.complete(Err(error));
+                    return;
+                }
+            };
+            let child = self.supervisor.children[index].name.clone();
+            let actual = request.expected;
             // Follow through inactive intermediate bindings too: a descendant
             // can outlive a dependency that terminated independently.
             let mut pending = vec![index];
@@ -3477,6 +3501,117 @@ mod managed {
             }
             self.trace("stopped", index, actual);
             request.complete(Ok(actual));
+        }
+
+        fn restart_affected(&self, source: usize) -> Vec<usize> {
+            if let Some(pending) = &self.restart_request {
+                return pending.affected.clone();
+            }
+            (0..self.running.len())
+                .filter(|&index| {
+                    self.running[index].is_some()
+                        && match self.supervisor.config.restart_policy {
+                            RestartPolicy::OneForOne => index == source,
+                            RestartPolicy::OneForAll => true,
+                            RestartPolicy::RestForOne => index >= source,
+                        }
+                })
+                .collect()
+        }
+
+        async fn prepare_restart(&mut self, request: ChildControlRequest) -> Option<usize> {
+            let index = match self.controlled_index(&request) {
+                Ok(index) => index,
+                Err(error) => {
+                    request.complete(Err(error));
+                    return None;
+                }
+            };
+            if self.supervisor.bindings[index].mode == ManagedRestartMode::Temporary {
+                let child = request.child.clone();
+                request.complete(Err(ManagedChildControlError::RestartDisabled { child }));
+                return None;
+            }
+            if self.observe_shared_refusal(index) {
+                request.complete(Err(ManagedChildControlError::Closed));
+                return None;
+            }
+            if self.cancelled() {
+                self.record_cancel();
+                request.complete(Err(ManagedChildControlError::Closed));
+                return None;
+            }
+            if self.deadline_passed() {
+                self.record_deadline();
+                request.complete(Err(ManagedChildControlError::Closed));
+                return None;
+            }
+            if !request.claim() {
+                return None;
+            }
+            self.trace("restart_requested", index, request.expected);
+            let affected = self.restart_affected(index);
+            self.restart_request = Some(RequestedRestart {
+                request,
+                affected: affected.clone(),
+                refusal: None,
+            });
+            // Source cleanup can await a later sibling's region finalizer.
+            // Publish all cancellation first, then drain in reverse dependency
+            // order instead of joining the source ahead of its dependents.
+            let cancelled = self.cancel_children(affected.iter().rev().copied());
+            let mut drained = true;
+            for &child in affected.iter().rev() {
+                if let Err(error) = self.drain(child).await {
+                    self.record_error(error);
+                    drained = false;
+                }
+            }
+            if !cancelled || !drained {
+                return None;
+            }
+            if self.cancelled() {
+                self.record_cancel();
+                return None;
+            }
+            // The retained selection feeds the common restart pipeline even
+            // though these generations are now quiescent and running is empty.
+            matches!(self.report.outcome, Outcome::Ok(())).then_some(index)
+        }
+
+        fn complete_restart(&mut self, source: Option<usize>) {
+            let Some(RequestedRestart {
+                request, refusal, ..
+            }) = self.restart_request.take()
+            else {
+                return;
+            };
+            let generation = source
+                .and_then(|index| self.current_generation(index))
+                .filter(|generation| generation.number > request.expected.number);
+            if let (Some(index), Some(generation)) = (source, generation) {
+                self.trace("restart_completed", index, generation);
+            }
+            let child = request.child.clone();
+            let result = match (generation, refusal) {
+                (Some(generation), _) => Ok(generation),
+                (None, Some(refusal))
+                    if matches!(
+                        self.report.outcome,
+                        Outcome::Ok(())
+                            | Outcome::Err(
+                                ManagedSupervisorError::RestartLimit { .. }
+                                    | ManagedSupervisorError::SharedRestartLimit { .. }
+                            )
+                    ) =>
+                {
+                    Err(ManagedChildControlError::RestartRefused { child, refusal })
+                }
+                // Cleanup, retirement or escalation failure dominates an
+                // earlier refusal; the final report retains that failure.
+                (None, _) => Err(ManagedChildControlError::RestartFailed { child }),
+            };
+            request.complete(result);
         }
 
         async fn backoff(&mut self, delay: Option<Duration>, failed: usize) -> bool {
@@ -3630,16 +3765,37 @@ mod managed {
                 let failed = match event {
                     ControllerEvent::Terminal(index) => index,
                     ControllerEvent::Control(request) => {
-                        match request {
-                            ControlRequest::Activate(request) => self.activate(request).await,
-                            ControlRequest::Stop(request) => self.stop_child(request).await,
+                        let source = match request {
+                            ControlRequest::Activate(request) => {
+                                self.activate(request).await;
+                                None
+                            }
+                            ControlRequest::Stop(request) => {
+                                self.stop_child(request).await;
+                                None
+                            }
+                            ControlRequest::Restart(request) => {
+                                let source = self.prepare_restart(request).await;
+                                if source.is_none()
+                                    && (self.restart_request.is_some()
+                                        || !matches!(self.report.outcome, Outcome::Ok(())))
+                                {
+                                    return;
+                                }
+                                source
+                            }
+                        };
+                        if let Some(source) = source {
+                            source
+                        } else {
+                            // Refused commands must not monopolize a worker while
+                            // producers keep refilling the bounded mailbox.
+                            crate::runtime::yield_now().await;
+                            continue;
                         }
-                        // Refused commands must not monopolize a worker while
-                        // producers keep refilling the bounded mailbox.
-                        crate::runtime::yield_now().await;
-                        continue;
                     }
                 };
+                let requested = self.restart_request.is_some();
                 let completed = self.latest[failed].as_ref().expect("joined terminal");
                 if self.supervisor.stop_on_child_failure
                     && ManagedRestartMode::Transient.eligible(completed)
@@ -3660,9 +3816,10 @@ mod managed {
                     // and drains all generation/supervisor region finalizers.
                     return;
                 }
-                let eligible = self.supervisor.bindings[failed]
-                    .mode
-                    .eligible(self.latest[failed].as_ref().expect("joined terminal"));
+                let eligible = requested
+                    || self.supervisor.bindings[failed]
+                        .mode
+                        .eligible(self.latest[failed].as_ref().expect("joined terminal"));
                 if !eligible {
                     if let Err(error) = self.drain(failed).await {
                         self.record_error(error);
@@ -3671,6 +3828,7 @@ mod managed {
                     if !self.retire_factory(failed) {
                         return;
                     }
+                    self.complete_restart(None);
                     continue;
                 }
                 if self.deadline_passed() {
@@ -3692,14 +3850,28 @@ mod managed {
                 let mut delay = match verdict {
                     RestartVerdict::Allowed { delay, .. } => delay,
                     RestartVerdict::Denied { refusal } => {
+                        if let Some(pending) = self.restart_request.as_mut() {
+                            pending.refusal = Some(refusal.clone());
+                        }
                         if self.supervisor.config.escalation == EscalationPolicy::Stop {
-                            if let Err(error) = self.drain(failed).await {
-                                self.record_error(error);
-                                return;
+                            let stopped = if requested {
+                                // This command already cancelled the policy group.
+                                // Retire all of it so delayed sibling terminals cannot
+                                // independently resurrect a refused requested batch.
+                                self.restart_affected(failed)
+                            } else {
+                                vec![failed]
+                            };
+                            for index in stopped.into_iter().rev() {
+                                if let Err(error) = self.drain(index).await {
+                                    self.record_error(error);
+                                    return;
+                                }
+                                if !self.retire_factory(index) {
+                                    return;
+                                }
                             }
-                            if !self.retire_factory(failed) {
-                                return;
-                            }
+                            self.complete_restart(None);
                             continue;
                         }
                         let window_exhausted =
@@ -3724,6 +3896,9 @@ mod managed {
                             delay = delay.max(shared_delay);
                         }
                         RestartVerdict::Denied { refusal } => {
+                            if let Some(pending) = self.restart_request.as_mut() {
+                                pending.refusal = Some(refusal.clone());
+                            }
                             let identity = self.latest[failed]
                                 .as_ref()
                                 .expect("joined terminal")
@@ -3752,23 +3927,14 @@ mod managed {
                         }
                     }
                 }
-                let affected: Vec<_> = (0..self.running.len())
-                    .filter(|&index| {
-                        self.running[index].is_some()
-                            && match self.supervisor.config.restart_policy {
-                                RestartPolicy::OneForOne => index == failed,
-                                RestartPolicy::OneForAll => true,
-                                RestartPolicy::RestForOne => index >= failed,
-                            }
-                    })
-                    .collect();
+                let affected = self.restart_affected(failed);
                 if let Some(tap) = self.tap.as_mut() {
                     tap.begin(failed);
                     // The oracle expects every sibling the policy names to
                     // restart now. One that is not running stays stopped.
                     let policy = self.supervisor.config.restart_policy;
                     let not_running = (0..self.running.len()).any(|index| {
-                        self.running[index].is_none()
+                        affected.binary_search(&index).is_err()
                             && match policy {
                                 RestartPolicy::OneForOne => false,
                                 RestartPolicy::OneForAll => index != failed,
@@ -3801,7 +3967,8 @@ mod managed {
                     let mode = self.supervisor.bindings[index].mode;
                     let completed = self.latest[index].as_ref().expect("drained generation");
                     if mode != ManagedRestartMode::Temporary
-                        && (completed.shutdown_requested_before_completion
+                        && ((requested && index == failed)
+                            || completed.shutdown_requested_before_completion
                             || mode.eligible(completed))
                     {
                         restart.push(index);
@@ -3898,6 +4065,7 @@ mod managed {
                 if let Some(tap) = self.tap.as_mut() {
                     tap.publish();
                 }
+                self.complete_restart(Some(failed));
             }
         }
 
@@ -3957,6 +4125,8 @@ mod managed {
             self.report
                 .children
                 .extend(self.latest.iter_mut().filter_map(Option::take));
+            // Fatal exits keep the claimed command owned until tree cleanup.
+            self.complete_restart(None);
         }
     }
 
