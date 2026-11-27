@@ -244,6 +244,12 @@ impl Resolver {
             return native::erase_native(self.lookup_ip_native(&cx, host)).await;
         }
 
+        // The system resolver keeps its NSS/hosts policy. A resolver sending
+        // wire queries must handle the localhost namespace itself (RFC 6761).
+        if !self.config.nameservers.is_empty() && has_final_label(host, "localhost") {
+            return Ok(localhost_addresses());
+        }
+
         // Preserve absolute-name semantics in the cache: `example.com.` may be
         // resolved differently from `example.com` when the system resolver
         // applies search domains to the non-dotted form.
@@ -918,9 +924,26 @@ fn is_valid_lookup_hostname_label(label: &str) -> bool {
     last.is_ascii_alphanumeric()
 }
 
+fn has_final_label(host: &str, label: &str) -> bool {
+    host.strip_suffix('.')
+        .unwrap_or(host)
+        .rsplit('.')
+        .next()
+        .is_some_and(|last| last.eq_ignore_ascii_case(label))
+}
+
 fn is_invalid_special_use_domain(host: &str) -> bool {
-    let host = host.strip_suffix('.').unwrap_or(host);
-    host.eq_ignore_ascii_case("invalid") || host.to_ascii_lowercase().ends_with(".invalid")
+    has_final_label(host, "invalid")
+}
+
+fn localhost_addresses() -> LookupIp {
+    LookupIp::new(
+        vec![
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+        ],
+        Duration::ZERO,
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1018,6 +1041,11 @@ fn validate_dns_record_name(name: &str) -> Result<(), DnsError> {
         return Err(DnsError::InvalidHost(name.to_string()));
     }
 
+    // MX, SRV and TXT have no wire answers in these special-use namespaces.
+    if is_invalid_special_use_domain(name) || has_final_label(name, "localhost") {
+        return Err(DnsError::NoRecords(name.to_owned()));
+    }
+
     Ok(())
 }
 
@@ -1037,8 +1065,7 @@ fn is_valid_dns_record_label(label: &str) -> bool {
         return false;
     }
 
-    bytes[1..bytes.len().saturating_sub(1)]
-        .iter()
+    bytes.iter()
         .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-' || *byte == b'_')
 }
 
@@ -1782,6 +1809,26 @@ fn select_records_for_query(
             ));
         }
         visited.push(wanted_name.clone());
+        // An alias enters the same namespace as a direct lookup. Ignore any
+        // bundled records for a special-use target and avoid querying it.
+        if let Some(ttl) = alias_ttl {
+            if is_invalid_special_use_domain(&wanted_name) {
+                return Ok(QuerySelection::NoRecords);
+            }
+            if has_final_label(&wanted_name, "localhost") {
+                let data = match query_type {
+                    DnsQueryType::A => DnsRecordData::A(Ipv4Addr::LOCALHOST),
+                    DnsQueryType::Aaaa => DnsRecordData::Aaaa(Ipv6Addr::LOCALHOST),
+                    _ => return Ok(QuerySelection::NoRecords),
+                };
+                return Ok(QuerySelection::Records(vec![DnsAnswer {
+                    name: wanted_name,
+                    data,
+                    ttl,
+                }]));
+            }
+        }
+
         let mut matches = Vec::new();
         let mut alias: Option<(String, Duration)> = None;
 

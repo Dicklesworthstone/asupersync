@@ -3816,3 +3816,76 @@ fn resolver_blocking_dns_reports_a_refused_placement_and_passes_lookup_results_t
         "resolver_blocking_dns_reports_a_refused_placement_and_passes_lookup_results_through"
     );
 }
+
+#[test]
+fn wire_resolver_handles_special_use_names_before_consulting_nameservers() {
+    let socket = UdpSocket::bind(("127.0.0.1", 0)).unwrap();
+    socket.set_nonblocking(true).unwrap();
+    let resolver = Resolver::with_config(ResolverConfig {
+        nameservers: vec![socket.local_addr().unwrap()],
+        timeout: Duration::from_millis(150),
+        retries: 0,
+        ..Default::default()
+    });
+    future::block_on(async {
+        for name in ["localhost", "x.LoCaLhOsT."] {
+            let lookup = resolver.lookup_ip(name).await.unwrap();
+            assert_eq!(
+                lookup.addresses(),
+                &[
+                    IpAddr::V6(Ipv6Addr::LOCALHOST),
+                    IpAddr::V4(Ipv4Addr::LOCALHOST),
+                ]
+            );
+        }
+        for name in ["x.LoCaLhOsT.", "x.InVaLiD."] {
+            assert!(matches!(
+                resolver.lookup_mx(name).await,
+                Err(DnsError::NoRecords(n)) if n == name
+            ));
+            assert!(matches!(
+                resolver.lookup_srv(name).await,
+                Err(DnsError::NoRecords(n)) if n == name
+            ));
+            assert!(matches!(
+                resolver.lookup_txt(name).await,
+                Err(DnsError::NoRecords(n)) if n == name
+            ));
+        }
+    });
+    assert_eq!(
+        socket.recv(&mut [0]).unwrap_err().kind(),
+        io::ErrorKind::WouldBlock
+    );
+    assert!(validate_dns_record_name("x.notlocalhost").is_ok());
+    assert!(validate_dns_record_name("x.notinvalid").is_ok());
+}
+
+#[test]
+fn wire_resolver_handles_special_use_aliases_with_or_without_bundled_addresses() {
+    for (target, localhost) in [("x.localhost", true), ("x.invalid", false)] {
+        let alias = DnsAnswer {
+            name: "alias.example".to_owned(),
+            ttl: Duration::from_secs(7),
+            data: DnsRecordData::Cname(target.to_owned()),
+        };
+        let address = DnsAnswer {
+            name: target.to_owned(),
+            ttl: Duration::from_secs(30),
+            data: DnsRecordData::A(Ipv4Addr::new(192, 0, 2, 1)),
+        };
+        let answers = [alias, address];
+        for len in 1..=2 {
+            let selection =
+                select_records_for_query("alias.example", DnsQueryType::A, &answers[..len], 0)
+                    .unwrap();
+            if localhost {
+                assert!(matches!(selection, QuerySelection::Records(records)
+                    if matches!(records.as_slice(), [DnsAnswer { data: DnsRecordData::A(ip), ttl, .. }]
+                        if *ip == Ipv4Addr::LOCALHOST && *ttl == Duration::from_secs(7))));
+            } else {
+                assert!(matches!(selection, QuerySelection::NoRecords));
+            }
+        }
+    }
+}

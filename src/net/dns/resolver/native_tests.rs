@@ -534,6 +534,9 @@ fn native_dns_bounds_unrelated_response_work_and_preserves_system_opt_in() {
             let literal = Resolver::new().lookup_ip_native(&cx, "[::1]").await.unwrap();
             assert_eq!(literal.addresses(), &[IpAddr::V6(Ipv6Addr::LOCALHOST)]);
             assert!(matches!(Resolver::new().lookup_ip_native(&cx, "private.invalid").await, Err(DnsError::NoRecords(_))));
+            let local = Resolver::new().lookup_ip_native(&cx, "x.LOCALHOST.").await.unwrap();
+            assert_eq!(local.addresses(), &[IpAddr::V6(Ipv6Addr::LOCALHOST), IpAddr::V4(Ipv4Addr::LOCALHOST)]);
+            assert!(matches!(Resolver::new().lookup_txt_native(&cx, "x.localhost").await, Err(DnsError::NoRecords(_))));
         });
         peer.join().unwrap();
         assert!(runtime.shutdown_timeout(Duration::from_secs(3)));

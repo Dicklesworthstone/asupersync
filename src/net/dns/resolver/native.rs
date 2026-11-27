@@ -36,8 +36,8 @@ impl Resolver {
     /// This opt-in path requires explicit [`ResolverConfig::nameservers`]
     /// for network queries. It does not invoke NSS, read `/etc/resolv.conf`,
     /// apply search domains, or consult the hosts file. [`Self::lookup_ip`]
-    /// retains those system-resolver semantics. Literal addresses and `.invalid`
-    /// use the same local handling as `lookup_ip`.
+    /// retains those system-resolver semantics. Literal addresses, `.localhost`, and
+    /// `.invalid` are resolved locally, including the top-level names themselves.
     ///
     /// Both address families progress concurrently within one absolute timeout.
     /// A truncated UDP response is retried over TCP within its remaining attempt
@@ -66,6 +66,9 @@ impl Resolver {
                 validate_lookup_hostname(host)?;
                 if is_invalid_special_use_domain(host) {
                     return Err(DnsError::NoRecords(host.to_owned()));
+                }
+                if has_final_label(host, "localhost") {
+                    return Ok(localhost_addresses());
                 }
                 if self.config.cache_enabled {
                     if let Some(cached) = self.cache.get_ip_result(host) {
@@ -202,9 +205,6 @@ impl Resolver {
         owner
             .run(async {
                 validate_dns_record_name(name)?;
-                if is_invalid_special_use_domain(name) {
-                    return Err(DnsError::NoRecords(name.to_owned()));
-                }
                 let nameservers = self.native_nameservers()?;
                 self.query_records_native(cx, name, kind, &nameservers, &deadline)
                     .await
