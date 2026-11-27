@@ -539,6 +539,42 @@ impl<T> TrackedOneshotSender<T> {
         Ok(TrackedOneshotPermit { permit, obligation })
     }
 
+    /// Reserves with checked admission and returns the tracked sender on refusal.
+    ///
+    /// A cancelled attempt or a refused runtime obligation leaves the receiver
+    /// open. Retry with the sender carried by the error to keep the same channel
+    /// and its graded commit/abort requirement. Dropping that sender closes the
+    /// channel. Admission and notification follow
+    /// [`oneshot::Sender::reserve_checked_recover`].
+    ///
+    /// # Panics
+    ///
+    /// A successful reservation requires a non-root region, as in
+    /// [`Self::reserve_checked`].
+    pub fn reserve_checked_recover(
+        self,
+        cx: &Cx,
+    ) -> Result<TrackedOneshotPermit<T>, oneshot::CheckedSendError<Self>> {
+        let permit = self.inner.reserve_checked_recover(cx).map_err(|error| {
+            use oneshot::{CheckedSendError, SendError};
+            match error {
+                CheckedSendError::Channel(SendError::Cancelled(sender)) => {
+                    CheckedSendError::Channel(SendError::Cancelled(Self::new(sender)))
+                }
+                CheckedSendError::Channel(SendError::Disconnected(sender)) => {
+                    CheckedSendError::Channel(SendError::Disconnected(Self::new(sender)))
+                }
+                CheckedSendError::Admission { error, value } => CheckedSendError::Admission {
+                    error,
+                    value: Self::new(value),
+                },
+            }
+        })?;
+        let obligation =
+            reserve_tracked_send_obligation_for_region("TrackedOneshotPermit", cx.region_id());
+        Ok(TrackedOneshotPermit { permit, obligation })
+    }
+
     /// Convenience: reserve + send in one step, returning a proof on success.
     pub fn send(
         self,

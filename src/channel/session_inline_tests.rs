@@ -1457,6 +1457,44 @@ fn checked_session_shared_quota_registers_once_and_reuses_credit_in_one_poll() {
 }
 
 #[test]
+fn recover_checked_oneshot_sender_across_cancellation_and_full_quota() {
+    use crate::runtime::obligation_mailbox::ObligationAdmissionError;
+    let (lab, cx, handle) = checked_session_fixture(1);
+    let (tx, mut rx) = tracked_oneshot::<u32>();
+    let initial = tx.telemetry_snapshot(1);
+
+    let cancelled = test_cx();
+    cancelled.cancel_with(crate::types::CancelKind::User, None);
+    let Err(oneshot::CheckedSendError::Channel(oneshot::SendError::Cancelled(tx))) =
+        tx.reserve_checked_recover(&cancelled)
+    else {
+        panic!("cancellation must return the tracked sender");
+    };
+    assert_eq!(tx.telemetry_snapshot(1), initial);
+    assert_eq!(rx.try_recv(), Err(oneshot::TryRecvError::Empty));
+
+    let (other, _other_rx) = tracked_channel::<u32>(1);
+    let held = other.try_reserve_checked(&cx).unwrap();
+    let Err(oneshot::CheckedSendError::Admission { error, value: tx }) =
+        tx.reserve_checked_recover(&cx)
+    else {
+        panic!("quota refusal must return the tracked sender");
+    };
+    assert_eq!(
+        error,
+        ObligationAdmissionError::LimitReached { limit: 1, live: 1 }
+    );
+    assert_eq!(tx.telemetry_snapshot(1), initial);
+    assert_eq!(rx.try_recv(), Err(oneshot::TryRecvError::Empty));
+
+    let _aborted = held.abort();
+    let proof = tx.reserve_checked_recover(&cx).unwrap().send(71).unwrap();
+    assert_eq!(proof.kind(), crate::record::ObligationKind::SendPermit);
+    assert_eq!(rx.try_recv(), Ok(71));
+    finish_checked_session_fixture(lab, &cx, handle, 1, 1, Ok(Some(())));
+}
+
+#[test]
 fn checked_session_channel_errors_keep_values_and_abort_runtime_tokens() {
     init_test("checked_session_channel_errors_keep_values_and_abort_runtime_tokens");
     let (lab, cx, handle) = checked_session_fixture(1);
