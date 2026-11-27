@@ -3617,6 +3617,1078 @@ impl SagaState {
     }
 }
 
+/// Execution mode of a whole-saga controller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum SagaExecutionPhase {
+    /// Forward steps may be admitted.
+    Forward,
+    /// Rollback was requested, but compensation admission needs a retry.
+    RollbackPending {
+        /// The first failure; forward admission remains closed.
+        failure: ServiceFailure,
+    },
+    /// Forward admission has stopped; compensation runs in reverse step order.
+    RollingBack {
+        /// The first failure that requested rollback.
+        failure: ServiceFailure,
+    },
+    /// Every forward step completed.
+    Committed,
+    /// Every affected step's compensation was acknowledged.
+    Compensated {
+        /// The failure that caused rollback.
+        failure: ServiceFailure,
+    },
+    /// Rollback finished with at least one effect uncompensated.
+    Failed {
+        /// The original failure, independent of compensation failures.
+        failure: ServiceFailure,
+    },
+}
+
+/// An effect that whole-saga rollback could not report as compensated.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum SagaRollbackFailure {
+    /// An active or completed step declared no compensation.
+    MissingCompensation {
+        /// Step whose possible effect remains unreconciled.
+        step_id: String,
+    },
+    /// The caller reported that this step's compensation failed.
+    CompensationFailed {
+        /// Step whose compensation failed.
+        step_id: String,
+        /// The compensation's own failure.
+        failure: ServiceFailure,
+    },
+}
+
+impl SagaRollbackFailure {
+    fn step_id(&self) -> &str {
+        match self {
+            Self::MissingCompensation { step_id }
+            | Self::CompensationFailed { step_id, .. } => step_id,
+        }
+    }
+}
+
+/// Refusal by the opt-in whole-saga controller.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum CompensatingSagaError {
+    /// An existing workflow operation refused its transition.
+    #[error(transparent)]
+    Workflow(#[from] WorkflowStateError),
+    /// The authoritative ledger refused admission or settlement.
+    #[error(transparent)]
+    Ledger(#[from] crate::obligation::ledger::LedgerError),
+    /// The declaration, snapshot, cursor, or ledger record is inconsistent.
+    #[error("invalid compensating saga state: {0}")]
+    InvalidState(&'static str),
+    /// A transition is unavailable in the current execution phase.
+    #[error("compensating saga cannot {operation} while in phase {phase:?}")]
+    Phase {
+        /// Requested operation.
+        operation: &'static str,
+        /// Current phase.
+        phase: SagaExecutionPhase,
+    },
+    /// A reply did not identify the current step.
+    #[error("compensating saga received an out-of-order reply for step {step_id}")]
+    OutOfOrder {
+        /// Step named by the caller.
+        step_id: String,
+    },
+    /// Deserialized state has no live authority until explicit recovery.
+    #[error("compensating saga snapshot requires authoritative-ledger recovery")]
+    RecoveryRequired,
+}
+
+/// An owning controller that rolls back the whole existing saga state.
+///
+/// Rollback covers the uncertain active step and every completed predecessor.
+/// The caller executes each current step's ordered compensation path, then
+/// acknowledges that exact step ID. A duplicate acknowledgement cannot
+/// acknowledge the next predecessor. Missing paths and failed compensations
+/// remain visible, and never prevent older compensation.
+///
+/// This controller uses the existing workflow handles and obligation ledger.
+/// An additional lease remains owed between steps and during rollback.
+/// Abandoning the controller leaves that lease detectable by the ledger;
+/// dropping it does not execute compensation. State is exposed read-only.
+///
+/// The caller owns execution of forward and compensation effects. Before
+/// rollback or replay takeover, it must stop and drain the old executor.
+/// A ledger ownership fence prevents stale state transitions; it cannot stop
+/// an external request or prove that a remote effect has ceased. Compensation
+/// must be idempotent using the logical saga and step identity: recovery may
+/// repeat the current compensation after an uncertain outcome.
+///
+/// Serialization is a checkpoint, not a durable ledger or an execution grant.
+/// Recovery requires the same authoritative ledger, including the checkpoint's
+/// historical records, and explicitly replaces remaining linear authority.
+/// This is not cross-process persistence or exactly-once external execution.
+/// The legacy per-step APIs and serialized SagaState representation are unchanged.
+#[derive(Debug, Serialize, Deserialize)]
+#[must_use = "a compensating saga owns a ledger lease until commit or rollback finishes"]
+pub struct CompensatingSaga {
+    state: SagaState,
+    phase: SagaExecutionPhase,
+    rollback_failures: Vec<SagaRollbackFailure>,
+    owner: WorkflowObligationHandle,
+    holder: TaskId,
+    region: RegionId,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static COMPENSATING_SAGA_ALLOCATION_FAILURE_AFTER: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+impl CompensatingSaga {
+    /// Admit a fresh declaration and reserve its lifetime lease.
+    ///
+    /// Step IDs must be unique. Declare compensation through each step's
+    /// compensation_path, not as a forward obligation. A step with no path is
+    /// conservatively uncompensated if active or completed when rollback begins.
+    #[track_caller]
+    pub fn new(
+        state: SagaState,
+        ledger: &mut ObligationLedger,
+        holder: TaskId,
+        region: RegionId,
+        now: Time,
+    ) -> Result<Self, CompensatingSagaError> {
+        Self::validate_declaration(&state)?;
+        if state.current_step.is_some()
+            || !state.compensated_steps.is_empty()
+            || !state.evidence_trail.is_empty()
+            || state.steps.iter().any(|step| {
+                step.status != WorkflowStepStatus::Pending || !step.obligations.is_empty()
+            })
+        {
+            return Err(CompensatingSagaError::InvalidState(
+                "a new controller requires an unstarted declaration",
+            ));
+        }
+        let owner = Self::allocate(
+            ledger,
+            WorkflowObligationRole::Lease {
+                resource: format!("saga {}", state.saga_id),
+            },
+            format!("compensating saga {} ownership", state.saga_id),
+            holder,
+            region,
+            now,
+        )?;
+        Ok(Self {
+            state,
+            phase: SagaExecutionPhase::Forward,
+            rollback_failures: Vec::new(),
+            owner,
+            holder,
+            region,
+        })
+    }
+
+    /// Current forward, rollback, or terminal phase.
+    #[must_use]
+    pub fn phase(&self) -> SagaExecutionPhase {
+        self.phase
+    }
+
+    /// Existing workflow state and evidence, without mutable escape.
+    #[must_use]
+    pub fn state(&self) -> &SagaState {
+        &self.state
+    }
+
+    /// Missing or failed compensations, in observation order.
+    #[must_use]
+    pub fn rollback_failures(&self) -> &[SagaRollbackFailure] {
+        &self.rollback_failures
+    }
+
+    /// Current ownership generation in the authoritative ledger.
+    #[must_use]
+    pub fn ownership_id(&self) -> ObligationId {
+        self.owner.obligation_id
+    }
+
+    /// Admit every obligation before starting the next forward step.
+    ///
+    /// Refusal retires provisional reservations and leaves the step, cursor,
+    /// and evidence unchanged. Repeating a start for the active step is a no-op.
+    #[track_caller]
+    pub fn start_next_step(
+        &mut self,
+        ledger: &mut ObligationLedger,
+        now: Time,
+    ) -> Result<(), CompensatingSagaError> {
+        self.validate(ledger, true)?;
+        self.require_forward("start a forward step")?;
+        let index = self.state.current_step.unwrap_or(0);
+        let step = &self.state.steps[index];
+        if step.status == WorkflowStepStatus::Active {
+            return Ok(());
+        }
+        let mut prepared = Vec::new();
+        for role in &step.declared_obligations {
+            let description = format!(
+                "workflow step {} on {} owes {}",
+                step.step_id,
+                step.subject.as_str(),
+                role.label()
+            );
+            match Self::allocate(
+                ledger,
+                role.clone(),
+                description,
+                self.holder,
+                self.region,
+                now,
+            ) {
+                Ok(handle) => prepared.push((index, handle)),
+                Err(error) => {
+                    Self::discard_prepared(ledger, prepared, now);
+                    return Err(error);
+                }
+            }
+        }
+        let outstanding = prepared
+            .iter()
+            .map(|(_, handle)| handle.obligation_id)
+            .collect();
+        self.state.steps[index].obligations =
+            prepared.into_iter().map(|(_, handle)| handle).collect();
+        self.state.steps[index].status = WorkflowStepStatus::Active;
+        self.state.current_step = Some(index);
+        self.state
+            .push_evidence(Some(index), now, SagaEvidenceEvent::Started, outstanding);
+        Ok(())
+    }
+
+    /// Acknowledge exactly the named forward step.
+    ///
+    /// Repeating a completed step's acknowledgement is harmless. No reply
+    /// can resume forward work after rollback has begun.
+    pub fn complete_current_step(
+        &mut self,
+        ledger: &mut ObligationLedger,
+        step_id: &str,
+        now: Time,
+    ) -> Result<(), CompensatingSagaError> {
+        self.validate(ledger, true)?;
+        if matches!(
+            self.phase,
+            SagaExecutionPhase::Forward | SagaExecutionPhase::Committed
+        ) && self.state.steps.iter().any(|step| {
+            step.step_id == step_id && step.status == WorkflowStepStatus::Completed
+        }) {
+            return Ok(());
+        }
+        self.require_forward("complete a forward step")?;
+        self.require_current(step_id)?;
+        self.state.complete_current_step(ledger, now)?;
+        if self.state.current_step.is_none() {
+            let token = self
+                .owner
+                .token
+                .take()
+                .ok_or(CompensatingSagaError::RecoveryRequired)?;
+            ledger.try_commit(token, now)?;
+            self.phase = SagaExecutionPhase::Committed;
+        }
+        Ok(())
+    }
+
+    /// Stop forward admission and activate whole-saga rollback.
+    ///
+    /// This asserts that the caller has stopped and drained any forward
+    /// executor. The active step is uncertain even if it returned an error;
+    /// it is compensated before completed predecessors. All compensation is
+    /// admitted before changing step status. The rollback request immediately
+    /// closes forward admission, even if compensation admission fails; retry
+    /// this method to leave RollbackPending. Repeated admitted requests retain
+    /// the first failure and allocate nothing.
+    #[track_caller]
+    pub fn begin_rollback_after_quiescence(
+        &mut self,
+        ledger: &mut ObligationLedger,
+        now: Time,
+        failure: ServiceFailure,
+    ) -> Result<(), CompensatingSagaError> {
+        self.validate(ledger, true)?;
+        let failure = match self.phase {
+            SagaExecutionPhase::RollingBack { .. }
+            | SagaExecutionPhase::Compensated { .. }
+            | SagaExecutionPhase::Failed { .. } => return Ok(()),
+            SagaExecutionPhase::Forward => {
+                self.phase = SagaExecutionPhase::RollbackPending { failure };
+                failure
+            }
+            SagaExecutionPhase::RollbackPending { failure } => failure,
+            SagaExecutionPhase::Committed => {
+                return Err(CompensatingSagaError::Phase {
+                    operation: "roll back an already committed saga",
+                    phase: self.phase,
+                });
+            }
+        };
+
+        let mut prepared = Vec::new();
+        for (index, step) in self.state.steps.iter().enumerate().rev() {
+            if !matches!(
+                step.status,
+                WorkflowStepStatus::Active | WorkflowStepStatus::Completed
+            ) {
+                continue;
+            }
+            for subject in &step.compensation_path {
+                let role = WorkflowObligationRole::Compensation {
+                    subject: subject.clone(),
+                };
+                let description = format!(
+                    "workflow step {} compensation for {} via {}",
+                    step.step_id,
+                    step.subject.as_str(),
+                    role.label()
+                );
+                match Self::allocate(
+                    ledger,
+                    role,
+                    description,
+                    self.holder,
+                    self.region,
+                    now,
+                ) {
+                    Ok(handle) => prepared.push((index, handle)),
+                    Err(error) => {
+                        Self::discard_prepared(ledger, prepared, now);
+                        return Err(error);
+                    }
+                }
+            }
+        }
+
+        for index in (0..self.state.steps.len()).rev() {
+            let step = &mut self.state.steps[index];
+            let was_active = step.status == WorkflowStepStatus::Active;
+            if !was_active && step.status != WorkflowStepStatus::Completed {
+                continue;
+            }
+            if was_active {
+                for obligation in &mut step.obligations {
+                    obligation.abort(ledger, now, failure.abort_reason())?;
+                }
+            }
+            if step.compensation_path.is_empty() {
+                self.rollback_failures
+                    .push(SagaRollbackFailure::MissingCompensation {
+                        step_id: step.step_id.clone(),
+                    });
+                step.status = WorkflowStepStatus::Failed { failure };
+            } else {
+                step.status = WorkflowStepStatus::Compensating { failure };
+            }
+            if was_active {
+                self.state.push_evidence(
+                    Some(index),
+                    now,
+                    SagaEvidenceEvent::StepFailed { failure },
+                    Vec::new(),
+                );
+            }
+        }
+        for (index, handle) in prepared {
+            self.state.steps[index].obligations.push(handle);
+        }
+        for index in (0..self.state.steps.len()).rev() {
+            if matches!(
+                self.state.steps[index].status,
+                WorkflowStepStatus::Compensating { .. }
+            ) {
+                let outstanding = self.state.steps[index].outstanding_ids(ledger)?;
+                self.state.push_evidence(
+                    Some(index),
+                    now,
+                    SagaEvidenceEvent::CompensationActivated,
+                    outstanding,
+                );
+            }
+        }
+        self.phase = SagaExecutionPhase::RollingBack { failure };
+        self.advance_rollback(ledger, now)
+    }
+
+    /// The next step whose entire ordered compensation path must be executed.
+    ///
+    /// Older paths remain owed but must not run before this one settles.
+    #[must_use]
+    pub fn current_compensation(&self) -> Option<&WorkflowStep> {
+        if !matches!(self.phase, SagaExecutionPhase::RollingBack { .. }) {
+            return None;
+        }
+        self.state
+            .current_step
+            .and_then(|index| self.state.steps.get(index))
+    }
+
+    /// Acknowledge successful execution of the named compensation path.
+    ///
+    /// This commits the existing step obligations. Repeating an acknowledged
+    /// step returns success without advancing another step.
+    pub fn complete_compensation(
+        &mut self,
+        ledger: &mut ObligationLedger,
+        step_id: &str,
+        now: Time,
+    ) -> Result<(), CompensatingSagaError> {
+        self.validate(ledger, true)?;
+        if self.state.steps.iter().any(|step| {
+            step.step_id == step_id
+                && matches!(step.status, WorkflowStepStatus::Compensated { .. })
+        }) {
+            return Ok(());
+        }
+        self.require_rollback("complete compensation")?;
+        self.require_current(step_id)?;
+        self.state.complete_current_compensation(ledger, now)?;
+        self.advance_rollback(ledger, now)
+    }
+
+    /// Record a failed compensation, then continue with older steps.
+    ///
+    /// Failure aborts this step's compensation obligations and prevents a
+    /// terminal Compensated result. Repeating the same failed reply is harmless.
+    pub fn fail_compensation(
+        &mut self,
+        ledger: &mut ObligationLedger,
+        step_id: &str,
+        failure: ServiceFailure,
+        now: Time,
+    ) -> Result<(), CompensatingSagaError> {
+        self.validate(ledger, true)?;
+        if self.rollback_failures.iter().any(|entry| matches!(
+            entry,
+            SagaRollbackFailure::CompensationFailed {
+                step_id: failed,
+                failure: recorded,
+            } if failed == step_id && *recorded == failure
+        )) {
+            return Ok(());
+        }
+        self.require_rollback("fail compensation")?;
+        let index = self.require_current(step_id)?;
+        for obligation in &mut self.state.steps[index].obligations {
+            if obligation.role.is_compensation() {
+                obligation.abort(ledger, now, failure.abort_reason())?;
+            }
+        }
+        self.state.steps[index].status = WorkflowStepStatus::Failed { failure };
+        self.rollback_failures
+            .push(SagaRollbackFailure::CompensationFailed {
+                step_id: step_id.to_owned(),
+                failure,
+            });
+        self.state.push_evidence(
+            Some(index),
+            now,
+            SagaEvidenceEvent::StepFailed { failure },
+            Vec::new(),
+        );
+        self.advance_rollback(ledger, now)
+    }
+
+    /// Query real step obligations; the separate ownership lease is omitted.
+    pub fn what_is_still_owed(
+        &self,
+        ledger: &ObligationLedger,
+    ) -> Result<Vec<WorkflowOwedObligation>, CompensatingSagaError> {
+        self.validate(ledger, false)?;
+        Ok(self.state.what_is_still_owed(ledger)?)
+    }
+
+    /// Take over a deserialized checkpoint after stopping its old executor.
+    ///
+    /// Validation precedes mutation. The old ownership lease must still be
+    /// reserved. Takeover retires it and old pending step tokens, then replaces
+    /// their authority for the same work. Reusing the checkpoint or the old
+    /// live controller fails against that retired ownership record. This does
+    /// not cancel external effects: caller-established quiescence is required.
+    ///
+    /// Forward checkpoints enter rollback with uncertain_failure; they never
+    /// rerun forward work. Rollback checkpoints resume their validated reverse
+    /// cursor. Terminal checkpoints acquire no authority. On error this value
+    /// remains available for inspection; it is not consumed. If takeover
+    /// succeeded but compensation admission failed, it owns the new generation
+    /// in RollbackPending: retry begin_rollback_after_quiescence, not recovery.
+    #[track_caller]
+    pub fn recover_from_replay_after_quiescence(
+        &mut self,
+        ledger: &mut ObligationLedger,
+        now: Time,
+        uncertain_failure: ServiceFailure,
+    ) -> Result<(), CompensatingSagaError> {
+        self.validate(ledger, false)?;
+        if self.owner.token.is_some()
+            || self.state.steps.iter().any(|step| {
+                step.obligations
+                    .iter()
+                    .any(|obligation| obligation.token.is_some())
+            })
+        {
+            return Err(CompensatingSagaError::InvalidState(
+                "recovery requires a deserialized checkpoint, not a live controller",
+            ));
+        }
+        if matches!(
+            self.phase,
+            SagaExecutionPhase::Committed
+                | SagaExecutionPhase::Compensated { .. }
+                | SagaExecutionPhase::Failed { .. }
+        ) {
+            return Ok(());
+        }
+
+        let replacement_owner = Self::allocate(
+            ledger,
+            self.owner.role.clone(),
+            self.owner.description.clone(),
+            self.holder,
+            self.region,
+            now,
+        )?;
+        let mut prepared = vec![(usize::MAX, replacement_owner)];
+        let mut locations = Vec::new();
+        for (step_index, step) in self.state.steps.iter().enumerate() {
+            for (obligation_index, obligation) in step.obligations.iter().enumerate() {
+                if !obligation.is_owed(ledger)? {
+                    continue;
+                }
+                match Self::allocate(
+                    ledger,
+                    obligation.role.clone(),
+                    obligation.description.clone(),
+                    self.holder,
+                    self.region,
+                    now,
+                ) {
+                    Ok(handle) => {
+                        locations.push((step_index, obligation_index));
+                        prepared.push((step_index, handle));
+                    }
+                    Err(error) => {
+                        Self::discard_prepared(ledger, prepared, now);
+                        return Err(error);
+                    }
+                }
+            }
+        }
+
+        ledger.try_abort_by_id(
+            self.owner.obligation_id,
+            now,
+            ObligationAbortReason::Explicit,
+        )?;
+        let mut replacements = prepared.into_iter();
+        self.owner = replacements.next().expect("prepared ownership lease").1;
+        for ((step_index, obligation_index), (_, replacement)) in
+            locations.into_iter().zip(replacements)
+        {
+            let old = &mut self.state.steps[step_index].obligations[obligation_index];
+            ledger.try_abort_by_id(old.obligation_id, now, ObligationAbortReason::Explicit)?;
+            *old = replacement;
+        }
+        let outstanding = self
+            .state
+            .what_is_still_owed(ledger)?
+            .into_iter()
+            .map(|owed| owed.obligation_id)
+            .collect();
+        self.state.push_evidence(
+            self.state.current_step,
+            now,
+            SagaEvidenceEvent::Recovered,
+            outstanding,
+        );
+        if matches!(
+            self.phase,
+            SagaExecutionPhase::Forward | SagaExecutionPhase::RollbackPending { .. }
+        ) {
+            self.begin_rollback_after_quiescence(ledger, now, uncertain_failure)?;
+        }
+        Ok(())
+    }
+
+    fn require_forward(&self, operation: &'static str) -> Result<(), CompensatingSagaError> {
+        if self.phase != SagaExecutionPhase::Forward {
+            return Err(CompensatingSagaError::Phase {
+                operation,
+                phase: self.phase,
+            });
+        }
+        Ok(())
+    }
+
+    fn require_rollback(&self, operation: &'static str) -> Result<(), CompensatingSagaError> {
+        if !matches!(self.phase, SagaExecutionPhase::RollingBack { .. }) {
+            return Err(CompensatingSagaError::Phase {
+                operation,
+                phase: self.phase,
+            });
+        }
+        Ok(())
+    }
+
+    fn require_current(&self, step_id: &str) -> Result<usize, CompensatingSagaError> {
+        self.state
+            .current_step
+            .filter(|&index| {
+                self.state
+                    .steps
+                    .get(index)
+                    .is_some_and(|step| step.step_id == step_id)
+            })
+            .ok_or_else(|| CompensatingSagaError::OutOfOrder {
+                step_id: step_id.to_owned(),
+            })
+    }
+
+    fn advance_rollback(
+        &mut self,
+        ledger: &mut ObligationLedger,
+        now: Time,
+    ) -> Result<(), CompensatingSagaError> {
+        let SagaExecutionPhase::RollingBack { failure } = self.phase else {
+            return Err(CompensatingSagaError::InvalidState(
+                "rollback phase was lost",
+            ));
+        };
+        self.state.current_step = self.state.steps.iter().rposition(|step| {
+            matches!(step.status, WorkflowStepStatus::Compensating { .. })
+        });
+        if self.state.current_step.is_none() {
+            let token = self
+                .owner
+                .token
+                .take()
+                .ok_or(CompensatingSagaError::RecoveryRequired)?;
+            ledger.try_abort(token, now, failure.abort_reason())?;
+            self.phase = if self.rollback_failures.is_empty() {
+                SagaExecutionPhase::Compensated { failure }
+            } else {
+                SagaExecutionPhase::Failed { failure }
+            };
+        }
+        Ok(())
+    }
+
+    #[track_caller]
+    fn allocate(
+        ledger: &mut ObligationLedger,
+        role: WorkflowObligationRole,
+        description: String,
+        holder: TaskId,
+        region: RegionId,
+        now: Time,
+    ) -> Result<WorkflowObligationHandle, CompensatingSagaError> {
+        #[cfg(test)]
+        if COMPENSATING_SAGA_ALLOCATION_FAILURE_AFTER.with(|remaining| match remaining.get() {
+            Some(0) => true,
+            Some(count) => {
+                remaining.set(Some(count - 1));
+                false
+            }
+            None => false,
+        }) {
+            return Err(CompensatingSagaError::InvalidState(
+                "injected saga obligation admission failure",
+            ));
+        }
+        role.validate()?;
+        validate_workflow_text("workflow_obligation.description", &description)?;
+        let token = ledger.try_acquire_with_context(
+            role.obligation_kind(),
+            holder,
+            region,
+            now,
+            SourceLocation::from_panic_location(Location::caller()),
+            None,
+            Some(description.clone()),
+        )?;
+        Ok(WorkflowObligationHandle {
+            role,
+            obligation_id: token.id(),
+            description,
+            allocated_at: now,
+            token: Some(token),
+        })
+    }
+
+    fn discard_prepared(
+        ledger: &mut ObligationLedger,
+        prepared: Vec<(usize, WorkflowObligationHandle)>,
+        now: Time,
+    ) {
+        for (_, mut handle) in prepared {
+            if let Some(token) = handle.token.take() {
+                let _ = ledger.try_abort(token, now, ObligationAbortReason::Explicit);
+            }
+        }
+    }
+
+    fn validate_declaration(state: &SagaState) -> Result<(), CompensatingSagaError> {
+        validate_workflow_text("saga_state.saga_id", &state.saga_id)?;
+        if state.steps.is_empty() {
+            return Err(CompensatingSagaError::InvalidState("the saga has no steps"));
+        }
+        let mut names = std::collections::BTreeSet::new();
+        for step in &state.steps {
+            validate_workflow_text("workflow_step.step_id", &step.step_id)?;
+            if !names.insert(&step.step_id) {
+                return Err(CompensatingSagaError::InvalidState("step IDs must be unique"));
+            }
+            if step.timeout.is_some_and(|timeout| timeout.is_zero()) {
+                return Err(CompensatingSagaError::InvalidState("a step timeout is zero"));
+            }
+            for role in &step.declared_obligations {
+                role.validate()?;
+                if role.is_compensation() {
+                    return Err(CompensatingSagaError::InvalidState(
+                        "compensation must be declared in compensation_path",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate(
+        &self,
+        ledger: &ObligationLedger,
+        require_tokens: bool,
+    ) -> Result<(), CompensatingSagaError> {
+        Self::validate_declaration(&self.state)?;
+        let mut ids = std::collections::BTreeSet::new();
+        ids.insert(self.owner.obligation_id);
+        let mut failed = std::collections::BTreeSet::new();
+        for failure in &self.rollback_failures {
+            if !failed.insert(failure.step_id()) {
+                return Err(CompensatingSagaError::InvalidState(
+                    "duplicate rollback failure",
+                ));
+            }
+            let Some(step) = self
+                .state
+                .steps
+                .iter()
+                .find(|step| step.step_id == failure.step_id())
+            else {
+                return Err(CompensatingSagaError::InvalidState("unknown failed step"));
+            };
+            match failure {
+                SagaRollbackFailure::MissingCompensation { .. }
+                    if step.compensation_path.is_empty()
+                        && matches!(step.status, WorkflowStepStatus::Failed { .. }) => {}
+                SagaRollbackFailure::CompensationFailed { failure, .. }
+                    if !step.compensation_path.is_empty()
+                        && step.status
+                            == (WorkflowStepStatus::Failed { failure: *failure }) => {}
+                _ => {
+                    return Err(CompensatingSagaError::InvalidState(
+                        "rollback failure disagrees with step",
+                    ));
+                }
+            }
+        }
+
+        let forward = matches!(
+            self.phase,
+            SagaExecutionPhase::Forward
+                | SagaExecutionPhase::RollbackPending { .. }
+                | SagaExecutionPhase::Committed
+        );
+        let primary_failure = match self.phase {
+            SagaExecutionPhase::RollbackPending { failure }
+            | SagaExecutionPhase::RollingBack { failure }
+            | SagaExecutionPhase::Compensated { failure }
+            | SagaExecutionPhase::Failed { failure } => Some(failure),
+            SagaExecutionPhase::Forward | SagaExecutionPhase::Committed => None,
+        };
+        let mut pending_seen = false;
+        for step in &self.state.steps {
+            if step.status == WorkflowStepStatus::Pending {
+                pending_seen = true;
+                if !step.obligations.is_empty() {
+                    return Err(CompensatingSagaError::InvalidState(
+                        "pending step has obligations",
+                    ));
+                }
+                continue;
+            }
+            if pending_seen {
+                return Err(CompensatingSagaError::InvalidState(
+                    "a later step started before a pending step",
+                ));
+            }
+            if forward
+                && !matches!(
+                    step.status,
+                    WorkflowStepStatus::Active | WorkflowStepStatus::Completed
+                )
+            {
+                return Err(CompensatingSagaError::InvalidState(
+                    "forward phase contains rollback state",
+                ));
+            }
+            if !forward
+                && matches!(
+                    step.status,
+                    WorkflowStepStatus::Active | WorkflowStepStatus::Completed
+                )
+            {
+                return Err(CompensatingSagaError::InvalidState(
+                    "rollback retained forward state",
+                ));
+            }
+            if matches!(step.status, WorkflowStepStatus::Failed { .. })
+                != failed.contains(step.step_id.as_str())
+            {
+                return Err(CompensatingSagaError::InvalidState(
+                    "failed step lacks its rollback failure",
+                ));
+            }
+            match step.status {
+                WorkflowStepStatus::Compensating { failure }
+                | WorkflowStepStatus::Compensated { failure }
+                    if Some(failure) != primary_failure =>
+                {
+                    return Err(CompensatingSagaError::InvalidState(
+                        "rollback primary failure changed",
+                    ));
+                }
+                WorkflowStepStatus::Failed { failure }
+                    if step.compensation_path.is_empty()
+                        && Some(failure) != primary_failure =>
+                {
+                    return Err(CompensatingSagaError::InvalidState(
+                        "uncompensated step lost the primary failure",
+                    ));
+                }
+                _ => {}
+            }
+            let compensation_count = if matches!(
+                step.status,
+                WorkflowStepStatus::Compensating { .. }
+                    | WorkflowStepStatus::Compensated { .. }
+                    | WorkflowStepStatus::Failed { .. }
+            ) {
+                step.compensation_path.len()
+            } else {
+                0
+            };
+            if step.obligations.len() != step.declared_obligations.len() + compensation_count {
+                return Err(CompensatingSagaError::InvalidState(
+                    "step obligation count disagrees with status",
+                ));
+            }
+            for (index, handle) in step.obligations.iter().enumerate() {
+                if !ids.insert(handle.obligation_id) {
+                    return Err(CompensatingSagaError::InvalidState(
+                        "duplicate obligation authority",
+                    ));
+                }
+                let compensation = index >= step.declared_obligations.len();
+                let expected_role = if compensation {
+                    WorkflowObligationRole::Compensation {
+                        subject: step.compensation_path[index - step.declared_obligations.len()]
+                            .clone(),
+                    }
+                } else {
+                    step.declared_obligations[index].clone()
+                };
+                if handle.role != expected_role {
+                    return Err(CompensatingSagaError::InvalidState(
+                        "step obligation role mismatch",
+                    ));
+                }
+                let recorded = handle.state(ledger)?;
+                let valid_state = if compensation {
+                    recorded
+                        == match step.status {
+                            WorkflowStepStatus::Compensating { .. } => ObligationState::Reserved,
+                            WorkflowStepStatus::Compensated { .. } => ObligationState::Committed,
+                            WorkflowStepStatus::Failed { .. } => ObligationState::Aborted,
+                            _ => {
+                                return Err(CompensatingSagaError::InvalidState(
+                                    "unexpected compensation",
+                                ));
+                            }
+                        }
+                } else {
+                    match step.status {
+                        WorkflowStepStatus::Active => recorded == ObligationState::Reserved,
+                        WorkflowStepStatus::Completed => recorded == ObligationState::Committed,
+                        _ => matches!(recorded, ObligationState::Committed | ObligationState::Aborted),
+                    }
+                };
+                if !valid_state {
+                    return Err(CompensatingSagaError::InvalidState(
+                        "step and ledger settlement disagree",
+                    ));
+                }
+                self.validate_handle(ledger, handle, recorded, require_tokens)?;
+            }
+        }
+
+        let expected_cursor = if forward {
+            self.state
+                .steps
+                .iter()
+                .position(|step| step.status != WorkflowStepStatus::Completed)
+        } else {
+            self.state.steps.iter().rposition(|step| {
+                matches!(step.status, WorkflowStepStatus::Compensating { .. })
+            })
+        };
+        let fresh = matches!(
+            self.phase,
+            SagaExecutionPhase::Forward | SagaExecutionPhase::RollbackPending { .. }
+        ) && self.state.current_step.is_none()
+            && self
+                .state
+                .steps
+                .iter()
+                .all(|step| step.status == WorkflowStepStatus::Pending);
+        if self.state.current_step != expected_cursor && !fresh {
+            return Err(CompensatingSagaError::InvalidState(
+                "the execution cursor is inconsistent",
+            ));
+        }
+        if forward {
+            if !self.rollback_failures.is_empty()
+                || !self.state.compensated_steps.is_empty()
+                || (self.phase == SagaExecutionPhase::Committed) != expected_cursor.is_none()
+                || expected_cursor.is_some_and(|index| {
+                    self.state.steps[index + 1..]
+                        .iter()
+                        .any(|step| step.status != WorkflowStepStatus::Pending)
+                })
+            {
+                return Err(CompensatingSagaError::InvalidState(
+                    "invalid forward progress",
+                ));
+            }
+        } else {
+            let compensated: Vec<_> = self
+                .state
+                .steps
+                .iter()
+                .rev()
+                .filter(|step| matches!(step.status, WorkflowStepStatus::Compensated { .. }))
+                .map(|step| step.step_id.clone())
+                .collect();
+            let out_of_order = expected_cursor.is_some_and(|cursor| {
+                self.state.steps[..cursor].iter().any(|step| {
+                    matches!(step.status, WorkflowStepStatus::Compensated { .. })
+                        || (matches!(step.status, WorkflowStepStatus::Failed { .. })
+                            && !step.compensation_path.is_empty())
+                })
+            });
+            if self.state.compensated_steps != compensated
+                || out_of_order
+                || matches!(self.phase, SagaExecutionPhase::RollingBack { .. })
+                    != expected_cursor.is_some()
+                || (matches!(self.phase, SagaExecutionPhase::Compensated { .. })
+                    && !failed.is_empty())
+                || (matches!(self.phase, SagaExecutionPhase::Failed { .. }) && failed.is_empty())
+            {
+                return Err(CompensatingSagaError::InvalidState(
+                    "invalid rollback progress",
+                ));
+            }
+        }
+
+        if self.owner.role
+            != (WorkflowObligationRole::Lease {
+                resource: format!("saga {}", self.state.saga_id),
+            })
+            || self.owner.description
+                != format!("compensating saga {} ownership", self.state.saga_id)
+        {
+            return Err(CompensatingSagaError::InvalidState(
+                "ownership identity mismatch",
+            ));
+        }
+        let owner_state = match self.phase {
+            SagaExecutionPhase::Forward
+            | SagaExecutionPhase::RollbackPending { .. }
+            | SagaExecutionPhase::RollingBack { .. } => ObligationState::Reserved,
+            SagaExecutionPhase::Committed => ObligationState::Committed,
+            SagaExecutionPhase::Compensated { .. } | SagaExecutionPhase::Failed { .. } => {
+                ObligationState::Aborted
+            }
+        };
+        self.validate_handle(ledger, &self.owner, owner_state, require_tokens)
+    }
+
+    fn validate_handle(
+        &self,
+        ledger: &ObligationLedger,
+        handle: &WorkflowObligationHandle,
+        expected: ObligationState,
+        require_token: bool,
+    ) -> Result<(), CompensatingSagaError> {
+        let record = ledger
+            .get(handle.obligation_id)
+            .ok_or(WorkflowStateError::UnknownObligation {
+                obligation_id: handle.obligation_id,
+            })?;
+        if record.state != expected
+            || record.kind != handle.role.obligation_kind()
+            || record.holder != self.holder
+            || record.region != self.region
+            || record.reserved_at != handle.allocated_at
+            || record.description.as_deref() != Some(handle.description.as_str())
+        {
+            return Err(CompensatingSagaError::InvalidState(
+                "obligation does not match its ledger record",
+            ));
+        }
+        if expected == ObligationState::Reserved {
+            if ledger.is_region_finalized(self.region) {
+                return Err(CompensatingSagaError::InvalidState(
+                    "the owning region is finalized",
+                ));
+            }
+            if let Some(token) = &handle.token {
+                if token.id() != handle.obligation_id
+                    || token.kind() != record.kind
+                    || token.holder() != self.holder
+                    || token.region() != self.region
+                {
+                    return Err(CompensatingSagaError::InvalidState(
+                        "linear token identity mismatch",
+                    ));
+                }
+            } else if require_token {
+                return Err(CompensatingSagaError::RecoveryRequired);
+            }
+        } else if handle.token.is_some() {
+            return Err(CompensatingSagaError::InvalidState(
+                "terminal obligation retains a live token",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Validation failure for FABRIC service contracts and caller requests.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ServiceContractError {

@@ -197,12 +197,14 @@ pub use redis::{RedisClient, RedisConfig, RedisError};
 #[cfg(feature = "messaging-fabric")]
 pub use service::{
     BudgetSemantics, CallerOptions, CancellationObligations, CaptureRules, ChunkedReplyObligation,
-    CompensationSemantics, EvidenceLevel, MobilityConstraint, MonitoringPolicy, OverloadPolicy,
+    CompensatingSaga, CompensatingSagaError, CompensationSemantics, EvidenceLevel,
+    MobilityConstraint, MonitoringPolicy, OverloadPolicy,
     PayloadShape, ProviderTerms, QuantitativeContract, QuantitativeContractError,
     QuantitativeContractEvaluation, QuantitativeContractMonitor, QuantitativeContractState,
     QuantitativeMonitorAlertState, QuantitativeMonitorEvidence, QuantitativePolicyRecommendation,
     ReplyCertificate, ReplyShape, RequestCertificate, RetryLaw, SagaEvidenceEvent,
-    SagaEvidenceRecord, SagaState, ServiceContractError, ServiceContractSchema,
+    SagaEvidenceRecord, SagaExecutionPhase, SagaRollbackFailure, SagaState,
+    ServiceContractError, ServiceContractSchema,
     ServiceRegistration, ValidatedServiceRequest, WorkflowObligationHandle, WorkflowObligationRole,
     WorkflowOwedObligation, WorkflowStateError, WorkflowStep, WorkflowStepStatus,
 };

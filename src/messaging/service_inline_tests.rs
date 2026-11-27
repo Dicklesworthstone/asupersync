@@ -3503,3 +3503,700 @@ fn quantitative_ratio_is_fail_closed_on_empty_window() {
     assert_eq!(ratio(0, 0), 0.0);
     assert_eq!(bool_ratio(&VecDeque::new()), 0.0);
 }
+
+fn compensating_checkout(ledger: &mut ObligationLedger) -> CompensatingSaga {
+    let steps = ["reserve", "charge", "ship", "notify"]
+        .into_iter()
+        .map(|name| {
+            workflow_step(
+                name,
+                &format!("fabric.checkout.{name}"),
+                vec![WorkflowObligationRole::Lease {
+                    resource: format!("checkout.{name}"),
+                }],
+                &[&format!("fabric.checkout.undo.{name}")],
+            )
+        })
+        .collect();
+    CompensatingSaga::new(
+        SagaState::new("checkout-controller", steps).expect("declaration"),
+        ledger,
+        make_task(),
+        make_region(),
+        Time::from_nanos(1),
+    )
+    .expect("controller admission")
+}
+
+fn checkout_with_uncertain_ship(ledger: &mut ObligationLedger) -> CompensatingSaga {
+    let mut saga = compensating_checkout(ledger);
+    for (tick, name) in [(2, "reserve"), (4, "charge")] {
+        saga.start_next_step(ledger, Time::from_nanos(tick))
+            .expect("start forward effect");
+        saga.complete_current_step(ledger, name, Time::from_nanos(tick + 1))
+            .expect("acknowledge forward effect");
+    }
+    saga.start_next_step(ledger, Time::from_nanos(6))
+        .expect("ship may have changed the world before its reply was lost");
+    saga
+}
+
+#[test]
+fn whole_saga_rollback_compensates_uncertain_step_then_completed_effects() {
+    let mut ledger = ObligationLedger::new();
+    let mut saga = checkout_with_uncertain_ship(&mut ledger);
+    let _: &crate::messaging::CompensatingSaga = &saga;
+    let owner = saga.ownership_id();
+    let uncertain = saga.state().steps[2].obligations[0].obligation_id;
+    assert_eq!(ledger.pending_count(), 2, "active step plus lifetime lease");
+
+    saga.begin_rollback_after_quiescence(
+        &mut ledger,
+        Time::from_nanos(7),
+        ServiceFailure::TransportError,
+    )
+    .expect("caller has drained forward work");
+    assert_eq!(ledger.get(uncertain).unwrap().state, ObligationState::Aborted);
+    assert_eq!(saga.state().steps[3].status, WorkflowStepStatus::Pending);
+    assert_eq!(ledger.pending_count(), 4, "three compensation paths plus owner");
+    let acquired = ledger.len();
+    saga.begin_rollback_after_quiescence(
+        &mut ledger,
+        Time::from_nanos(8),
+        ServiceFailure::TimedOut,
+    )
+    .expect("duplicate rollback retains its first failure");
+    assert_eq!(ledger.len(), acquired);
+    assert_eq!(
+        saga.phase(),
+        SagaExecutionPhase::RollingBack {
+            failure: ServiceFailure::TransportError,
+        }
+    );
+    assert!(matches!(
+        saga.start_next_step(&mut ledger, Time::from_nanos(9)),
+        Err(CompensatingSagaError::Phase { .. })
+    ));
+    assert!(matches!(
+        saga.complete_current_step(&mut ledger, "charge", Time::from_nanos(9)),
+        Err(CompensatingSagaError::Phase { .. })
+    ));
+    assert!(matches!(
+        saga.complete_compensation(&mut ledger, "reserve", Time::from_nanos(9)),
+        Err(CompensatingSagaError::OutOfOrder { .. })
+    ));
+    assert_eq!(ledger.pending_count(), 4);
+
+    let mut effects = vec!["reserve", "charge", "ship"];
+    let mut executed = Vec::new();
+    for (tick, expected) in [(10, "ship"), (11, "charge"), (12, "reserve")] {
+        let current = saga.current_compensation().expect("next undo");
+        assert_eq!(current.step_id, expected);
+        assert_eq!(
+            current.compensation_path[0].as_str(),
+            format!("fabric.checkout.undo.{expected}")
+        );
+        assert_eq!(effects.pop(), Some(expected));
+        executed.push(expected);
+        saga.complete_compensation(&mut ledger, expected, Time::from_nanos(tick))
+            .expect("acknowledge this exact undo");
+        let next = saga.state().current_step;
+        let pending = ledger.pending_count();
+        saga.complete_compensation(&mut ledger, expected, Time::from_nanos(tick))
+            .expect("duplicate acknowledgement is harmless");
+        assert_eq!(saga.state().current_step, next);
+        assert_eq!(ledger.pending_count(), pending);
+    }
+    assert_eq!(executed, ["ship", "charge", "reserve"]);
+    assert!(effects.is_empty());
+    assert_eq!(saga.state().compensated_steps, ["ship", "charge", "reserve"]);
+    assert!(saga.current_compensation().is_none());
+    assert!(saga.rollback_failures().is_empty());
+    assert_eq!(
+        saga.phase(),
+        SagaExecutionPhase::Compensated {
+            failure: ServiceFailure::TransportError,
+        }
+    );
+    assert_eq!(ledger.pending_count(), 0);
+    assert_eq!(ledger.get(owner).unwrap().state, ObligationState::Aborted);
+    assert!(saga.what_is_still_owed(&ledger).unwrap().is_empty());
+}
+
+#[test]
+fn whole_saga_commit_releases_owner_and_cannot_be_rolled_back() {
+    let mut ledger = ObligationLedger::new();
+    let mut saga = compensating_checkout(&mut ledger);
+    let owner = saga.ownership_id();
+    for (index, name) in ["reserve", "charge", "ship", "notify"].into_iter().enumerate() {
+        let now = Time::from_nanos(10 + index as u64);
+        saga.start_next_step(&mut ledger, now).unwrap();
+        saga.start_next_step(&mut ledger, now).unwrap();
+        saga.complete_current_step(&mut ledger, name, now).unwrap();
+        let pending = ledger.pending_count();
+        saga.complete_current_step(&mut ledger, name, now).unwrap();
+        assert_eq!(ledger.pending_count(), pending);
+    }
+    assert_eq!(saga.phase(), SagaExecutionPhase::Committed);
+    assert_eq!(ledger.pending_count(), 0);
+    assert_eq!(ledger.get(owner).unwrap().state, ObligationState::Committed);
+    let count = ledger.len();
+    assert!(matches!(
+        saga.begin_rollback_after_quiescence(
+            &mut ledger,
+            Time::from_nanos(20),
+            ServiceFailure::Cancelled,
+        ),
+        Err(CompensatingSagaError::Phase { .. })
+    ));
+    assert_eq!(ledger.len(), count);
+}
+
+#[test]
+fn whole_saga_missing_and_failed_compensation_still_drain_older_paths() {
+    let mut ledger = ObligationLedger::new();
+    let steps = vec![
+        workflow_step("irreversible", "fabric.write", vec![], &[]),
+        workflow_step("reserve", "fabric.reserve", vec![], &["fabric.release"]),
+        workflow_step(
+            "charge",
+            "fabric.charge",
+            vec![WorkflowObligationRole::Timeout],
+            &["fabric.refund", "fabric.reconcile"],
+        ),
+        workflow_step("future", "fabric.notify", vec![], &["fabric.unnotify"]),
+    ];
+    let mut saga = CompensatingSaga::new(
+        SagaState::new("failed-undo", steps).unwrap(),
+        &mut ledger,
+        make_task(),
+        make_region(),
+        Time::ZERO,
+    )
+    .unwrap();
+    for name in ["irreversible", "reserve"] {
+        saga.start_next_step(&mut ledger, Time::from_nanos(1)).unwrap();
+        saga.complete_current_step(&mut ledger, name, Time::from_nanos(2))
+            .unwrap();
+    }
+    saga.start_next_step(&mut ledger, Time::from_nanos(3)).unwrap();
+    saga.begin_rollback_after_quiescence(
+        &mut ledger,
+        Time::from_nanos(4),
+        ServiceFailure::TransportError,
+    )
+    .unwrap();
+    assert_eq!(saga.current_compensation().unwrap().step_id, "charge");
+    assert_eq!(saga.current_compensation().unwrap().compensation_path.len(), 2);
+    saga.fail_compensation(
+        &mut ledger,
+        "charge",
+        ServiceFailure::ApplicationError,
+        Time::from_nanos(5),
+    )
+    .unwrap();
+    assert_eq!(saga.current_compensation().unwrap().step_id, "reserve");
+    let pending = ledger.pending_count();
+    saga.fail_compensation(
+        &mut ledger,
+        "charge",
+        ServiceFailure::ApplicationError,
+        Time::from_nanos(5),
+    )
+    .unwrap();
+    assert_eq!(ledger.pending_count(), pending);
+    assert_eq!(saga.current_compensation().unwrap().step_id, "reserve");
+    saga.complete_compensation(&mut ledger, "reserve", Time::from_nanos(6))
+        .unwrap();
+    assert_eq!(
+        saga.phase(),
+        SagaExecutionPhase::Failed {
+            failure: ServiceFailure::TransportError,
+        }
+    );
+    assert_eq!(
+        saga.rollback_failures(),
+        [
+            SagaRollbackFailure::MissingCompensation {
+                step_id: "irreversible".to_owned(),
+            },
+            SagaRollbackFailure::CompensationFailed {
+                step_id: "charge".to_owned(),
+                failure: ServiceFailure::ApplicationError,
+            },
+        ]
+    );
+    assert_eq!(saga.state().steps[3].status, WorkflowStepStatus::Pending);
+    assert_eq!(ledger.pending_count(), 0);
+    assert!(saga.what_is_still_owed(&ledger).unwrap().is_empty());
+}
+
+#[test]
+fn whole_saga_replay_takes_over_once_and_resumes_reverse_cursor() {
+    let mut ledger = ObligationLedger::new();
+    let mut old = checkout_with_uncertain_ship(&mut ledger);
+    old.begin_rollback_after_quiescence(
+        &mut ledger,
+        Time::from_nanos(7),
+        ServiceFailure::TransportError,
+    )
+    .unwrap();
+    let original_owner = old.ownership_id();
+    let snapshot = serde_json::to_string(&old).unwrap();
+    let mut recovered: CompensatingSaga = serde_json::from_str(&snapshot).unwrap();
+    assert!(matches!(
+        recovered.complete_compensation(&mut ledger, "ship", Time::from_nanos(8)),
+        Err(CompensatingSagaError::RecoveryRequired)
+    ));
+    assert_eq!(ledger.pending_count(), 4);
+    recovered
+        .recover_from_replay_after_quiescence(
+            &mut ledger,
+            Time::from_nanos(9),
+            ServiceFailure::Cancelled,
+        )
+        .unwrap();
+    assert_ne!(recovered.ownership_id(), original_owner);
+    assert_eq!(ledger.get(original_owner).unwrap().state, ObligationState::Aborted);
+    assert_eq!(recovered.current_compensation().unwrap().step_id, "ship");
+    assert_eq!(ledger.pending_count(), 4);
+    assert!(old.complete_compensation(&mut ledger, "ship", Time::from_nanos(10)).is_err());
+    assert_eq!(ledger.pending_count(), 4);
+    let count = ledger.len();
+    let mut duplicate: CompensatingSaga = serde_json::from_str(&snapshot).unwrap();
+    assert!(duplicate
+        .recover_from_replay_after_quiescence(
+            &mut ledger,
+            Time::from_nanos(10),
+            ServiceFailure::Cancelled,
+        )
+        .is_err());
+    assert_eq!(ledger.len(), count);
+    assert_eq!(ledger.pending_count(), 4);
+
+    recovered
+        .complete_compensation(&mut ledger, "ship", Time::from_nanos(11))
+        .unwrap();
+    let second_snapshot = serde_json::to_string(&recovered).unwrap();
+    let mut resumed: CompensatingSaga = serde_json::from_str(&second_snapshot).unwrap();
+    resumed
+        .recover_from_replay_after_quiescence(
+            &mut ledger,
+            Time::from_nanos(12),
+            ServiceFailure::TimedOut,
+        )
+        .unwrap();
+    assert_eq!(resumed.state().compensated_steps, ["ship"]);
+    assert_eq!(resumed.current_compensation().unwrap().step_id, "charge");
+    assert_eq!(ledger.pending_count(), 3);
+    resumed
+        .complete_compensation(&mut ledger, "ship", Time::from_nanos(13))
+        .unwrap();
+    assert_eq!(resumed.current_compensation().unwrap().step_id, "charge");
+    for name in ["charge", "reserve"] {
+        resumed.complete_compensation(&mut ledger, name, Time::from_nanos(14))
+            .unwrap();
+    }
+    assert_eq!(
+        resumed.phase(),
+        SagaExecutionPhase::Compensated {
+            failure: ServiceFailure::TransportError,
+        }
+    );
+    assert_eq!(ledger.pending_count(), 0);
+    let terminal = serde_json::to_string(&resumed).unwrap();
+    let mut terminal: CompensatingSaga = serde_json::from_str(&terminal).unwrap();
+    let count = ledger.len();
+    terminal
+        .recover_from_replay_after_quiescence(
+            &mut ledger,
+            Time::from_nanos(15),
+            ServiceFailure::Cancelled,
+        )
+        .unwrap();
+    assert_eq!(ledger.len(), count);
+}
+
+#[test]
+fn whole_saga_forward_replay_treats_active_work_as_uncertain() {
+    let mut ledger = ObligationLedger::new();
+    let mut old = checkout_with_uncertain_ship(&mut ledger);
+    let old_forward = old.state().steps[2].obligations[0].obligation_id;
+    let snapshot = serde_json::to_string(&old).unwrap();
+    let mut recovered: CompensatingSaga = serde_json::from_str(&snapshot).unwrap();
+    recovered
+        .recover_from_replay_after_quiescence(
+            &mut ledger,
+            Time::from_nanos(8),
+            ServiceFailure::TimedOut,
+        )
+        .unwrap();
+    assert_eq!(ledger.get(old_forward).unwrap().state, ObligationState::Aborted);
+    assert_eq!(
+        recovered.phase(),
+        SagaExecutionPhase::RollingBack {
+            failure: ServiceFailure::TimedOut,
+        }
+    );
+    assert_eq!(recovered.current_compensation().unwrap().step_id, "ship");
+    assert_eq!(recovered.state().steps[3].status, WorkflowStepStatus::Pending);
+    assert!(old.complete_current_step(&mut ledger, "ship", Time::from_nanos(9)).is_err());
+    assert!(recovered.start_next_step(&mut ledger, Time::from_nanos(9)).is_err());
+    for name in ["ship", "charge", "reserve"] {
+        recovered
+            .complete_compensation(&mut ledger, name, Time::from_nanos(10))
+            .unwrap();
+    }
+    assert_eq!(ledger.pending_count(), 0);
+}
+
+#[test]
+fn whole_saga_recovery_rejects_inconsistent_cursor_and_duplicate_authority() {
+    let mut ledger = ObligationLedger::new();
+    let mut live = checkout_with_uncertain_ship(&mut ledger);
+    live.begin_rollback_after_quiescence(
+        &mut ledger,
+        Time::from_nanos(7),
+        ServiceFailure::TransportError,
+    )
+    .unwrap();
+    let snapshot = serde_json::to_value(&live).unwrap();
+    let count = ledger.len();
+    let pending = ledger.pending_count();
+    let owner = live.ownership_id();
+    for defect in 0..4 {
+        let mut malformed = snapshot.clone();
+        match defect {
+            0 => malformed["state"]["current_step"] = serde_json::json!(0),
+            1 => malformed["state"]["steps"][1]["step_id"] = serde_json::json!("reserve"),
+            2 => {
+                malformed["state"]["steps"][1]["obligations"][0]["obligation_id"] =
+                    malformed["state"]["steps"][0]["obligations"][0]["obligation_id"].clone();
+            }
+            _ => malformed["holder"] = serde_json::to_value(
+                TaskId::from_arena(ArenaIndex::new(99, 0)),
+            ).unwrap(),
+        }
+        let mut invalid: CompensatingSaga = serde_json::from_value(malformed).unwrap();
+        assert!(invalid
+            .recover_from_replay_after_quiescence(
+                &mut ledger,
+                Time::from_nanos(8),
+                ServiceFailure::Cancelled,
+            )
+            .is_err(), "defect {defect} must be refused");
+        assert_eq!(ledger.len(), count);
+        assert_eq!(ledger.pending_count(), pending);
+        assert_eq!(ledger.get(owner).unwrap().state, ObligationState::Reserved);
+    }
+    for name in ["ship", "charge", "reserve"] {
+        live.complete_compensation(&mut ledger, name, Time::from_nanos(9)).unwrap();
+    }
+    assert_eq!(ledger.pending_count(), 0);
+}
+
+#[test]
+fn whole_saga_lifetime_is_owed_between_steps_and_when_abandoned() {
+    let mut ledger = ObligationLedger::new();
+    let saga = compensating_checkout(&mut ledger);
+    let owner = saga.ownership_id();
+    assert_eq!(ledger.pending_count(), 1);
+    assert!(saga.what_is_still_owed(&ledger).unwrap().is_empty());
+    drop(saga);
+    assert_eq!(ledger.pending_count(), 1, "abandonment cannot claim rollback");
+    assert_eq!(ledger.get(owner).unwrap().state, ObligationState::Reserved);
+    assert!(!ledger.check_region_leaks(make_region()).is_clean());
+    ledger
+        .try_abort_by_id(owner, Time::from_nanos(2), ObligationAbortReason::Explicit)
+        .unwrap();
+
+    let mut fresh = compensating_checkout(&mut ledger);
+    fresh.begin_rollback_after_quiescence(
+        &mut ledger,
+        Time::from_nanos(3),
+        ServiceFailure::Cancelled,
+    )
+    .unwrap();
+    assert_eq!(
+        fresh.phase(),
+        SagaExecutionPhase::Compensated {
+            failure: ServiceFailure::Cancelled,
+        }
+    );
+    assert!(fresh.rollback_failures().is_empty());
+    assert!(fresh.current_compensation().is_none());
+    assert_eq!(ledger.pending_count(), 0);
+}
+
+#[test]
+fn whole_saga_refuses_invalid_admission_and_finalized_region() {
+    let mut ledger = ObligationLedger::new();
+    let duplicate = SagaState::new(
+        "duplicate",
+        vec![
+            workflow_step("same", "fabric.one", vec![], &[]),
+            workflow_step("same", "fabric.two", vec![], &[]),
+        ],
+    )
+    .unwrap();
+    assert!(CompensatingSaga::new(
+        duplicate,
+        &mut ledger,
+        make_task(),
+        make_region(),
+        Time::ZERO,
+    )
+    .is_err());
+    assert_eq!(ledger.len(), 0);
+    ledger.mark_region_finalized(make_region());
+    let declaration = SagaState::new(
+        "closed",
+        vec![workflow_step("one", "fabric.one", vec![], &[])],
+    ).unwrap();
+    assert!(matches!(
+        CompensatingSaga::new(
+            declaration, &mut ledger, make_task(), make_region(), Time::ZERO,
+        ),
+        Err(CompensatingSagaError::Ledger(_))
+    ));
+    assert_eq!(ledger.len(), 0);
+}
+
+#[test]
+fn workflow_legacy_compensation_remains_per_step() {
+    let mut ledger = ObligationLedger::new();
+    let mut legacy = SagaState::new(
+        "legacy",
+        vec![
+            workflow_step("reserve", "fabric.reserve", vec![], &["fabric.release"]),
+            workflow_step("charge", "fabric.charge", vec![], &["fabric.refund"]),
+            workflow_step("notify", "fabric.notify", vec![], &[]),
+        ],
+    )
+    .unwrap();
+    legacy.start_next_step(&mut ledger, make_task(), make_region(), Time::ZERO).unwrap();
+    legacy.complete_current_step(&mut ledger, Time::from_nanos(1)).unwrap();
+    legacy.start_next_step(&mut ledger, make_task(), make_region(), Time::from_nanos(2)).unwrap();
+    legacy.fail_current_step(
+        &mut ledger, Time::from_nanos(3), ServiceFailure::TransportError,
+        make_task(), make_region(),
+    ).unwrap();
+    legacy.complete_current_compensation(&mut ledger, Time::from_nanos(4)).unwrap();
+    assert_eq!(legacy.steps[0].status, WorkflowStepStatus::Completed);
+    assert_eq!(legacy.compensated_steps, ["charge"]);
+    assert_eq!(legacy.current_step, Some(2));
+    assert_eq!(ledger.pending_count(), 0);
+}
+
+struct RefuseSagaAllocation;
+
+impl RefuseSagaAllocation {
+    fn after(successes: usize) -> Self {
+        COMPENSATING_SAGA_ALLOCATION_FAILURE_AFTER.with(|remaining| {
+            assert!(remaining.get().is_none());
+            remaining.set(Some(successes));
+        });
+        Self
+    }
+}
+
+impl Drop for RefuseSagaAllocation {
+    fn drop(&mut self) {
+        COMPENSATING_SAGA_ALLOCATION_FAILURE_AFTER.with(|remaining| remaining.set(None));
+    }
+}
+
+#[test]
+fn whole_saga_rollback_admission_failure_freezes_forward_and_retries_cleanly() {
+    let mut ledger = ObligationLedger::new();
+    let mut saga = checkout_with_uncertain_ship(&mut ledger);
+    let original_pending = ledger.pending_count();
+    let original_len = ledger.len();
+    let refusal = RefuseSagaAllocation::after(1);
+    assert!(saga
+        .begin_rollback_after_quiescence(
+            &mut ledger,
+            Time::from_nanos(7),
+            ServiceFailure::TransportError,
+        )
+        .is_err());
+    drop(refusal);
+    assert_eq!(
+        saga.phase(),
+        SagaExecutionPhase::RollbackPending {
+            failure: ServiceFailure::TransportError,
+        }
+    );
+    assert_eq!(ledger.len(), original_len + 1, "one actual provisional admission");
+    assert_eq!(ledger.pending_count(), original_pending, "provisional token retired");
+    assert_eq!(saga.state().steps[2].status, WorkflowStepStatus::Active);
+    assert!(saga.current_compensation().is_none());
+    assert!(matches!(
+        saga.start_next_step(&mut ledger, Time::from_nanos(8)),
+        Err(CompensatingSagaError::Phase { .. })
+    ));
+    assert!(matches!(
+        saga.complete_current_step(&mut ledger, "ship", Time::from_nanos(8)),
+        Err(CompensatingSagaError::Phase { .. })
+    ));
+    saga.begin_rollback_after_quiescence(
+        &mut ledger,
+        Time::from_nanos(9),
+        ServiceFailure::Cancelled,
+    )
+    .unwrap();
+    assert_eq!(
+        saga.phase(),
+        SagaExecutionPhase::RollingBack {
+            failure: ServiceFailure::TransportError,
+        }
+    );
+    assert_eq!(ledger.pending_count(), 4);
+    for name in ["ship", "charge", "reserve"] {
+        saga.complete_compensation(&mut ledger, name, Time::from_nanos(10))
+            .unwrap();
+    }
+    assert_eq!(ledger.pending_count(), 0);
+}
+
+#[test]
+fn whole_saga_replay_admission_failure_retains_new_owner_for_rollback_retry() {
+    let mut ledger = ObligationLedger::new();
+    let mut old = checkout_with_uncertain_ship(&mut ledger);
+    let original_owner = old.ownership_id();
+    let snapshot = serde_json::to_string(&old).unwrap();
+    let mut recovered: CompensatingSaga = serde_json::from_str(&snapshot).unwrap();
+    // Replacement owner, replacement active obligation, one compensation;
+    // the next compensation admission fails after takeover.
+    let refusal = RefuseSagaAllocation::after(3);
+    assert!(recovered
+        .recover_from_replay_after_quiescence(
+            &mut ledger,
+            Time::from_nanos(8),
+            ServiceFailure::TimedOut,
+        )
+        .is_err());
+    drop(refusal);
+    assert_ne!(recovered.ownership_id(), original_owner);
+    assert_eq!(ledger.get(original_owner).unwrap().state, ObligationState::Aborted);
+    assert_eq!(ledger.pending_count(), 2, "new owner plus uncertain active work");
+    assert_eq!(
+        recovered.phase(),
+        SagaExecutionPhase::RollbackPending {
+            failure: ServiceFailure::TimedOut,
+        }
+    );
+    assert!(old.complete_current_step(&mut ledger, "ship", Time::from_nanos(9)).is_err());
+    assert!(recovered.start_next_step(&mut ledger, Time::from_nanos(9)).is_err());
+    assert!(recovered
+        .recover_from_replay_after_quiescence(
+            &mut ledger,
+            Time::from_nanos(9),
+            ServiceFailure::Cancelled,
+        )
+        .is_err(), "live replacement authority must not be acquired again");
+    assert_eq!(ledger.pending_count(), 2);
+
+    // The pending rollback itself can be checkpointed and taken over once.
+    let pending_snapshot = serde_json::to_string(&recovered).unwrap();
+    let mut resumed: CompensatingSaga = serde_json::from_str(&pending_snapshot).unwrap();
+    resumed
+        .recover_from_replay_after_quiescence(
+            &mut ledger,
+            Time::from_nanos(10),
+            ServiceFailure::Cancelled,
+        )
+        .unwrap();
+    assert_eq!(
+        resumed.phase(),
+        SagaExecutionPhase::RollingBack {
+            failure: ServiceFailure::TimedOut,
+        }
+    );
+    assert!(recovered
+        .begin_rollback_after_quiescence(
+            &mut ledger,
+            Time::from_nanos(11),
+            ServiceFailure::Cancelled,
+        )
+        .is_err(), "the prior replacement owner is fenced too");
+    for name in ["ship", "charge", "reserve"] {
+        resumed.complete_compensation(&mut ledger, name, Time::from_nanos(12))
+            .unwrap();
+    }
+    assert_eq!(ledger.pending_count(), 0);
+}
+
+#[test]
+fn whole_saga_forward_admission_is_atomic_and_can_retry_or_roll_back() {
+    for retry in [false, true] {
+        let mut ledger = ObligationLedger::new();
+        let steps = vec![
+            workflow_step(
+                "reserve",
+                "fabric.reserve",
+                vec![WorkflowObligationRole::Lease { resource: "stock".to_owned() }],
+                &["fabric.release"],
+            ),
+            workflow_step(
+                "charge",
+                "fabric.charge",
+                vec![
+                    WorkflowObligationRole::Timeout,
+                    WorkflowObligationRole::Lease { resource: "payment".to_owned() },
+                ],
+                &["fabric.refund"],
+            ),
+        ];
+        let mut saga = CompensatingSaga::new(
+            SagaState::new("atomic-forward", steps).unwrap(),
+            &mut ledger,
+            make_task(),
+            make_region(),
+            Time::ZERO,
+        )
+        .unwrap();
+        saga.start_next_step(&mut ledger, Time::from_nanos(1)).unwrap();
+        saga.complete_current_step(&mut ledger, "reserve", Time::from_nanos(2))
+            .unwrap();
+        let before = serde_json::to_string(&saga).unwrap();
+        let record_count = ledger.len();
+        let refusal = RefuseSagaAllocation::after(1);
+        assert!(saga.start_next_step(&mut ledger, Time::from_nanos(3)).is_err());
+        drop(refusal);
+        assert_eq!(ledger.len(), record_count + 1, "first reservation was real");
+        assert_eq!(ledger.pending_count(), 1, "only the lifetime lease remains");
+        assert_eq!(serde_json::to_string(&saga).unwrap(), before);
+        assert_eq!(saga.phase(), SagaExecutionPhase::Forward);
+        assert_eq!(saga.state().current_step, Some(1));
+        assert_eq!(saga.state().steps[1].status, WorkflowStepStatus::Pending);
+        assert!(saga.state().steps[1].obligations.is_empty());
+        if retry {
+            saga.start_next_step(&mut ledger, Time::from_nanos(4)).unwrap();
+            assert_eq!(ledger.pending_count(), 3);
+            assert_eq!(saga.state().steps[1].obligations.len(), 2);
+            let record_count = ledger.len();
+            saga.start_next_step(&mut ledger, Time::from_nanos(5)).unwrap();
+            assert_eq!(ledger.len(), record_count, "active admission is idempotent");
+            saga.complete_current_step(&mut ledger, "charge", Time::from_nanos(6))
+                .unwrap();
+            assert_eq!(saga.phase(), SagaExecutionPhase::Committed);
+        } else {
+            saga.begin_rollback_after_quiescence(
+                &mut ledger,
+                Time::from_nanos(4),
+                ServiceFailure::Rejected,
+            )
+            .unwrap();
+            assert_eq!(saga.current_compensation().unwrap().step_id, "reserve");
+            assert_eq!(saga.state().steps[1].status, WorkflowStepStatus::Pending);
+            saga.complete_compensation(&mut ledger, "reserve", Time::from_nanos(5))
+                .unwrap();
+            assert_eq!(
+                saga.phase(),
+                SagaExecutionPhase::Compensated { failure: ServiceFailure::Rejected }
+            );
+        }
+        assert_eq!(ledger.pending_count(), 0);
+    }
+}
