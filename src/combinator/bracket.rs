@@ -63,7 +63,7 @@ struct BracketState<Res, T, E, A, UF, R, RF> {
     phase: BracketPhase<A, UF, RF>,
     /// The release function (consumed when transitioning to Releasing).
     release_fn: Option<R>,
-    /// Clone of the resource for release (set after acquire succeeds).
+    /// Resource retained for release (a clone after successful handoff to use).
     resource_for_release: Option<Res>,
     /// The result from the use phase (stored for return after release).
     use_result: Option<std::thread::Result<Result<T, E>>>,
@@ -82,6 +82,9 @@ struct BracketState<Res, T, E, A, UF, R, RF> {
 /// drive the release future to completion. Immediately-progressable release
 /// futures are cleaned up even on cancellation; externally-woken release
 /// futures fail closed if they exhaust that bounded drop loop.
+/// A resource-clone panic after acquisition still releases the original
+/// resource before propagating the panic. Unused use-constructor captures are
+/// retired before release; their secondary destructor panics do not skip it.
 /// Catchable panics from retiring a use future do not skip release. Cleanup
 /// futures are retired before any deferred panic is resumed; a release failure
 /// takes precedence over a use-phase failure. During an existing unwind,
@@ -146,6 +149,20 @@ where
         let retirement =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(previous_phase)));
 
+        // A failed resource clone leaves the use constructor uninvoked. Its
+        // captures may need the completed acquire future's locks, and release
+        // may need theirs. Retire them between those two phases. A secondary
+        // unused-capture panic must neither replace the clone panic nor skip
+        // resource release.
+        if let Some(unused) = self.use_fn.take()
+            && let Err(unused_panic) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(unused)))
+            && let Err(payload_panic) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(unused_panic)))
+        {
+            std::mem::forget(payload_panic);
+        }
+
         let release_fn = self
             .state
             .release_fn
@@ -203,8 +220,27 @@ where
                             return Poll::Ready(Err(BracketError::Inner(e)));
                         }
                         Ok(Poll::Ready(Ok(resource))) => {
-                            // Clone resource for release before use_fn consumes it
-                            this.state.resource_for_release = Some(resource.clone());
+                            // Preserve the successful path's identity: use receives
+                            // the original resource and release receives its clone.
+                            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                resource.clone()
+                            })) {
+                                Ok(release_resource) => {
+                                    this.state.resource_for_release = Some(release_resource);
+                                }
+                                Err(panic_payload) => {
+                                    // Acquisition succeeded even though cloning failed.
+                                    // Keep the original alive and drive ordinary async
+                                    // release before propagating the clone panic.
+                                    this.state.resource_for_release = Some(resource);
+                                    this.state.use_result = Some(Err(panic_payload));
+
+                                    if let Err(release_panic) = this.transition_to_releasing() {
+                                        std::panic::resume_unwind(release_panic);
+                                    }
+                                    continue;
+                                }
+                            }
 
                             // Retire acquire before the use constructor can touch
                             // resources still held by the completed future.
