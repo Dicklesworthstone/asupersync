@@ -1880,19 +1880,68 @@ mod tests {
         assert_eq!(cx.now(), Time::ZERO, "no timeout supplied progress");
     }
 
+    struct PoolPanicOnceWake {
+        armed: AtomicBool,
+    }
+    impl Wake for PoolPanicOnceWake {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            assert!(!self.armed.swap(false, Ordering::AcqRel), "pool wake panic");
+        }
+    }
+
+    #[test]
+    fn pool_close_wake_panic_finishes_shutdown() {
+        reset_test_pool_time();
+        let pool = GenericPool::with_time_getter(
+            simple_factory,
+            PoolConfig::with_max_size(1),
+            test_pool_time_now,
+        );
+        let cx = Cx::for_testing();
+        let held = futures_lite::future::block_on(pool.acquire(&cx)).unwrap();
+        let first_wake = Arc::new(PoolPanicOnceWake {
+            armed: AtomicBool::new(false),
+        });
+        let first_waker = Waker::from(Arc::clone(&first_wake));
+        let mut first_context = Context::from_waker(&first_waker);
+        let mut first = pool.acquire(&cx);
+        assert!(first.as_mut().poll(&mut first_context).is_pending());
+        let second_wake = Arc::new(PoolAcquireWake::default());
+        let second_waker = Waker::from(Arc::clone(&second_wake));
+        let mut second_context = Context::from_waker(&second_waker);
+        let mut second = pool.acquire(&cx);
+        assert!(second.as_mut().poll(&mut second_context).is_pending());
+
+        // Leave a return in the channel. Inspect state directly below: stats()
+        // would process the return itself and mask a skipped shutdown drain.
+        held.return_to_pool();
+        assert_eq!(pool.state.lock().active, 1);
+        first_wake.armed.store(true, Ordering::Release);
+        let wakes_before_close = second_wake.0.load(Ordering::Acquire);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            futures_lite::future::block_on(pool.close());
+        }));
+        assert_eq!(
+            result.unwrap_err().downcast_ref::<&str>(),
+            Some(&"pool wake panic")
+        );
+        assert!(second_wake.0.load(Ordering::Acquire) > wakes_before_close);
+        assert_eq!(pool.state.lock().active, 0);
+        assert!(matches!(
+            first.as_mut().poll(&mut first_context),
+            Poll::Ready(Err(PoolError::Closed))
+        ));
+        assert!(matches!(
+            second.as_mut().poll(&mut second_context),
+            Poll::Ready(Err(PoolError::Closed))
+        ));
+    }
+
     #[test]
     fn pool_return_wake_panic_does_not_strand_other_ready_waiters() {
-        struct PanicOnceWake {
-            armed: AtomicBool,
-        }
-        impl Wake for PanicOnceWake {
-            fn wake(self: Arc<Self>) {
-                self.wake_by_ref();
-            }
-            fn wake_by_ref(self: &Arc<Self>) {
-                assert!(!self.armed.swap(false, Ordering::AcqRel), "pool wake panic");
-            }
-        }
         reset_test_pool_time();
         let pool = GenericPool::with_time_getter(
             simple_factory,
@@ -1902,7 +1951,7 @@ mod tests {
         let cx = Cx::for_testing();
         let first = futures_lite::future::block_on(pool.acquire(&cx)).unwrap();
         let second = futures_lite::future::block_on(pool.acquire(&cx)).unwrap();
-        let panic_wake = Arc::new(PanicOnceWake { armed: AtomicBool::new(false) });
+        let panic_wake = Arc::new(PoolPanicOnceWake { armed: AtomicBool::new(false) });
         let first_waker = Waker::from(Arc::clone(&panic_wake));
         let mut first_cx = Context::from_waker(&first_waker);
         let mut first_waiter = pool.acquire(&cx);

@@ -3099,27 +3099,32 @@ where
             #[cfg(feature = "metrics")]
             let idle_count = idle_resources.len();
 
+            // Closing has already detached every waiter. Finish the whole
+            // fanout even if a task's wake or final waker destructor panics.
+            let mut panics = CheckedPoolCleanupPanics::new();
             for waiter in waiters {
-                waiter.waker.clone_waker().wake();
+                panics.run(|| waiter.waker.clone_waker().wake());
+                panics.run(|| drop(waiter));
             }
 
-            // Record destroyed metrics for all cleared idle resources
-            // (they are being destroyed due to pool shutdown, treat as unhealthy reason)
             #[cfg(feature = "metrics")]
             if let Some(ref metrics) = self.metrics {
                 for _ in 0..idle_count {
-                    metrics.record_destroyed(DestroyReason::Unhealthy);
+                    panics.run(|| metrics.record_destroyed(DestroyReason::Unhealthy));
                 }
-                self.update_metrics_gauges();
             }
 
-            drop(idle_resources);
+            for idle in idle_resources {
+                panics.run(|| drop(idle));
+            }
 
             // Resources returned before the close are still in the return
             // channel. Settle them now: the pool is closed, so each one is
             // destroyed and leaves the active count, rather than staying open
             // until some later acquire, stats call or the pool's drop.
-            self.process_returns();
+            panics.run(|| self.process_returns());
+            #[cfg(feature = "metrics")]
+            panics.run(|| self.update_metrics_gauges());
         })
     }
 }
