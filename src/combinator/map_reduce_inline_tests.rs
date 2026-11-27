@@ -1138,6 +1138,53 @@ fn executing_map_cancellation_before_or_during_input_does_not_spawn() {
 }
 
 #[test]
+fn executing_map_cancelled_input_destructor_panic_is_reported_without_admission() {
+    struct Input(Arc<AtomicUsize>);
+
+    impl Drop for Input {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            panic!("unadmitted iterator item retirement");
+        }
+    }
+
+    let drops = Arc::new(AtomicUsize::new(0));
+    let input_drops = Arc::clone(&drops);
+    let mapped = Arc::new(AtomicUsize::new(0));
+    let mapper_calls = Arc::clone(&mapped);
+    let report = run_executing_case(move |cx| async move {
+        let input_cx = cx.clone();
+        let mut next = Some(Input(input_drops));
+        let inputs = std::iter::from_fn(move || {
+            input_cx.cancel_with(CancelKind::User, Some("input stopped admission"));
+            next.take()
+        });
+        execute_map_reduce(
+            &cx,
+            &cx.scope(),
+            executing_limits(2, 2),
+            inputs,
+            move |_child, item| {
+                mapper_calls.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    drop(item);
+                    Outcome::<usize, ()>::Ok(1)
+                }
+            },
+            |left, right| left + right,
+        )
+        .await
+    });
+
+    assert!(report.outcome.is_panicked());
+    assert_eq!(report.failure_index, Some(0));
+    assert_eq!(report.stopped_by, Some((0, MapReduceStopCause::Cancelled)));
+    assert_eq!((report.admitted, report.completed, report.reduced), (0, 0, 0));
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+    assert_eq!(mapped.load(Ordering::SeqCst), 0);
+}
+
+#[test]
 fn executing_map_terminal_reducer_and_none_input_cancellation_cannot_return_success() {
     let report = run_executing_case(|cx| async move {
         let reducer_cx = cx.clone();
