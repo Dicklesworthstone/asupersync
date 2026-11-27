@@ -1821,7 +1821,8 @@ mod managed_names;
 #[allow(clippy::redundant_pub_crate)]
 mod managed_control;
 pub use managed_control::{
-    ManagedActivationError, ManagedChildControlError, ManagedSupervisorControl,
+    ManagedActivationError, ManagedChildControlError, ManagedChildInfo, ManagedChildState,
+    ManagedSnapshotError, ManagedSupervisorControl,
 };
 
 #[cfg(test)]
@@ -1831,7 +1832,8 @@ mod managed_control_tests;
 mod managed {
     use super::managed_control::{
         ActivationRequest, ChildControlRequest, ControlReceiver, ControlRequest,
-        ManagedActivationError, ManagedChildControlError, ManagedSupervisorControl,
+        ManagedActivationError, ManagedChildControlError, ManagedChildInfo, ManagedChildState,
+        ManagedSnapshotError, ManagedSupervisorControl, SnapshotRequest,
     };
     use super::managed_names::{GenerationName, RegistrationFailure};
     use super::{
@@ -3406,6 +3408,47 @@ mod managed {
             }
         }
 
+        fn which_children(&mut self, request: SnapshotRequest) {
+            if self.cancelled() {
+                self.record_cancel();
+                request.complete(Err(ManagedSnapshotError::Closed));
+                return;
+            }
+            if self.deadline_passed() {
+                self.record_deadline();
+                request.complete(Err(ManagedSnapshotError::Closed));
+                return;
+            }
+            if !request.claim() {
+                return;
+            }
+            let children = self
+                .supervisor
+                .children
+                .iter()
+                .enumerate()
+                .map(|(index, child)| {
+                    let state = if let Some(generation) = self.current_generation(index) {
+                        ManagedChildState::Active { generation }
+                    } else if self.retired[index] {
+                        ManagedChildState::Retired {
+                            last_generation: self.latest[index]
+                                .as_ref()
+                                .map(|completed| completed.generation),
+                        }
+                    } else {
+                        ManagedChildState::Dormant
+                    };
+                    ManagedChildInfo {
+                        name: child.name.clone(),
+                        restart_mode: self.supervisor.bindings[index].mode,
+                        state,
+                    }
+                })
+                .collect();
+            request.complete(Ok(children));
+        }
+
         fn current_generation(&self, index: usize) -> Option<ManagedGeneration> {
             self.running[index].as_ref().and_then(|running| {
                 running
@@ -3772,6 +3815,10 @@ mod managed {
                             }
                             ControlRequest::Stop(request) => {
                                 self.stop_child(request).await;
+                                None
+                            }
+                            ControlRequest::WhichChildren(request) => {
+                                self.which_children(request);
                                 None
                             }
                             ControlRequest::Restart(request) => {

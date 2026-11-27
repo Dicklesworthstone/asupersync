@@ -1810,3 +1810,370 @@ fn native_requested_restart_retirement_panic_dominates_allowance_refusal() {
         });
     }
 }
+
+fn owned_generation(children: &[ManagedChildInfo], name: &str) -> ManagedGeneration {
+    let child = children.iter().find(|child| child.name == name).unwrap();
+    match child.state {
+        ManagedChildState::Active { generation } => generation,
+        state => panic!("expected controller-owned generation for {name}: {state:?}"),
+    }
+}
+
+#[test]
+fn native_child_snapshot_tracks_initial_activated_replaced_and_retired_generations() {
+    for sharded in [false, true] {
+        native_case(sharded, |cx, _| async move {
+            let (fail, failed) = oneshot::channel::<()>();
+            let failed = Arc::new(Mutex::new(Some(failed)));
+            let (restarted, mut replacement_started) = oneshot::channel::<()>();
+            let restarted = Arc::new(Mutex::new(Some(restarted)));
+            let managed = SupervisorBuilder::new("controlled-snapshot-lifecycle")
+                .with_tie_break(StartTieBreak::NameLex)
+                .child(ChildSpec::new("zeta", legacy_must_not_run).depends_on("base"))
+                .child(ChildSpec::new("base", legacy_must_not_run))
+                .child(deferred("alpha"))
+                .compile()
+                .unwrap()
+                .bind_managed(
+                    vec![
+                        ManagedChildBinding::new(
+                            "zeta",
+                            ManagedRestartMode::Transient,
+                            move |child: Cx, generation: ManagedGeneration| {
+                                let failure = if generation.number == 1 {
+                                    Some(failed.lock().take().unwrap())
+                                } else {
+                                    restarted.lock().take().unwrap().send_blocking(()).unwrap();
+                                    None
+                                };
+                                async move {
+                                    if let Some(mut failure) = failure {
+                                        failure.recv(&child).await.unwrap();
+                                        Outcome::Err("replace zeta")
+                                    } else {
+                                        until_cancelled(&child).await
+                                    }
+                                }
+                            },
+                        ),
+                        ManagedChildBinding::new(
+                            "base",
+                            ManagedRestartMode::Temporary,
+                            |child: Cx, _: ManagedGeneration| async move {
+                                until_cancelled(&child).await
+                            },
+                        ),
+                        ManagedChildBinding::new(
+                            "alpha",
+                            ManagedRestartMode::Temporary,
+                            |child: Cx, _: ManagedGeneration| async move {
+                                until_cancelled(&child).await
+                            },
+                        ),
+                    ],
+                    config(RestartPolicy::OneForOne, 1),
+                )
+                .unwrap();
+            let (mut supervisor, control) = managed
+                .spawn_controlled(&cx, NonZeroUsize::new(2).unwrap())
+                .unwrap();
+            // No factory publishes an identity: the control is sufficient to
+            // discover initially eager children and later automatic replacements.
+            let initial = control.which_children(&cx).await.unwrap();
+            assert_eq!(
+                initial.iter().map(|child| child.name.as_str()).collect::<Vec<_>>(),
+                vec!["alpha", "base", "zeta"]
+            );
+            assert_eq!(initial[0].state, ManagedChildState::Dormant);
+            assert_eq!(initial[2].restart_mode, ManagedRestartMode::Transient);
+            let base = owned_generation(&initial, "base");
+            let first = owned_generation(&initial, "zeta");
+            assert_eq!((base.number, first.number), (1, 1));
+            assert_eq!(control.which_children(&cx).await.unwrap(), initial);
+
+            let alpha = control.activate(&cx, "alpha").await.unwrap();
+            let activated = control.which_children(&cx).await.unwrap();
+            assert_eq!(owned_generation(&activated, "alpha"), alpha);
+            assert_eq!(owned_generation(&activated, "base"), base);
+            assert_eq!(owned_generation(&activated, "zeta"), first);
+            control.stop_child(&cx, "alpha", alpha).await.unwrap();
+            let stopped = control.which_children(&cx).await.unwrap();
+            assert_eq!(
+                stopped[0].state,
+                ManagedChildState::Retired { last_generation: Some(alpha) }
+            );
+
+            fail.send_blocking(()).unwrap();
+            replacement_started.recv(&cx).await.unwrap();
+            let replaced = control.which_children(&cx).await.unwrap();
+            let second = owned_generation(&replaced, "zeta");
+            assert_eq!(second.number, 2);
+            assert_ne!(second.region, first.region);
+            assert_ne!(second.task, first.task);
+            assert_eq!(owned_generation(&replaced, "base"), base);
+            assert!(matches!(
+                control.stop_child(&cx, "zeta", first).await,
+                Err(ManagedChildControlError::StaleGeneration { actual, .. })
+                    if actual == second
+            ));
+            control.stop_child(&cx, "zeta", second).await.unwrap();
+            control.stop_child(&cx, "base", base).await.unwrap();
+            let retired = control.which_children(&cx).await.unwrap();
+            for (child, generation) in retired.iter().zip([alpha, base, second]) {
+                assert_eq!(
+                    child.state,
+                    ManagedChildState::Retired { last_generation: Some(generation) }
+                );
+            }
+            supervisor.abort();
+            let report = supervisor.join().await.unwrap();
+            assert!(report.outcome.is_cancelled(), "{report:?}");
+            assert_eq!((report.started, report.joined, report.restart_batches), (4, 4, 1));
+            assert!(matches!(control.which_children(&cx).await, Err(ManagedSnapshotError::Closed)));
+            assert!(cx.checkpoint().is_ok());
+        });
+    }
+}
+
+#[test]
+fn native_child_snapshot_shares_bounded_queue_and_waits_for_claimed_restart() {
+    for sharded in [false, true] {
+        native_case(sharded, |cx, _| async move {
+            let (cleaning, mut cleanup_parked) = oneshot::channel::<()>();
+            let (release, cleanup) = oneshot::channel::<()>();
+            let setup = Arc::new(Mutex::new(Some((cleaning, cleanup))));
+            let managed = SupervisorBuilder::new("controlled-snapshot-queue")
+                .child(ChildSpec::new("worker", legacy_must_not_run))
+                .compile()
+                .unwrap()
+                .bind_managed(
+                    vec![ManagedChildBinding::new(
+                        "worker",
+                        ManagedRestartMode::Transient,
+                        move |child: Cx, generation: ManagedGeneration| {
+                            let cleanup = if generation.number == 1 {
+                                Some(setup.lock().take().unwrap())
+                            } else {
+                                None
+                            };
+                            async move {
+                                let outcome = until_cancelled(&child).await;
+                                if let Some((cleaning, mut cleanup)) = cleanup {
+                                    let mut witness = Some(cleaning);
+                                    let mut wait = std::pin::pin!(cleanup.recv_uninterruptible());
+                                    poll_fn(|task| {
+                                        let result = wait.as_mut().poll(task);
+                                        if result.is_pending() {
+                                            if let Some(witness) = witness.take() {
+                                                witness.send_blocking(()).unwrap();
+                                            }
+                                        }
+                                        result
+                                    })
+                                    .await
+                                    .unwrap();
+                                }
+                                outcome
+                            }
+                        },
+                    )],
+                    config(RestartPolicy::OneForOne, 1),
+                )
+                .unwrap();
+            let (mut supervisor, control) = managed
+                .spawn_controlled(&cx, NonZeroUsize::new(3).unwrap())
+                .unwrap();
+            let initial = control.which_children(&cx).await.unwrap();
+            let first = owned_generation(&initial, "worker");
+            let mut restart = Box::pin(control.restart_child(&cx, "worker", first));
+            poll_fn(|task| {
+                assert!(restart.as_mut().poll(task).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            cleanup_parked.recv(&cx).await.unwrap();
+
+            let cancelled_cx = cx.derive_cancel_scope();
+            let late_cx = cx.derive_cancel_scope();
+            let mut dropped = Box::pin(control.which_children(&cx));
+            let mut cancelled = Box::pin(control.which_children(&cancelled_cx));
+            let mut committed = Box::pin(control.which_children(&late_cx));
+            poll_fn(|task| {
+                assert!(dropped.as_mut().poll(task).is_pending());
+                assert!(cancelled.as_mut().poll(task).is_pending());
+                assert!(committed.as_mut().poll(task).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            assert!(matches!(control.which_children(&cx).await, Err(ManagedSnapshotError::Full)));
+            assert!(matches!(
+                control.stop_child(&cx, "worker", first).await,
+                Err(ManagedChildControlError::Full)
+            ));
+            drop(dropped);
+            cancelled_cx.cancel_with(CancelKind::User, Some("withdraw queued snapshot"));
+            // Withdrawals do not create a second unbounded queue. The controller
+            // must dequeue their tombstones before capacity becomes available.
+            assert!(matches!(control.which_children(&cx).await, Err(ManagedSnapshotError::Full)));
+            release.send_blocking(()).unwrap();
+            let second = restart.await.unwrap();
+            assert_eq!(second.number, 2);
+
+            // This FIFO barrier proves the last snapshot was committed without
+            // repolling either caller future, after the replacement was admitted.
+            loop {
+                match control.activate(&cx, "missing").await {
+                    Err(ManagedActivationError::Full) => crate::runtime::yield_now().await,
+                    Err(ManagedActivationError::UnknownChild { .. }) => break,
+                    other => panic!("unexpected snapshot barrier result: {other:?}"),
+                }
+            }
+            late_cx.cancel_with(CancelKind::User, Some("cancel after snapshot commit"));
+            let children = committed.await.unwrap();
+            assert_eq!(children.len(), 1);
+            assert_eq!(owned_generation(&children, "worker"), second);
+            assert!(matches!(cancelled.await, Err(ManagedSnapshotError::Cancelled { .. })));
+            assert_eq!(control.which_children(&cx).await.unwrap(), children);
+
+            supervisor.abort();
+            let report = supervisor.join().await.unwrap();
+            assert!(report.outcome.is_cancelled(), "{report:?}");
+            assert_eq!((report.started, report.joined, report.restart_batches), (2, 2, 1));
+            assert!(cx.checkpoint().is_ok());
+        });
+    }
+}
+
+#[test]
+fn native_child_snapshot_distinguishes_retirement_without_admission_from_dormancy() {
+    for sharded in [false, true] {
+        native_case(sharded, |cx, _| async move {
+            let registry = Arc::new(Mutex::new(crate::cx::registry::NameRegistry::new()));
+            let unavailable_starts = Arc::new(AtomicUsize::new(0));
+            let retired = Arc::new(AtomicUsize::new(0));
+            let registration = NameRegistrationPolicy::Register {
+                name: "snapshot-owned-name".to_owned(),
+                collision: NameCollisionPolicy::Fail,
+            };
+            let managed = SupervisorBuilder::new("controlled-snapshot-unstarted")
+                .child(
+                    ChildSpec::new("base", legacy_must_not_run)
+                        .with_registration(registration.clone()),
+                )
+                .child(
+                    ChildSpec::new("blocked", legacy_must_not_run)
+                        .depends_on("base")
+                        .with_registration(registration)
+                        .with_required(false),
+                )
+                .child(
+                    ChildSpec::new("skipped", legacy_must_not_run)
+                        .depends_on("blocked")
+                        .with_required(false),
+                )
+                .child(deferred("dormant"))
+                .compile()
+                .unwrap()
+                .bind_managed_with_registry(
+                    vec![
+                        ManagedChildBinding::new(
+                            "base",
+                            ManagedRestartMode::Temporary,
+                            |child: Cx, _: ManagedGeneration| async move {
+                                until_cancelled(&child).await
+                            },
+                        ),
+                        ManagedChildBinding::new(
+                            "blocked",
+                            ManagedRestartMode::Temporary,
+                            TrackedFactory {
+                                starts: Arc::clone(&unavailable_starts),
+                                retired: Arc::clone(&retired),
+                            },
+                        ),
+                        ManagedChildBinding::new(
+                            "skipped",
+                            ManagedRestartMode::Temporary,
+                            TrackedFactory {
+                                starts: Arc::clone(&unavailable_starts),
+                                retired: Arc::clone(&retired),
+                            },
+                        ),
+                        ManagedChildBinding::new(
+                            "dormant",
+                            ManagedRestartMode::Temporary,
+                            TrackedFactory {
+                                starts: Arc::clone(&unavailable_starts),
+                                retired: Arc::clone(&retired),
+                            },
+                        ),
+                    ],
+                    config(RestartPolicy::OneForOne, 0),
+                    Arc::clone(&registry),
+                )
+                .unwrap();
+            let (mut supervisor, control) = managed
+                .spawn_controlled(&cx, NonZeroUsize::new(1).unwrap())
+                .unwrap();
+            let children = control.which_children(&cx).await.unwrap();
+            assert_eq!(
+                children.iter().map(|child| child.name.as_str()).collect::<Vec<_>>(),
+                vec!["base", "blocked", "skipped", "dormant"]
+            );
+            let base = owned_generation(&children, "base");
+            assert_eq!(registry.lock().whereis("snapshot-owned-name"), Some(base.task));
+            assert!(matches!(
+                children[1].state,
+                ManagedChildState::Retired { last_generation: Some(generation) }
+                    if generation.number == 1 && generation != base
+            ));
+            assert_eq!(
+                children[2].state,
+                ManagedChildState::Retired { last_generation: None }
+            );
+            assert_eq!(children[3].state, ManagedChildState::Dormant);
+            assert_eq!(unavailable_starts.load(Ordering::SeqCst), 0);
+            assert_eq!(retired.load(Ordering::SeqCst), 2);
+            supervisor.abort();
+            let report = supervisor.join().await.unwrap();
+            assert!(report.outcome.is_cancelled(), "{report:?}");
+            assert_eq!(report.restart_batches, 0);
+            assert_eq!(unavailable_starts.load(Ordering::SeqCst), 0);
+            assert_eq!(retired.load(Ordering::SeqCst), 3);
+            assert!(registry.lock().is_empty());
+        });
+    }
+}
+
+#[test]
+fn native_child_snapshot_empty_controller_preserves_cancel_and_closed_results() {
+    for sharded in [false, true] {
+        native_case(sharded, |cx, _| async move {
+            let managed = SupervisorBuilder::new("controlled-snapshot-empty")
+                .compile()
+                .unwrap()
+                .bind_managed(
+                    Vec::<ManagedChildBinding<&'static str>>::new(),
+                    config(RestartPolicy::OneForOne, 0),
+                )
+                .unwrap();
+            let (mut supervisor, control) = managed
+                .spawn_controlled(&cx, NonZeroUsize::new(1).unwrap())
+                .unwrap();
+            assert!(control.which_children(&cx).await.unwrap().is_empty());
+            let cancelled = cx.derive_cancel_scope();
+            cancelled.cancel_with(CancelKind::User, Some("cancel snapshot before queue"));
+            assert!(matches!(
+                control.which_children(&cancelled).await,
+                Err(ManagedSnapshotError::Cancelled { .. })
+            ));
+            assert!(control.which_children(&cx).await.unwrap().is_empty());
+            supervisor.abort();
+            let report = supervisor.join().await.unwrap();
+            assert!(report.outcome.is_cancelled(), "{report:?}");
+            assert_eq!((report.started, report.joined, report.restart_batches), (0, 0, 0));
+            assert!(matches!(control.which_children(&cx).await, Err(ManagedSnapshotError::Closed)));
+            assert!(cx.checkpoint().is_ok());
+        });
+    }
+}

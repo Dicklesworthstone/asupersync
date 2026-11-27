@@ -5,7 +5,7 @@
 //! binding can be activated, at most once. Automatic generation replacement
 //! then follows the binding's ordinary restart mode and the supervisor policy.
 
-use super::{BudgetRefusal, ChildName, ManagedGeneration};
+use super::{BudgetRefusal, ChildName, ManagedGeneration, ManagedRestartMode};
 use crate::channel::{mpsc, oneshot};
 use crate::cx::Cx;
 use crate::types::CancelReason;
@@ -165,7 +165,61 @@ pub enum ManagedChildControlError {
     },
 }
 
-/// A cloneable capability to activate, stop and restart configured children.
+/// Controller ownership state of one configured binding at a snapshot boundary.
+///
+/// These states describe ownership, not readiness or health. A child can finish
+/// independently immediately before or after the controller publishes a snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ManagedChildState {
+    /// A configured deferred binding is still available for its first activation.
+    Dormant,
+    /// The controller owns this admitted generation.
+    ///
+    /// Its body may already have completed; the controller has not yet retired
+    /// or replaced its ownership. Use this exact identity for stop/restart fences.
+    Active {
+        /// Current canonical task and generation-region identity.
+        generation: ManagedGeneration,
+    },
+    /// The binding will never invoke its factory again.
+    Retired {
+        /// Last admitted generation, or None if none was admitted.
+        last_generation: Option<ManagedGeneration>,
+    },
+}
+
+/// A configured binding in a managed supervisor ownership snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ManagedChildInfo {
+    /// Name in the compiled supervisor topology.
+    pub name: ChildName,
+    /// Declared automatic restart mode.
+    pub restart_mode: ManagedRestartMode,
+    /// Controller-owned lifecycle state at the snapshot boundary.
+    pub state: ManagedChildState,
+}
+
+/// Refusal or interrupted observation of a managed ownership snapshot.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ManagedSnapshotError {
+    /// No query was admitted; all control operations share this bounded mailbox.
+    #[error("managed supervisor control mailbox is full")]
+    Full,
+    /// The controller stopped or no longer accepts requests.
+    #[error("managed supervisor snapshot is closed")]
+    Closed,
+    /// The caller stopped waiting; inspection never changes child ownership.
+    #[error("managed supervisor snapshot cancelled: {reason:?}")]
+    Cancelled {
+        /// The caller's cancellation reason.
+        reason: CancelReason,
+    },
+}
+
+/// A cloneable capability to inspect, activate, stop and restart configured children.
 ///
 /// Clones share a bounded mailbox. At most the configured number of commands
 /// wait in it, plus one command owned by the controller. Calls refuse a full
@@ -190,6 +244,47 @@ impl std::fmt::Debug for ManagedSupervisorControl {
 }
 
 impl ManagedSupervisorControl {
+    /// Snapshot every configured binding in deterministic compiled start order.
+    ///
+    /// The controller takes this ownership snapshot when it services the query.
+    /// It can wait behind boot, a restart, backoff or cleanup; it is not a live
+    /// progress feed. Active means the controller owns that generation, not that
+    /// its body is healthy or still running. Names include dormant and retired
+    /// bindings, and inspection never consumes a child result.
+    ///
+    /// Queries use the same bounded mailbox as activation, stopping and restart.
+    /// A queued query is withdrawn when its future is dropped or its `Cx` is
+    /// cancelled. A committed snapshot remains observable if cancellation races
+    /// with delivery. Child ownership and restart accounting are unchanged.
+    pub async fn which_children(
+        &self,
+        cx: &Cx,
+    ) -> Result<Vec<ManagedChildInfo>, ManagedSnapshotError> {
+        if cx.checkpoint().is_err() {
+            return Err(snapshot_cancelled(cx));
+        }
+        let (reply, mut response) = oneshot::channel();
+        let state = Arc::new(AtomicU8::new(QUEUED));
+        let _guard = ActivationGuard(Arc::clone(&state));
+        let request = SnapshotRequest {
+            caller: cx.clone(),
+            state,
+            reply,
+        };
+        match self.sender.try_send(ControlRequest::WhichChildren(request)) {
+            Ok(()) => {}
+            Err(mpsc::SendError::Full(_)) => return Err(ManagedSnapshotError::Full),
+            Err(mpsc::SendError::Disconnected(_)) => return Err(ManagedSnapshotError::Closed),
+            Err(mpsc::SendError::Cancelled(_)) => return Err(snapshot_cancelled(cx)),
+        }
+        match response.recv(cx).await {
+            Ok(result) => result,
+            Err(oneshot::RecvError::Cancelled) => Err(snapshot_cancelled(cx)),
+            Err(_) if cx.checkpoint().is_err() => Err(snapshot_cancelled(cx)),
+            Err(_) => Err(ManagedSnapshotError::Closed),
+        }
+    }
+
     /// Activate one configured deferred binding under the running supervisor.
     ///
     /// Success observes the actual factory entry and returns its canonical
@@ -325,6 +420,14 @@ impl ManagedSupervisorControl {
     }
 }
 
+fn snapshot_cancelled(cx: &Cx) -> ManagedSnapshotError {
+    ManagedSnapshotError::Cancelled {
+        reason: cx
+            .cancel_reason()
+            .unwrap_or_else(|| CancelReason::user("managed supervisor query caller cancelled")),
+    }
+}
+
 fn stop_cancelled(cx: &Cx, may_have_applied: bool) -> ManagedChildControlError {
     ManagedChildControlError::Cancelled {
         reason: cx
@@ -400,6 +503,23 @@ impl ChildControlRequest {
     }
 }
 
+pub(crate) struct SnapshotRequest {
+    caller: Cx,
+    state: Arc<AtomicU8>,
+    reply: oneshot::Sender<Result<Vec<ManagedChildInfo>, ManagedSnapshotError>>,
+}
+
+impl SnapshotRequest {
+    pub(crate) fn claim(&self) -> bool {
+        claim_request(&self.caller, &self.state)
+    }
+
+    pub(crate) fn complete(self, result: Result<Vec<ManagedChildInfo>, ManagedSnapshotError>) {
+        // Publish the owned snapshot without depending on a live caller Cx.
+        let _ = self.reply.send_blocking(result);
+    }
+}
+
 fn claim_request(caller: &Cx, state: &AtomicU8) -> bool {
     // The caller can cancel without repolling its response future. Check the
     // retained context on both sides of claim before performing any effect.
@@ -424,6 +544,7 @@ pub(crate) enum ControlRequest {
     Activate(ActivationRequest),
     Stop(ChildControlRequest),
     Restart(ChildControlRequest),
+    WhichChildren(SnapshotRequest),
 }
 
 pub(crate) type ControlReceiver = mpsc::Receiver<ControlRequest>;
