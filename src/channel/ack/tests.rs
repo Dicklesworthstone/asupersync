@@ -45,6 +45,39 @@ fn capacity_includes_reservations_and_unacknowledged_items() {
 }
 
 #[test]
+fn large_limit_grows_only_as_work_is_admitted_and_redelivery_never_allocates() {
+    let cx = Cx::for_testing();
+    let (tx, rx) = channel(usize::MAX);
+    let buffer_capacity = || tx.shared.state.lock().ready.capacity();
+    assert_eq!(buffer_capacity(), 0);
+
+    let mut deliveries = Vec::new();
+    let mut permits = Vec::new();
+    for value in 0..16 {
+        tx.try_send(&cx, value).unwrap();
+        deliveries.push(rx.try_recv_with_ack(&cx).unwrap());
+        permits.push(tx.try_reserve(&cx).unwrap());
+    }
+    assert_eq!(tx.stats().unfinished(), 32);
+    let admitted_capacity = buffer_capacity();
+    assert!((32..=64).contains(&admitted_capacity));
+
+    tx.close();
+    for (value, permit) in (16..32).zip(permits) {
+        permit.send(value).unwrap();
+    }
+    drop(deliveries);
+    assert_eq!(buffer_capacity(), admitted_capacity);
+    assert_eq!(tx.stats().queued, 32);
+    let mut received: Vec<_> = (0..32)
+        .map(|_| rx.try_recv_with_ack(&cx).unwrap().ack())
+        .collect();
+    received.sort_unstable();
+    assert_eq!(received, (0..32).collect::<Vec<_>>());
+    assert_eq!(tx.stats().unfinished(), 0);
+}
+
+#[test]
 fn nonclone_send_only_payload_returns_with_identity_and_mutations() {
     struct Job(Cell<u8>);
     fn send_sync<T: Send + Sync>() {}

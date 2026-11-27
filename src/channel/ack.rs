@@ -67,6 +67,9 @@ pub enum QueueError {
     /// The operation's context acknowledged cancellation before publication.
     #[error("acknowledged work queue operation cancelled")]
     Cancelled,
+    /// Backing storage for an additional unfinished item could not be allocated.
+    #[error("acknowledged work queue could not allocate item storage")]
+    StorageExhausted,
     /// Runtime obligation admission refused; physical ownership was rolled back.
     #[error("acknowledged work queue obligation refused: {0}")]
     Admission(#[from] ObligationAdmissionError),
@@ -245,14 +248,14 @@ impl<T> Shared<T> {
 /// Create a bounded, multi-producer/multi-worker acknowledged queue.
 ///
 /// # Panics
-/// Panics for zero capacity or an unrepresentable allocation. Queue storage is
-/// preallocated so returning a delivery never grows its ready-item buffer.
+/// Panics for zero capacity. The queue allocates item storage as work is
+/// admitted, so publishing or returning an admitted item never grows the buffer.
 #[must_use]
 pub fn channel<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
     assert!(capacity > 0, "acknowledged queue capacity must be nonzero");
     let shared = Arc::new(Shared {
         state: Mutex::new(State {
-            ready: VecDeque::with_capacity(capacity),
+            ready: VecDeque::new(),
             reserved: 0,
             in_flight: 0,
             senders: 1,
@@ -389,13 +392,27 @@ impl<T> Sender<T> {
             if state.sealed || state.receivers == 0 {
                 return Err(QueueError::Closed);
             }
-            if state.ready.len() + state.reserved + state.in_flight == self.shared.capacity {
+            let unfinished = state.ready.len() + state.reserved + state.in_flight;
+            if unfinished == self.shared.capacity {
                 return Err(QueueError::Full);
             }
             let sequence = state
                 .sequence
                 .checked_add(1)
                 .ok_or(QueueError::SequenceExhausted)?;
+            // All unfinished items may become ready together, even after
+            // admission closes. Secure their storage before issuing a credit.
+            if unfinished == state.ready.capacity() {
+                let target = unfinished
+                    .saturating_mul(2)
+                    .max(unfinished + 1)
+                    .min(self.shared.capacity);
+                let additional = target - state.ready.len();
+                state
+                    .ready
+                    .try_reserve_exact(additional)
+                    .map_err(|_| QueueError::StorageExhausted)?;
+            }
             state.sequence = sequence;
             state.reserved += 1;
             sequence
