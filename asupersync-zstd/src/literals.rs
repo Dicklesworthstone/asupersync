@@ -90,13 +90,46 @@ pub fn decode_literals(
     Ok(header + compressed)
 }
 
-/// Appends the literals section for `literals` (at most one 128 KiB block's
-/// worth): Huffman-compressed when that is smaller than storing them raw.
-pub fn encode_literals(literals: &[u8], out: &mut Vec<u8>) {
-    if let Some(section) = compressed_section(literals) {
-        out.extend_from_slice(&section);
-        return;
+/// Emits the smallest of raw, newly described and reusable Huffman literals.
+/// A new table only takes effect if the caller commits this compressed block.
+pub fn encode_literals(
+    literals: &[u8],
+    previous: Option<&HuffmanCode>,
+    out: &mut Vec<u8>,
+) -> Option<HuffmanCode> {
+    if literals.is_empty() {
+        out.push(0);
+        return None;
     }
+    let raw_size = literals.len()
+        + match literals.len() {
+            0..32 => 1,
+            32..4096 => 2,
+            _ => 3,
+        };
+    let prior = previous.and_then(|code| {
+        let size = SectionLayout::new(literals, code, 0, 3)?;
+        (size.bytes < raw_size).then_some((code, size))
+    });
+    let best_size = prior.as_ref().map_or(raw_size, |(_, layout)| layout.bytes);
+    if literals.len() >= 64
+        && let Some(code) = HuffmanCode::build(literals)
+        && let Some(description) = code.description()
+        && let Some(layout) = SectionLayout::new(literals, &code, description.len(), 2)
+        && layout.bytes < best_size
+    {
+        layout.write(literals, &code, &description, out);
+        return Some(code);
+    }
+    if let Some((code, layout)) = prior {
+        layout.write(literals, code, &[], out);
+    } else {
+        raw_literals(literals, out);
+    }
+    None
+}
+
+fn raw_literals(literals: &[u8], out: &mut Vec<u8>) {
     let count = u32::try_from(literals.len()).unwrap_or(0);
     if count < 32 {
         out.push(u8::try_from(count << 3).unwrap_or(0));
@@ -108,66 +141,62 @@ pub fn encode_literals(literals: &[u8], out: &mut Vec<u8>) {
     out.extend_from_slice(literals);
 }
 
-/// A Compressed_Literals_Block section: one Huffman stream below 256
-/// literals, four from 256 on. `None` when Huffman coding does not beat the
-/// raw section or the sizes do not fit any header format.
-fn compressed_section(literals: &[u8]) -> Option<Vec<u8>> {
-    let count = literals.len();
-    if count < 64 {
-        return None;
-    }
-    let code = HuffmanCode::build(literals)?;
-    let description = code.description()?;
-    let streams = if count < 256 {
-        code.encode_stream(literals)
-    } else {
-        // Four streams of count.div_ceil(4) literals (the last one shorter)
-        // behind a jump table of the first three sizes.
-        let encoded: Vec<Vec<u8>> = literals
-            .chunks(count.div_ceil(4))
-            .map(|part| code.encode_stream(part))
-            .collect();
-        let mut streams = Vec::with_capacity(6 + encoded.iter().map(Vec::len).sum::<usize>());
-        for stream in encoded.iter().take(3) {
-            streams.extend_from_slice(&u16::try_from(stream.len()).ok()?.to_le_bytes());
+/// The exact cost includes an end bit and byte padding in each stream.
+struct SectionLayout {
+    header: u64,
+    header_len: usize,
+    bytes: usize,
+}
+
+impl SectionLayout {
+    fn new(literals: &[u8], code: &HuffmanCode, tree_bytes: usize, kind: u64) -> Option<Self> {
+        let count = literals.len();
+        let mut compressed = tree_bytes;
+        if count < 256 {
+            compressed += code.stream_size(literals)?;
+        } else {
+            compressed += 6;
+            for part in literals.chunks(count.div_ceil(4)) {
+                compressed += code.stream_size(part)?;
+            }
         }
-        for stream in &encoded {
-            streams.extend_from_slice(stream);
-        }
-        streams
-    };
-    let compressed = description.len() + streams.len();
-    let largest = count.max(compressed);
-    let (format, header_len, bits) = if count < 256 {
-        if compressed > 1023 {
-            return None;
-        }
-        (0_u64, 3, 10)
-    } else if largest <= 1023 {
-        (1, 3, 10)
-    } else if largest <= 16_383 {
-        (2, 4, 14)
-    } else if largest <= 262_143 {
-        (3, 5, 18)
-    } else {
-        return None;
-    };
-    let header = 2
-        | (format << 2)
-        | (u64::try_from(count).ok()? << 4)
-        | (u64::try_from(compressed).ok()? << (4 + bits));
-    let raw_cost = count
-        + match count {
-            0..32 => 1,
-            32..4096 => 2,
-            _ => 3,
+        let largest = count.max(compressed);
+        let (format, header_len, bits) = match (count, largest) {
+            (0..256, 0..=1023) => (0_u64, 3, 10),
+            (0..256, _) => return None,
+            (_, 0..=1023) => (1, 3, 10),
+            (_, 1024..=16_383) => (2, 4, 14),
+            (_, 16_384..=262_143) => (3, 5, 18),
+            _ => return None,
         };
-    if header_len + compressed >= raw_cost {
-        return None;
+        let header = kind
+            | (format << 2)
+            | (u64::try_from(count).ok()? << 4)
+            | (u64::try_from(compressed).ok()? << (4 + bits));
+        Some(Self {
+            header,
+            header_len,
+            bytes: header_len + compressed,
+        })
     }
-    let mut section = Vec::with_capacity(header_len + compressed);
-    section.extend_from_slice(&header.to_le_bytes()[..header_len]);
-    section.extend_from_slice(&description);
-    section.extend_from_slice(&streams);
-    Some(section)
+
+    fn write(self, literals: &[u8], code: &HuffmanCode, description: &[u8], out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.header.to_le_bytes()[..self.header_len]);
+        out.extend_from_slice(description);
+        if literals.len() < 256 {
+            out.extend_from_slice(&code.encode_stream(literals));
+        } else {
+            let jump = out.len();
+            out.resize(jump + 6, 0);
+            for (i, part) in literals.chunks(literals.len().div_ceil(4)).enumerate() {
+                let stream = code.encode_stream(part);
+                if i < 3 {
+                    // At most 32 KiB of input and 11 code bits per symbol.
+                    let size = u16::try_from(stream.len()).expect("bounded Huffman stream");
+                    out[jump + 2 * i..jump + 2 * i + 2].copy_from_slice(&size.to_le_bytes());
+                }
+                out.extend_from_slice(&stream);
+            }
+        }
+    }
 }

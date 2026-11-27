@@ -593,7 +593,7 @@ mod tests {
         block_header(seed.len(), 0, false, &mut wire);
         wire.extend_from_slice(&seed);
         let mut body = Vec::new();
-        encode_literals(&[], &mut body);
+        let _ = encode_literals(&[], None, &mut body);
         encode_sequences(
             &[EncodedSequence {
                 literals_length: 0,
@@ -815,7 +815,7 @@ mod tests {
         let mut wire = encode_all(&[b'x'; 1024], &params);
         wire.extend_from_slice(&[0x28, 0xb5, 0x2f, 0xfd, 0, 0]);
         let mut body = Vec::new();
-        encode_literals(&[], &mut body);
+        let _ = encode_literals(&[], None, &mut body);
         encode_sequences(
             &[EncodedSequence {
                 literals_length: 0,
@@ -846,7 +846,7 @@ mod tests {
         // match, then 100 literals that pass Block_Maximum_Size.
         let mut past_block_maximum = vec![0x28, 0xb5, 0x2f, 0xfd, 0, 0];
         let mut body = Vec::new();
-        encode_literals(&[b'a'; 101], &mut body);
+        let _ = encode_literals(&[b'a'; 101], None, &mut body);
         encode_sequences(
             &[
                 EncodedSequence {

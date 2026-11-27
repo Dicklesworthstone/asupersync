@@ -2,6 +2,7 @@
 //! br-asupersync-t1fblr.15) and compressed ones ([`Level::Fast`], stage E1,
 //! br-asupersync-t1fblr.19-.21).
 
+use crate::huffman::HuffmanCode;
 use crate::literals::encode_literals;
 use crate::matcher::{DoubleFastFinder, Match, MatchFinder};
 use crate::sequences::{EncodedSequence, encode_sequences, offset_value};
@@ -98,13 +99,13 @@ pub fn encode_into(input: &[u8], params: &EncodeParams, out: &mut Vec<u8>) {
         }
         Level::Fast => {
             let mut finder = MatchFinder::new(input.len());
-            compressed_blocks(input, out, params.checksum, |start, end, floor, matches| {
+            compressed_blocks(input, out, params, |start, end, floor, matches| {
                 finder.find(input, start, end, floor, matches);
             });
         }
         Level::DoubleFast => {
             let mut finder = DoubleFastFinder::new();
-            compressed_blocks(input, out, params.checksum, |start, end, floor, matches| {
+            compressed_blocks(input, out, params, |start, end, floor, matches| {
                 finder.find(input, start, end, floor, matches);
             });
         }
@@ -172,10 +173,11 @@ fn store_blocks(input: &[u8], out: &mut Vec<u8>) {
 fn compressed_blocks(
     input: &[u8],
     out: &mut Vec<u8>,
-    checksum: bool,
+    params: &EncodeParams,
     mut find: impl FnMut(usize, usize, usize, &mut Vec<Match>),
 ) {
-    write_frame_header(input.len(), checksum, WINDOW_1_MIB, out);
+    write_frame_header(input.len(), params.checksum, WINDOW_1_MIB, out);
+    let mut huffman = None;
     let mut matches = Vec::new();
     let mut body = Vec::new();
     let mut rep = [1, 4, 8];
@@ -185,15 +187,18 @@ fn compressed_blocks(
         let last = end >= input.len();
         let compressed = if end > pos {
             find(pos, end, end.saturating_sub(FAST_WINDOW), &mut matches);
-            compress_block(input, pos, end, rep, &matches, &mut body)
+            compress_block(input, pos, end, rep, &matches, huffman.as_ref(), &mut body)
         } else {
             None
         };
         match compressed {
-            Some(next_rep) if body.len() < end - pos => {
+            Some((next_rep, next_huffman)) if body.len() < end - pos => {
                 write_block_header(body.len(), 2, last, out);
                 out.extend_from_slice(&body);
                 rep = next_rep;
+                if params.level == Level::DoubleFast && next_huffman.is_some() {
+                    huffman = next_huffman;
+                }
             }
             _ => {
                 write_block_header(end - pos, 0, last, out);
@@ -215,8 +220,9 @@ fn compress_block(
     end: usize,
     mut rep: [usize; 3],
     matches: &[Match],
+    previous: Option<&HuffmanCode>,
     body: &mut Vec<u8>,
-) -> Option<[usize; 3]> {
+) -> Option<([usize; 3], Option<HuffmanCode>)> {
     body.clear();
     let mut literals = Vec::with_capacity(end - start);
     let mut sequences = Vec::with_capacity(matches.len());
@@ -233,9 +239,9 @@ fn compress_block(
         });
     }
     literals.extend_from_slice(&src[pos..end]);
-    encode_literals(&literals, body);
+    let new_table = encode_literals(&literals, previous, body);
     encode_sequences(&sequences, body)?;
-    Some(rep)
+    Some((rep, new_table))
 }
 
 #[cfg(test)]

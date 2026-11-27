@@ -463,6 +463,19 @@ impl HuffmanCode {
         }
     }
 
+    /// Stream size including its end marker, or None for an absent symbol.
+    pub(crate) fn stream_size(&self, data: &[u8]) -> Option<usize> {
+        let mut bits = 0_usize;
+        for &byte in data {
+            let length = self.codes[usize::from(byte)].1;
+            if length == 0 {
+                return None;
+            }
+            bits += usize::from(length);
+        }
+        Some(bits / 8 + 1)
+    }
+
     /// One backward Huffman stream for `data`: the first byte is read first.
     pub fn encode_stream(&self, data: &[u8]) -> Vec<u8> {
         // At most MAX_CODE_BITS per byte, plus the end mark.

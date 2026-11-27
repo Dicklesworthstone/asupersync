@@ -210,3 +210,34 @@ fn damaged_frames_never_disagree() {
         "some damaged frames should still decode on both sides"
     );
 }
+
+#[test]
+fn double_fast_reuses_literal_tables_across_raw_blocks() {
+    const BLOCK: usize = 128 * 1024;
+    let mut plain = noise(101, BLOCK, 0x7f);
+    plain.extend(noise(102, BLOCK, 0xff));
+    plain.extend(noise(103, BLOCK, 0x7f));
+    plain.extend(noise(104, BLOCK, 0x7f).into_iter().map(|b| b | 0x80));
+    let frame = encode_all(&plain, &EncodeParams::new(Level::DoubleFast));
+    assert_eq!(zstd::bulk::decompress(&frame, plain.len()).unwrap(), plain);
+    assert_eq!(
+        decode_all(&frame, &DecodeLimits::new(plain.len())).unwrap(),
+        plain
+    );
+
+    // Single-segment frame with four-byte content size.
+    assert_eq!(frame[4], 0xa4);
+    let mut pos = 9;
+    for literal_kind in [Some(2), None, Some(3), Some(2)] {
+        let header = u32::from_le_bytes([frame[pos], frame[pos + 1], frame[pos + 2], 0]);
+        pos += 3;
+        if let Some(kind) = literal_kind {
+            assert_eq!((header >> 1) & 3, 2);
+            assert_eq!(frame[pos] & 3, kind);
+        } else {
+            assert_eq!((header >> 1) & 3, 0, "the intervening block must be raw");
+        }
+        pos += (header >> 3) as usize;
+    }
+    assert_eq!(pos + 4, frame.len());
+}
