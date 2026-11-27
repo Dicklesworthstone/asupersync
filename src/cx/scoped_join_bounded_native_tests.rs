@@ -6,12 +6,15 @@ use crate::channel::{mpsc, oneshot};
 use crate::cx::{ChildRegionSpec, RaceFactory};
 use crate::runtime::spawn_mailbox::{RegionCommand, RegisterRegionFinalizer};
 use crate::runtime::{RootDrainOutcome, RuntimeBuilder, TaskHandle};
+use crate::stream::Stream;
 use crate::sync::Notify;
 use crate::types::{CancelKind, CancelReason, RegionId};
 use std::future::{Future, poll_fn};
 use std::num::NonZeroUsize;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 #[derive(Default)]
@@ -164,7 +167,7 @@ fn assert_closed<T>(attempt: &ScopedJoinAttempt<T>, index: usize, parent: Region
     region
 }
 
-async fn slot_lasts_through_descendant_and_finalizer(owner: Cx) {
+async fn slot_lasts_through_descendant_and_finalizer(owner: Cx, stream_input: bool) {
     let seen = Arc::new(Witness::default());
     let pulled = Arc::new(AtomicUsize::new(0));
     let finalized = Arc::new(AtomicUsize::new(0));
@@ -225,8 +228,20 @@ async fn slot_lasts_through_descendant_and_finalizer(owner: Cx) {
             }
         }
     });
-    let mut joining =
-        std::pin::pin!(owner.join_all_scoped_bounded(NonZeroUsize::new(1).unwrap(), factories,));
+    let mut joining = std::pin::pin!(async {
+        if stream_input {
+            owner
+                .join_all_scoped_stream_bounded(
+                    NonZeroUsize::new(1).unwrap(),
+                    crate::stream::iter(factories),
+                )
+                .await
+        } else {
+            owner
+                .join_all_scoped_bounded(NonZeroUsize::new(1).unwrap(), factories)
+                .await
+        }
+    });
     let mut cleaning = std::pin::pin!(seen.wait(|state| state.cleaning.load(Ordering::Acquire)));
     poll_fn(|task| {
         assert!(joining.as_mut().poll(task).is_pending());
@@ -279,10 +294,18 @@ async fn slot_lasts_through_descendant_and_finalizer(owner: Cx) {
 
 #[test]
 fn bounded_join_native_reuses_slot_only_after_descendant_obligation_and_finalizer_close() {
-    native(slot_lasts_through_descendant_and_finalizer);
+    native(|owner| slot_lasts_through_descendant_and_finalizer(owner, false));
 }
 
-async fn source_panic_closes_subtree_before_ordinary_descendant_join(owner: Cx) {
+#[test]
+fn bounded_stream_join_native_reuses_credit_only_after_descendant_and_finalizer_close() {
+    native(|owner| slot_lasts_through_descendant_and_finalizer(owner, true));
+}
+
+async fn source_panic_closes_subtree_before_ordinary_descendant_join(
+    owner: Cx,
+    stream_input: bool,
+) {
     let seen = Arc::new(Witness::default());
     let first_finalized = Arc::new(AtomicUsize::new(0));
     let source_polls = Arc::new(AtomicUsize::new(0));
@@ -341,8 +364,20 @@ async fn source_panic_closes_subtree_before_ordinary_descendant_join(owner: Cx) 
         );
         panic!("bounded join source failed after its closed prefix");
     });
-    let mut joining =
-        std::pin::pin!(owner.join_all_scoped_bounded(NonZeroUsize::new(2).unwrap(), source,));
+    let mut joining = std::pin::pin!(async {
+        if stream_input {
+            owner
+                .join_all_scoped_stream_bounded(
+                    NonZeroUsize::new(2).unwrap(),
+                    crate::stream::iter(source),
+                )
+                .await
+        } else {
+            owner
+                .join_all_scoped_bounded(NonZeroUsize::new(2).unwrap(), source)
+                .await
+        }
+    });
     let mut cleaning = std::pin::pin!(seen.wait(|state| state.cleaning.load(Ordering::Acquire)));
     poll_fn(|task| {
         assert!(joining.as_mut().poll(task).is_pending());
@@ -398,5 +433,145 @@ async fn source_panic_closes_subtree_before_ordinary_descendant_join(owner: Cx) 
 
 #[test]
 fn bounded_join_native_source_panic_cancels_descendants_before_joining_held_body() {
-    native(source_panic_closes_subtree_before_ordinary_descendant_join);
+    native(|owner| source_panic_closes_subtree_before_ordinary_descendant_join(owner, false));
+}
+
+#[test]
+fn bounded_stream_join_native_source_panic_closes_subtree_before_ordinary_child_join() {
+    native(|owner| source_panic_closes_subtree_before_ordinary_descendant_join(owner, true));
+}
+
+struct PendingFactoryStream {
+    first: Option<RaceFactory<u64>>,
+    polls: Arc<AtomicUsize>,
+    drops: Arc<AtomicUsize>,
+    pending: Arc<Witness>,
+}
+
+impl Stream for PendingFactoryStream {
+    type Item = RaceFactory<u64>;
+
+    fn poll_next(mut self: Pin<&mut Self>, _task: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.polls.fetch_add(1, Ordering::SeqCst);
+        if let Some(first) = self.first.take() {
+            Poll::Ready(Some(first))
+        } else {
+            // This tail has no next event. Only owner cancellation or branch
+            // progress can wake the collector; Pending is never source EOF.
+            self.pending.note(&self.pending.parked);
+            Poll::Pending
+        }
+    }
+}
+
+impl Drop for PendingFactoryStream {
+    fn drop(&mut self) {
+        self.drops.fetch_add(1, Ordering::SeqCst);
+        self.pending.note(&self.pending.retired);
+    }
+}
+
+async fn cancel_while_stream_pending_drains_joining_subtree(owner: Cx) {
+    let seen = Arc::new(Witness::default());
+    let source_seen = Arc::new(Witness::default());
+    let source_polls = Arc::new(AtomicUsize::new(0));
+    let source_drops = Arc::new(AtomicUsize::new(0));
+    let finalized = Arc::new(AtomicUsize::new(0));
+    let (sender, mut receiver) = mpsc::channel(1);
+    let (release, cleanup) = oneshot::channel();
+    let child_seen = Arc::clone(&seen);
+    let child_sender = sender.clone();
+    let finalize = Arc::clone(&finalized);
+    let factory: RaceFactory<u64> = Box::new(move |branch| {
+        Box::pin(async move {
+            register_finalizer(&branch, move || {
+                finalize.fetch_add(1, Ordering::Release);
+            })
+            .await;
+            let mut child = branch
+                .spawn(move |child| held_descendant(child, child_sender, child_seen, cleanup))
+                .unwrap();
+            let reason = child.join(&branch).await.unwrap();
+            assert_eq!(reason.kind, CancelKind::ParentCancelled);
+            assert!(branch.checkpoint().is_err());
+            51
+        })
+    });
+    let stream = PendingFactoryStream {
+        first: Some(factory),
+        polls: Arc::clone(&source_polls),
+        drops: Arc::clone(&source_drops),
+        pending: Arc::clone(&source_seen),
+    };
+    let mut collector = owner
+        .spawn(move |collector| async move {
+            let report = collector
+                .join_all_scoped_stream_bounded(NonZeroUsize::new(2).unwrap(), stream)
+                .await
+                .unwrap();
+            // Preserve the returned typed report through ordinary TaskHandle
+            // publication after the joining operation observed cancellation.
+            assert!(collector.checkpoint().is_err());
+            report
+        })
+        .unwrap();
+    seen.wait(|state| state.parked.load(Ordering::Acquire)).await;
+    source_seen
+        .wait(|state| state.parked.load(Ordering::Acquire))
+        .await;
+    assert!(source_polls.load(Ordering::Acquire) >= 2);
+    assert_eq!(source_drops.load(Ordering::Acquire), 0);
+    assert!(!collector.is_finished());
+
+    let reason = CancelReason::user("cancel bounded stream while its source is parked");
+    collector.abort_with_reason(reason.clone());
+    seen.wait(|state| state.cleaning.load(Ordering::Acquire))
+        .await;
+    source_seen
+        .wait(|state| state.retired.load(Ordering::Acquire))
+        .await;
+    assert!(
+        !collector.is_finished(),
+        "actual asynchronous cleanup is still pending"
+    );
+    assert_eq!(source_drops.load(Ordering::Acquire), 1);
+    let stopped_polls = source_polls.load(Ordering::Acquire);
+    assert_eq!(
+        sender
+            .telemetry_snapshot(0x6a_03)
+            .reserved_uncommitted_obligations,
+        1
+    );
+    assert_eq!(finalized.load(Ordering::Acquire), 0);
+    release.send_blocking(()).unwrap();
+
+    let report = collector.join(&owner).await.unwrap();
+    assert!(matches!(&report.stop, ScopedJoinBoundedStop::Cancelled(actual) if *actual == reason));
+    assert_eq!(report.owner_cancellation.as_ref(), Some(&reason));
+    assert!(!report.input_exhausted);
+    assert!(report.input_panic.is_none());
+    assert_eq!(report.max_active, 1);
+    assert_eq!(report.attempts.len(), 1);
+    assert!(matches!(
+        &report.attempts[0].task,
+        ScopedJoinTask::Joined(Ok(51))
+    ));
+    assert_closed(&report.attempts[0], 0, owner.region_id());
+    assert_eq!(source_polls.load(Ordering::Acquire), stopped_polls);
+    assert_eq!(source_drops.load(Ordering::Acquire), 1);
+    assert!(seen.finished.load(Ordering::Acquire) && seen.retired.load(Ordering::Acquire));
+    assert_eq!(finalized.load(Ordering::Acquire), 1);
+    assert_eq!(
+        sender
+            .telemetry_snapshot(0x6a_03)
+            .reserved_uncommitted_obligations,
+        0
+    );
+    assert_eq!(receiver.try_recv(), Err(mpsc::RecvError::Empty));
+    assert!(!owner.is_cancel_requested());
+}
+
+#[test]
+fn bounded_stream_join_native_owner_cancel_stops_parked_source_and_drains_child_join() {
+    native(cancel_while_stream_pending_drains_joining_subtree);
 }
