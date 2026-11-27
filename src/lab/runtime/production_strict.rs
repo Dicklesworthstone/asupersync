@@ -417,7 +417,7 @@ impl LabRuntime {
         // Fully prepare off to the side. A failed admission never installs a
         // partial source, replaces another mode, or invokes user code.
         let replay = prepare_source(schedule, limits)?;
-        if schedule.carries_outcomes() {
+        if replay.expected_outcomes.is_some() {
             // Keep the Lab's own terminal outcomes so they can be compared.
             self.trace().enable_completion_outcomes();
         }
@@ -427,7 +427,7 @@ impl LabRuntime {
         let mut work_units = 0;
         let mut termination = drive(&mut *pause.runtime, limits, &mut work_units);
         if termination == StrictProductionReplayTermination::Matched
-            && let Some(mismatch) = outcome_mismatch(pause.runtime, schedule)
+            && let Some(mismatch) = pause.runtime.replayed_outcome_mismatch()
         {
             termination = mismatch;
         }
@@ -505,7 +505,8 @@ impl LabRuntime {
             }
             if exhausted && !pending {
                 return Some(if self.is_quiescent() && scheduler_empty {
-                    StrictProductionReplayTermination::Matched
+                    self.replayed_outcome_mismatch()
+                        .unwrap_or(StrictProductionReplayTermination::Matched)
                 } else {
                     StrictProductionReplayTermination::SourceExhausted
                 });
@@ -523,37 +524,31 @@ impl LabRuntime {
             replay: self.replay_report().expect("production replay installed"),
         })
     }
-}
 
-/// The first recorded task, in spawn order, whose Lab outcome differs from
-/// its captured outcome. Lab tasks bind to recorded tasks in the order they
-/// first entered the scheduler, as for task order.
-fn outcome_mismatch(
-    runtime: &LabRuntime,
-    schedule: &ProductionSchedule,
-) -> Option<StrictProductionReplayTermination> {
-    if !schedule.carries_outcomes() {
-        return None;
-    }
-    let (events, _, kept) = runtime.trace().snapshot_with_outcomes();
-    let kept: std::collections::BTreeMap<u64, Severity> = kept.into_iter().collect();
-    let scheduler = runtime.scheduler.lock();
-    schedule
-        .spawn_order()
-        .iter()
-        .enumerate()
-        .find_map(|(ordinal, source)| {
-            let expected = schedule.captured_outcome(*source)?;
-            let observed = scheduler.first_entry(ordinal).and_then(|lab_task| {
-                events.iter().find_map(|event| match &event.data {
-                    TraceData::Task { task, .. }
-                        if event.kind == TraceEventKind::Complete && *task == lab_task =>
-                    {
-                        kept.get(&event.seq).copied()
-                    }
-                    _ => None,
-                })
-            });
+    /// Compare each captured terminal severity to the retained completion of
+    /// the lab task bound to the same spawn ordinal.
+    fn replayed_outcome_mismatch(&self) -> Option<StrictProductionReplayTermination> {
+        let expected = self
+            .production_replay
+            .as_ref()?
+            .expected_outcomes
+            .as_ref()?;
+        let (events, _, kept) = self.trace().snapshot_with_outcomes();
+        let kept: std::collections::BTreeMap<_, _> = kept.into_iter().collect();
+        let mut by_task = std::collections::BTreeMap::new();
+        for event in &events {
+            if event.kind == TraceEventKind::Complete
+                && let TraceData::Task { task, .. } = &event.data
+                && let Some(severity) = kept.get(&event.seq)
+            {
+                by_task.insert(CompactTaskId::from(*task).0, *severity);
+            }
+        }
+        let scheduler = self.scheduler.lock();
+        expected.iter().copied().find_map(|(ordinal, expected)| {
+            let observed = scheduler
+                .first_entry(ordinal)
+                .and_then(|task| by_task.get(&CompactTaskId::from(task).0).copied());
             (observed != Some(expected)).then_some(
                 StrictProductionReplayTermination::OutcomeMismatch {
                     ordinal,
@@ -562,6 +557,7 @@ fn outcome_mismatch(
                 },
             )
         })
+    }
 }
 
 struct PauseOnExit<'a> {
@@ -684,6 +680,45 @@ pub(super) fn prepare_source(
         steps.push((lookup[index].1, *at_tick));
         previous_tick = Some(*at_tick);
     }
+    // Keep checked outcomes in spawn order so a step-driven replay can check
+    // them after the caller releases the source schedule.
+    let expected_outcomes = if schedule.carries_outcomes() {
+        let mut expected = reserve("expected outcomes", spawns.len())?;
+        for event in events {
+            if let ReplayEvent::TaskCompleted { task, outcome } = event {
+                if expected.len() == spawns.len() {
+                    return Err(StrictProductionReplayError::InvalidProjection {
+                        reason: "too many captured completions",
+                    });
+                }
+                let index = lookup
+                    .binary_search_by_key(&task.0, |entry| entry.0)
+                    .map_err(|_| StrictProductionReplayError::InvalidProjection {
+                        reason: "completion has no spawn identity",
+                    })?;
+                let severity = Severity::from_u8(*outcome).ok_or(
+                    StrictProductionReplayError::InvalidProjection {
+                        reason: "invalid captured outcome",
+                    },
+                )?;
+                expected.push((lookup[index].1, severity));
+            }
+        }
+        expected.sort_unstable_by_key(|entry| entry.0);
+        if expected.len() != spawns.len()
+            || expected
+                .iter()
+                .enumerate()
+                .any(|(ordinal, entry)| entry.0 != ordinal)
+        {
+            return Err(StrictProductionReplayError::InvalidProjection {
+                reason: "captured completions do not cover each spawn exactly once",
+            });
+        }
+        Some(expected)
+    } else {
+        None
+    };
     let cancellation = prepare_cancellation(schedule, &lookup, &steps)?;
     let mut spawn_order = reserve::<CompactTaskId>("spawn identities", spawns.len())?;
     spawn_order.extend_from_slice(spawns);
@@ -701,6 +736,7 @@ pub(super) fn prepare_source(
         termination: None,
         source_error: None,
         selected: None,
+        expected_outcomes,
         cancellation,
         report: ReplayReport {
             steps_total: count,

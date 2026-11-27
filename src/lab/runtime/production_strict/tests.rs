@@ -172,6 +172,56 @@ fn complete_source_requires_exact_consumption_and_quiescence() {
 }
 
 #[test]
+fn checked_outcomes_agree_across_stepped_and_one_shot_replay() {
+    // Production IDs deliberately differ from Lab IDs. Task 1 finishes
+    // before task 0, so neither task ID nor completion order is an ordinal.
+    let region = RegionId::from_arena(ArenaIndex::new(31, 2));
+    let mut events = source_events(2, &[1, 0]);
+    events.push(TraceEvent::complete(4, Time::ZERO, source_task(1), region));
+    events.push(TraceEvent::complete(5, Time::ZERO, source_task(0), region));
+    for expected in [Severity::Ok, Severity::Panicked] {
+        let captured = [
+            (CompactTaskId::from(source_task(0)).0, Severity::Ok),
+            (CompactTaskId::from(source_task(1)).0, expected),
+        ]
+        .into_iter()
+        .collect();
+        let schedule = ProductionSchedule::from_runtime_trace(&events)
+            .unwrap()
+            .with_completion_outcomes(&captured);
+        let mut stepped = fixture(&[1, 1]);
+        stepped
+            .runtime
+            .replay_production_schedule(&schedule, ProductionReplayOptions::default())
+            .unwrap();
+        let lab = stepped.runtime.run_until_quiescent_with_report();
+        let boundary = stepped.runtime.production_replay_boundary().unwrap();
+        let mut one_shot = fixture(&[1, 1]);
+        let receipt = one_shot
+            .runtime
+            .run_production_schedule_strict(&schedule, limits())
+            .unwrap();
+        let termination = if expected == Severity::Ok {
+            StrictProductionReplayTermination::Matched
+        } else {
+            StrictProductionReplayTermination::OutcomeMismatch {
+                ordinal: 1,
+                expected,
+                observed: Some(Severity::Ok),
+            }
+        };
+        assert_eq!(boundary.termination, Some(termination));
+        assert_eq!(receipt.termination, termination);
+        assert_eq!(lab.lab_test_passed(), expected == Severity::Ok);
+        assert_eq!(receipt.passed(), expected == Severity::Ok);
+        assert_eq!(stepped.counts(), [1, 1]);
+        assert_eq!(one_shot.counts(), [1, 1]);
+        stepped.drain();
+        one_shot.drain();
+    }
+}
+
+#[test]
 fn exhausted_source_never_polls_unrecorded_tail_and_retains_captures() {
     let mut fx = fixture(&[1, 1]);
     let report = fx

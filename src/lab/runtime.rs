@@ -1278,6 +1278,7 @@ struct ProductionReplayState {
     termination: Option<StrictProductionReplayTermination>,
     source_error: Option<StrictProductionReplayError>,
     selected: Option<usize>,
+    expected_outcomes: Option<Vec<(usize, crate::types::Severity)>>,
     cancellation: Option<production_strict::CancellationReplay>,
 }
 
@@ -1313,6 +1314,7 @@ impl ProductionReplayState {
             termination: None,
             source_error: None,
             selected: None,
+            expected_outcomes: None,
             cancellation: None,
         }
     }
@@ -4576,6 +4578,8 @@ impl LabRuntime {
     /// The default is fail closed: no task is polled after the source ends.
     /// [`Self::production_replay_boundary`] distinguishes a complete match
     /// from source exhaustion with outstanding work or unconsumed choices.
+    /// For a checked capture, a match also requires the Lab's retained task
+    /// completion outcomes to agree with the captured outcomes.
     /// Use [`Self::replay_production_schedule_prefix`] to explicitly authorize
     /// an exploratory continuation. `OnReplayDivergence::Continue` still
     /// explicitly permits continuation after a recorded task-order divergence.
@@ -4619,6 +4623,9 @@ impl LabRuntime {
         };
         let state = match admission {
             Ok(mut state) => {
+                if state.expected_outcomes.is_some() {
+                    self.trace().enable_completion_outcomes();
+                }
                 state.options = options;
                 state
             }
