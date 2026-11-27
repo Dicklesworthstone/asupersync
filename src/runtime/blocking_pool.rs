@@ -179,6 +179,16 @@ fn discard_panic_payload(payload: Box<dyn std::any::Any + Send>) -> bool {
     }
 }
 
+fn run_worker_hook(hook: Option<&(dyn Fn() + Send + Sync)>) {
+    if let Some(hook) = hook
+        && let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(hook))
+    {
+        // Destroying a user-provided panic payload can itself panic. Keep
+        // both unwinds out of startup and the exit guard's slot handoff.
+        discard_panic_payload(payload);
+    }
+}
+
 /// Returns a task's byte reservation, unless it has to be pinned.
 ///
 /// `resolved` is `false` when destroying a panic payload at a job site itself panicked. The opaque secondary payload
@@ -1074,10 +1084,18 @@ impl BlockingPool {
         // between its enqueue and its `maybe_spawn` starts a worker later, and
         // returning first would leak that worker's never-joined handle and run
         // the job after teardown (mopkmt).
-        while self.inner.active_threads.load(Ordering::Acquire) > 0
-            || self.inner.replacement_pending.load(Ordering::Acquire) > 0
-            || blocking_pool_has_pending_work(&self.inner)
-        {
+        let handles = loop {
+            if self.inner.active_threads.load(Ordering::Acquire) == 0
+                && self.inner.replacement_pending.load(Ordering::Acquire) == 0
+                && !blocking_pool_has_pending_work(&self.inner)
+            {
+                // Idle retirement releases its slot before the stop hook runs.
+                // Keep unfinished handles for a later wait if this one expires.
+                let mut handles = self.inner.thread_handles.lock();
+                if handles.iter().all(ThreadJoinHandle::is_finished) {
+                    break drain_thread_handles(&mut handles);
+                }
+            }
             let remaining = timeout_remaining(deadline, self.inner.time_getter);
             if remaining.is_zero() {
                 return false;
@@ -1088,13 +1106,6 @@ impl BlockingPool {
 
             // Wait a bit before checking again
             (self.inner.sleep_fn)(Duration::from_millis(10).min(remaining));
-        }
-
-        // All workers have retired and no hand-off is pending, so every handle
-        // they published is final. Now join the handles to clean up.
-        let handles = {
-            let mut handles = self.inner.thread_handles.lock();
-            drain_thread_handles(&mut handles)
         };
         // Join outside the mutex so exiting workers can still publish
         // replacement handles during shutdown-drain races.
@@ -1711,11 +1722,7 @@ fn spawn_thread_on_inner(inner: &Arc<BlockingPoolInner>) {
 
         impl Drop for ThreadExitGuard<'_> {
             fn drop(&mut self) {
-                if let Some(ref callback) = self.inner.on_thread_stop {
-                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        callback();
-                    }));
-                }
+                run_worker_hook(self.inner.on_thread_stop.as_deref());
 
                 if !self.retired_with_claim {
                     // A spawn that linearized just before this worker exits may
@@ -1770,11 +1777,7 @@ fn spawn_thread_on_inner(inner: &Arc<BlockingPoolInner>) {
         // guard then spawned a replacement that died the same way, so the pool
         // churned threads at full speed, no job ever ran, and shutdown timed
         // out (br-asupersync-mopkmt).
-        if let Some(ref callback) = inner_clone.on_thread_start {
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                callback();
-            }));
-        }
+        run_worker_hook(inner_clone.on_thread_start.as_deref());
 
         guard.retired_with_claim = blocking_worker_loop(&inner_clone, assigned_cohort);
         let _ = guard.retired_with_claim;

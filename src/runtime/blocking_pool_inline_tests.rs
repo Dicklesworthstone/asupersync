@@ -175,6 +175,73 @@ fn worker_identity_covers_hooks_and_work_without_matching_another_pool() {
 }
 
 #[test]
+fn idle_retirement_stop_hook_respects_shutdown_timeout() {
+    let (stopping, stopped) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let released = StdMutex::new(released);
+    let pool = BlockingPool::with_config(
+        0,
+        1,
+        BlockingPoolOptions {
+            idle_timeout: Duration::ZERO,
+            on_thread_stop: Some(Arc::new(move || {
+                stopping.send(()).unwrap();
+                // Bound the old implementation, which joins us while the
+                // caller still owns the only sender that can release us.
+                let _ = released
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5));
+            })),
+            ..Default::default()
+        },
+    );
+    pool.spawn(|| {}).wait();
+    stopped.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(pool.active_threads(), 0);
+    assert!(!pool.shutdown_and_wait(Duration::ZERO));
+    release.send(()).unwrap();
+    assert!(pool.shutdown_and_wait(Duration::from_secs(5)));
+}
+
+#[test]
+fn worker_hook_panic_payloads_cannot_strand_jobs_or_retirement() {
+    struct Payload;
+    impl Drop for Payload {
+        fn drop(&mut self) {
+            panic!("hook panic payload destructor");
+        }
+    }
+
+    // Exercise each hook independently: a replacement on startup would run
+    // the job on a second worker; a broken stop hook would leak the slot.
+    for at_start in [true, false] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&calls);
+        let hook: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            if seen.fetch_add(1, Ordering::Relaxed) == 0 {
+                std::panic::panic_any(Payload);
+            }
+        });
+        let pool = BlockingPool::with_config(
+            0,
+            1,
+            BlockingPoolOptions {
+                on_thread_start: at_start.then(|| Arc::clone(&hook)),
+                on_thread_stop: (!at_start).then_some(hook),
+                ..Default::default()
+            },
+        );
+        let (sent, received) = std::sync::mpsc::channel();
+        let job = pool.spawn(move || sent.send(()).unwrap());
+        received.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(job.wait_timeout(Duration::from_secs(5)));
+        assert!(pool.shutdown_and_wait(Duration::from_secs(5)));
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+}
+
+#[test]
 fn set_max_threads_never_strands_work_at_zero() {
     // Regression: the live spawn cap must floor at 1 for a constructed pool
     // (max_threads >= 1). Driving the cap to 0 on a min=0 elastic pool used
