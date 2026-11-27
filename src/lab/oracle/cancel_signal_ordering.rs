@@ -444,7 +444,8 @@ impl CancelOrderingOracle {
             if let Some(children) = state.get_children_tasks(signal.task_id) {
                 for &child_task in children {
                     if state.find_cancel_signal(child_task).is_none() {
-                        let time_since_parent = now.as_nanos() - signal.cancel_time.as_nanos();
+                        let time_since_parent =
+                            now.as_nanos().saturating_sub(signal.cancel_time.as_nanos());
                         if time_since_parent > self.config.max_ordering_window_ns {
                             let child_region = state
                                 .get_task_region(child_task)

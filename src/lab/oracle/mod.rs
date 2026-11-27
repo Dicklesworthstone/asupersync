@@ -411,9 +411,9 @@ impl OracleSuite {
                     .on_transition(task.id, &from, &to, now);
             }
         }
-        self.cancel_debt.reset();
-        self.cancel_signal_ordering.reset();
-        self.runtime_epoch.reset();
+        // The snapshot has no queue, signal-ordering, or epoch history to
+        // replay. Their instrumentation belongs to the caller and survives
+        // reports until OracleSuite::reset starts a new run.
 
         // DOWN deliveries of runtime monitors (kpmoy5.6.1), replayed whole on
         // every hydration. A suite fed by hand, with no runtime monitor, keeps

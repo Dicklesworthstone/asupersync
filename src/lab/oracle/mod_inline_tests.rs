@@ -239,6 +239,78 @@ fn lab_report_checks_actual_region_memberships() {
 }
 
 #[test]
+fn lab_report_preserves_caller_instrumented_temporal_oracles() {
+    use crate::epoch::EpochId;
+    use crate::lab::{LabConfig, LabRuntime};
+    use crate::types::{CancelReason, RegionId, TaskId};
+
+    let mut lab = LabRuntime::new(LabConfig::new(32));
+    lab.oracles.cancel_debt = CancelDebtOracle::new(CancelDebtConfig {
+        max_debt_items: 0,
+        ..Default::default()
+    });
+    lab.oracles.cancel_debt.on_work_item_added(
+        "finalizers",
+        None,
+        None,
+        cancel_debt::CleanupWorkType::FinalizerExecution,
+        Time::ZERO,
+    );
+    let parent = TaskId::new_for_test(1, 0);
+    let child = TaskId::new_for_test(2, 0);
+    let region = RegionId::testing_default();
+    lab.oracles
+        .cancel_signal_ordering
+        .on_task_spawned(parent, child, region, region);
+    // The caller's signal time can be ahead of the current lab clock. The
+    // propagation window only begins once lab time has reached that signal.
+    lab.oracles.cancel_signal_ordering.on_cancel_signal(
+        parent,
+        region,
+        Time::from_secs(1),
+        CancelReason::shutdown(),
+    );
+    lab.oracles.runtime_epoch.notify_epoch_transition_complete(
+        RuntimeModule::Scheduler,
+        EpochId::new(3),
+        Time::ZERO,
+    );
+
+    let initial = lab.report().oracle_report;
+    assert!(initial.entry("cancel_signal_ordering").unwrap().passed);
+    assert_eq!(
+        initial
+            .entry("cancel_signal_ordering")
+            .unwrap()
+            .stats
+            .events_recorded,
+        1
+    );
+    lab.advance_time(Time::from_secs(5).as_nanos());
+    let names = ["cancel_debt", "cancel_signal_ordering", "runtime_epoch"];
+    for _ in 0..2 {
+        let report = lab.report().oracle_report;
+        for name in names {
+            let entry = report.entry(name).unwrap();
+            assert!(
+                !entry.passed && entry.stats.events_recorded == 1,
+                "{entry:?}"
+            );
+        }
+    }
+
+    lab.oracles.reset();
+    let clean = lab.report().oracle_report;
+    for name in names {
+        let entry = clean.entry(name).unwrap();
+        assert!(
+            entry.passed && entry.stats.events_recorded == 0,
+            "{entry:?}"
+        );
+    }
+}
+
+#[test]
 fn hydrate_temporal_from_state_replays_finalizer_history() {
     init_test("hydrate_temporal_from_state_replays_finalizer_history");
     let mut state = crate::runtime::RuntimeState::new();
