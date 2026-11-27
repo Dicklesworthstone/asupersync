@@ -7,7 +7,7 @@ use crate::runtime::spawn_mailbox::SpawnRequestParts;
 use crate::runtime::state::SpawnAdmission;
 use crate::types::{Budget, TaskId};
 use crate::sync::pl::Mutex;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::marker::PhantomPinned;
 use std::rc::Rc;
 use std::sync::atomic::AtomicUsize;
@@ -909,5 +909,336 @@ fn bounded_join_unpolled_borrowed_source_drop_is_owner_scoped_even_when_it_panic
         assert_eq!((converted.get(), next.get(), dropped.get()), (0, 0, 1));
         assert_eq!(Cx::current().unwrap().task_id(), foreign.task_id());
         assert!(require_ambient_io("foreign after unpolled source").is_ok());
+    }
+}
+
+#[derive(Default)]
+struct JoinStreamControl {
+    items: RefCell<std::collections::VecDeque<RaceFactory<usize>>>,
+    ended: Cell<bool>,
+    polls: Cell<usize>,
+    drops: Cell<usize>,
+    panic_on_poll: Cell<bool>,
+    panic_on_drop: Cell<bool>,
+    waker: RefCell<Option<Waker>>,
+}
+
+impl JoinStreamControl {
+    fn wake(&self) {
+        let waker = self.waker.borrow_mut().take();
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+
+    fn source(&self, owner: &Cx) -> ControlledJoinStream<'_> {
+        ControlledJoinStream {
+            control: self,
+            owner: owner.task_id(),
+            _pinned: PhantomPinned,
+        }
+    }
+}
+
+// Borrowed cells make this source !Send; PhantomPinned makes it !Unpin. No
+// unsafe projection is needed because all mutable source state is in cells.
+struct ControlledJoinStream<'a> {
+    control: &'a JoinStreamControl,
+    owner: TaskId,
+    _pinned: PhantomPinned,
+}
+
+impl Stream for ControlledJoinStream<'_> {
+    type Item = RaceFactory<usize>;
+
+    fn poll_next(self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.as_ref().get_ref();
+        assert_eq!(Cx::current().unwrap().task_id(), this.owner);
+        let control = this.control;
+        control.polls.set(control.polls.get() + 1);
+        assert!(
+            !control.panic_on_poll.get(),
+            "bounded scoped stream source poll panic"
+        );
+        if let Some(factory) = control.items.borrow_mut().pop_front() {
+            Poll::Ready(Some(factory))
+        } else if control.ended.get() {
+            Poll::Ready(None)
+        } else {
+            *control.waker.borrow_mut() = Some(task.waker().clone());
+            Poll::Pending
+        }
+    }
+}
+
+impl Drop for ControlledJoinStream<'_> {
+    fn drop(&mut self) {
+        assert_eq!(Cx::current().unwrap().task_id(), self.owner);
+        self.control.drops.set(self.control.drops.get() + 1);
+        assert!(
+            !self.control.panic_on_drop.get(),
+            "bounded scoped stream source drop panic"
+        );
+    }
+}
+
+#[test]
+fn bounded_stream_join_pending_empty_source_parks_and_source_only_wake_finishes() {
+    let (mut lab, owner, root, gate) = fixture(0x5C_B101);
+    let control = JoinStreamControl::default();
+    let mut group =
+        Box::pin(owner.join_all_scoped_stream_bounded(limit(2), control.source(&owner)));
+    let scheduled = Arc::new(Scheduled::default());
+    scheduled.queued.store(true, Ordering::SeqCst);
+
+    assert!(poll_scheduled(group.as_mut(), &scheduled).is_pending());
+    assert_eq!(control.polls.get(), 1);
+    assert_eq!(scheduled.wakes.load(Ordering::SeqCst), 0);
+    assert!(!scheduled.queued.load(Ordering::SeqCst));
+    assert_eq!(control.drops.get(), 0);
+
+    control.ended.set(true);
+    control.wake();
+    let Poll::Ready(Ok(report)) = poll_scheduled(group.as_mut(), &scheduled) else {
+        panic!("the source's own EOF wake must finish an empty join");
+    };
+    assert!(matches!(report.stop, ScopedJoinBoundedStop::Completed));
+    assert!(report.input_exhausted);
+    assert!(report.attempts.is_empty());
+    assert_eq!(report.max_active, 0);
+    assert_eq!(control.polls.get(), 2, "EOF is observed exactly once");
+    assert_eq!(control.drops.get(), 1);
+    drop(group);
+    finish(&mut lab, root, gate);
+}
+
+#[test]
+fn bounded_stream_join_quiet_empty_source_observes_owner_only_cancellation_wake() {
+    let (mut lab, owner, root, gate) = fixture(0x5C_B105);
+    let control = JoinStreamControl::default();
+    let mut group =
+        Box::pin(owner.join_all_scoped_stream_bounded(limit(2), control.source(&owner)));
+    let scheduled = Arc::new(Scheduled::default());
+    scheduled.queued.store(true, Ordering::SeqCst);
+    assert!(poll_scheduled(group.as_mut(), &scheduled).is_pending());
+    assert_eq!(control.polls.get(), 1);
+    assert!(!scheduled.queued.load(Ordering::SeqCst));
+
+    let reason = CancelReason::user("cancel a quiet empty stream");
+    owner.cancel_with_reason(reason.clone());
+    let Poll::Ready(Ok(report)) = poll_scheduled(group.as_mut(), &scheduled) else {
+        panic!("owner cancellation alone must wake and finish the collector");
+    };
+    assert!(matches!(&report.stop, ScopedJoinBoundedStop::Cancelled(actual) if *actual == reason));
+    assert_eq!(report.owner_cancellation.as_ref(), Some(&reason));
+    assert!(report.attempts.is_empty());
+    assert!(!report.input_exhausted);
+    assert_eq!(report.max_active, 0);
+    assert_eq!(
+        control.polls.get(),
+        1,
+        "cancellation must not repoll the source"
+    );
+    assert_eq!(control.drops.get(), 1);
+    drop(group);
+    finish(&mut lab, root, gate);
+}
+
+#[test]
+fn bounded_stream_join_pending_source_allows_body_and_region_close_progress() {
+    let (mut lab, owner, root, gate) = fixture(0x5C_B102);
+    let control = JoinStreamControl::default();
+    let first_region = Arc::new(Mutex::new(None));
+    let observed = Arc::clone(&first_region);
+    control.items.borrow_mut().push_back(Box::new(move |body| {
+        Box::pin(async move {
+            *observed.lock() = Some(body.region_id());
+            7
+        })
+    }));
+    let mut group =
+        Box::pin(owner.join_all_scoped_stream_bounded(limit(2), control.source(&owner)));
+    let scheduled = Arc::new(Scheduled::default());
+    scheduled.queued.store(true, Ordering::SeqCst);
+    park_scheduled(&mut lab, group.as_mut(), &scheduled);
+    let region = first_region.lock().expect("the admitted body actually ran");
+    assert!(
+        lab.state.region(region).is_none(),
+        "source Pending cannot delay close"
+    );
+    assert_eq!(
+        lab.state.live_task_count(),
+        1,
+        "only the fixture owner remains"
+    );
+    assert!(!scheduled.queued.load(Ordering::SeqCst));
+    assert_eq!(control.drops.get(), 0, "Pending is not EOF");
+
+    control
+        .items
+        .borrow_mut()
+        .push_back(Box::new(|_| Box::pin(async { 8 })));
+    control.ended.set(true);
+    control.wake();
+    assert!(scheduled.queued.load(Ordering::SeqCst));
+    let report = complete(&mut lab, group.as_mut());
+    assert!(matches!(report.stop, ScopedJoinBoundedStop::Completed));
+    assert!(report.input_exhausted);
+    assert_eq!(report.attempts.len(), 2);
+    for (attempt, value) in report.attempts.iter().zip([7, 8]) {
+        assert!(matches!(&attempt.task, ScopedJoinTask::Joined(Ok(actual)) if *actual == value));
+        assert_closed(&lab, attempt);
+    }
+    assert_eq!(control.drops.get(), 1);
+    drop(group);
+    finish(&mut lab, root, gate);
+}
+
+#[test]
+fn bounded_stream_join_ready_source_yields_and_preserves_order_with_non_sync_results() {
+    let (mut lab, owner, root, gate) = fixture(0x5C_B103);
+    let pulls = Arc::new(AtomicUsize::new(0));
+    let source = crate::stream::iter(Counted {
+        inner: (0..150).map(|index| move |_body: Cx| async move {
+            MoveOnly {
+                index,
+                value: Cell::new(index * 3),
+                _pinned: PhantomPinned,
+            }
+        }),
+        next_calls: Arc::clone(&pulls),
+    });
+    let mut group: Pin<
+        Box<dyn Future<Output = Result<ScopedJoinBoundedReport<MoveOnly>, ScopedJoinError>> + Send>,
+    > = Box::pin(owner.join_all_scoped_stream_bounded(limit(130), source));
+    assert!(poll_once(group.as_mut()).is_pending());
+    assert_eq!(pulls.load(Ordering::SeqCst), BOUNDED_JOIN_QUANTUM);
+    let report = complete(&mut lab, group.as_mut());
+    assert!(matches!(report.stop, ScopedJoinBoundedStop::Completed));
+    assert!(report.input_exhausted);
+    assert_eq!(report.attempts.len(), 150);
+    assert!(report.max_active <= 130);
+    assert_eq!(pulls.load(Ordering::SeqCst), 151);
+    for (index, attempt) in report.attempts.iter().enumerate() {
+        assert_eq!(attempt.index, index);
+        let ScopedJoinTask::Joined(Ok(value)) = &attempt.task else {
+            panic!("ready source must retain every move-only result");
+        };
+        assert_eq!(value.index, index);
+        assert_eq!(value.value.get(), index * 3);
+        assert_closed(&lab, attempt);
+    }
+    drop(group);
+    finish(&mut lab, root, gate);
+}
+
+#[test]
+fn bounded_stream_join_poll_and_retirement_panics_drain_and_preserve_first_panic() {
+    let (mut lab, owner, root, gate) = fixture(0x5C_B104);
+    let control = JoinStreamControl::default();
+    let started = Arc::new(AtomicBool::new(false));
+    let seen = Arc::clone(&started);
+    control.items.borrow_mut().push_back(Box::new(move |body| {
+        Box::pin(async move {
+            seen.store(true, Ordering::SeqCst);
+            body.cancelled().await;
+            assert!(body.checkpoint().is_err());
+            42
+        })
+    }));
+    let mut group =
+        Box::pin(owner.join_all_scoped_stream_bounded(limit(2), control.source(&owner)));
+    assert!(poll_once(group.as_mut()).is_pending());
+    lab.run_until_idle();
+    assert!(started.load(Ordering::SeqCst));
+    control.panic_on_poll.set(true);
+    control.panic_on_drop.set(true);
+    control.wake();
+    let report = complete(&mut lab, group.as_mut());
+    assert!(matches!(
+        report.stop,
+        ScopedJoinBoundedStop::InputPanicked { next_index: 1 }
+    ));
+    assert!(!report.input_exhausted);
+    assert!(
+        report
+            .input_panic
+            .as_ref()
+            .unwrap()
+            .message()
+            .contains("source poll panic")
+    );
+    assert_eq!(report.attempts.len(), 1);
+    assert!(matches!(
+        report.attempts[0].task,
+        ScopedJoinTask::Joined(Ok(42))
+    ));
+    assert_closed(&lab, &report.attempts[0]);
+    assert_eq!(
+        control.polls.get(),
+        3,
+        "the stopped source is never polled again"
+    );
+    assert_eq!(control.drops.get(), 1);
+    assert!(!owner.is_cancel_requested());
+    drop(group);
+    finish(&mut lab, root, gate);
+}
+
+#[test]
+fn bounded_stream_join_preflight_and_precancel_never_poll_the_source() {
+    let owner = Cx::for_testing();
+    let control = JoinStreamControl::default();
+    let mut group =
+        Box::pin(owner.join_all_scoped_stream_bounded(limit(1), control.source(&owner)));
+    assert!(matches!(
+        poll_once(group.as_mut()),
+        Poll::Ready(Err(ScopedJoinError::Spawn(SpawnError::RuntimeUnavailable)))
+    ));
+    assert_eq!(control.polls.get(), 0);
+    assert_eq!(control.drops.get(), 1);
+    drop(group);
+
+    owner.set_cancel_requested(true);
+    let control = JoinStreamControl::default();
+    control.panic_on_drop.set(true);
+    let mut group =
+        Box::pin(owner.join_all_scoped_stream_bounded(limit(1), control.source(&owner)));
+    let Poll::Ready(Ok(report)) = poll_once(group.as_mut()) else {
+        panic!("pre-cancellation returns a report without source polling");
+    };
+    assert!(matches!(report.stop, ScopedJoinBoundedStop::Cancelled(_)));
+    assert!(report.attempts.is_empty());
+    assert!(!report.input_exhausted);
+    assert!(
+        report
+            .input_panic
+            .as_ref()
+            .unwrap()
+            .message()
+            .contains("source drop panic")
+    );
+    assert_eq!(control.polls.get(), 0);
+    assert_eq!(control.drops.get(), 1);
+}
+
+#[test]
+fn bounded_stream_join_unpolled_source_drop_restores_foreign_ambient_context() {
+    for panic_on_drop in [false, true] {
+        let owner = Cx::for_testing();
+        let control = JoinStreamControl::default();
+        control.panic_on_drop.set(panic_on_drop);
+        let foreign = foreign_context();
+        let _foreign = Cx::set_current(Some(foreign.clone()));
+        let group = owner.join_all_scoped_stream_bounded(limit(1), control.source(&owner));
+        assert_eq!(control.polls.get(), 0);
+        assert_eq!(control.drops.get(), 0);
+        assert_eq!(
+            catch_unwind(AssertUnwindSafe(|| drop(group))).is_err(),
+            panic_on_drop
+        );
+        assert_eq!(control.polls.get(), 0);
+        assert_eq!(control.drops.get(), 1);
+        assert_eq!(Cx::current().unwrap().task_id(), foreign.task_id());
     }
 }
