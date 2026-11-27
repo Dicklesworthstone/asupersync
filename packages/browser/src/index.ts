@@ -710,6 +710,7 @@ export type BrowserServiceWorkerBrokerOperation =
 
 export type BrowserServiceWorkerBrokerFailureReason =
   | BrowserServiceWorkerBrokerSupportReason
+  | "pending_capacity_exhausted"
   | "storage_failed"
   | "serialization_failed";
 
@@ -775,6 +776,8 @@ export interface BrowserServiceWorkerBrokerStoreOptions extends BrowserStorageOp
 }
 
 export interface BrowserServiceWorkerBrokerRegistrationRequest {
+  /** Maximum pending work IDs. Omit to retain an existing registration's policy. */
+  maxPendingWork?: number;
   admission: BrowserServiceWorkerBrokerAdmissionTuple;
   capabilityManifestVersion: string;
   controllerPresent?: boolean;
@@ -782,6 +785,8 @@ export interface BrowserServiceWorkerBrokerRegistrationRequest {
 }
 
 export interface BrowserServiceWorkerBrokerRegistration {
+  /** Persisted admission limit, absent on registrations without a configured limit. */
+  maxPendingWork?: number;
   contractId: typeof BROWSER_SERVICE_WORKER_BROKER_CONTRACT_ID;
   requestedLane: BrowserServiceWorkerBrokerRequestedLane;
   fallbackTarget: BrowserServiceWorkerBrokerFallbackTarget;
@@ -5314,6 +5319,9 @@ export function assertBrowserServiceWorkerBrokerSupport(
 function browserServiceWorkerBrokerOperationGuidance(
   reason: BrowserServiceWorkerBrokerFailureReason,
 ): string[] {
+  if (reason === "pending_capacity_exhausted") {
+    return ["Complete pending work before retrying admission, or explicitly increase maxPendingWork on the registration."];
+  }
   if (reason === "storage_failed") {
     return [
       "Inspect the underlying IndexedDB or localStorage error and retry only after the durable substrate is healthy.",
@@ -9177,6 +9185,8 @@ function browserUrlLike(
 
 /** Requests for one namespace stay inside one host transaction or Web Lock. */
 interface BrowserStorageTransaction {
+  /** The host coordinates this transaction with other cooperating realms. */
+  readonly crossRealmSerialized: boolean;
   get(
     key: string,
     consume: (bytes: Uint8Array | null) => void,
@@ -9255,6 +9265,7 @@ async function runBrowserStorageTransaction<T>(
         const key = (value: string): string =>
           encodeIndexedDbStorageKey(namespace, value, storage.globalObject);
         const view: BrowserStorageTransaction = {
+          crossRealmSerialized: true,
           get(value, consume, invalidBytes) {
             const request = store.get(key(value));
             request.onsuccess = () => guard(() => {
@@ -9294,7 +9305,7 @@ async function runBrowserStorageTransaction<T>(
   if (!local) throw new Error("localStorage is unavailable in this browser/runtime");
   const prefix = localStorageNamespacePrefix(namespace, storage.globalObject);
   const indexKey = encodeLocalStorageKey(namespace, BROWSER_ARTIFACT_INDEX_KEY, storage.globalObject);
-  const run = (): T => {
+  const run = (crossRealmSerialized: boolean): T => {
     const pending = new Map<string, string | null>();
     let reclamationIndex: string | null | undefined;
     const key = (value: string): string =>
@@ -9305,6 +9316,7 @@ async function runBrowserStorageTransaction<T>(
     let result: T;
     let hasResult = false;
     const view: BrowserStorageTransaction = {
+      crossRealmSerialized,
       get(value, consume, invalidBytes) {
         const encoded = key(value);
         const raw = pending.has(encoded) ? pending.get(encoded)! : local.getItem(encoded);
@@ -9422,14 +9434,14 @@ async function runBrowserStorageTransaction<T>(
     // lock manager releases ownership on both fulfillment and rejection.
     return navigator.locks.request<T>(`asupersync:artifact:${prefix}`, {
       mode: mode === "readonly" ? "shared" : "exclusive",
-    }, async () => run());
+    }, async () => run(true));
   }
   if (requireCrossRealmLock) throw new Error("claiming broker work in localStorage requires Web Locks");
   // Older hosts without Web Locks retain same-realm serialization only.
   // The staged index preserves readable references after each host mutation,
   // not multi-key crash atomicity: interrupted replacement may lose evicted
   // entries or leave unindexed payloads. Web Locks coordinate cooperating tabs.
-  return run();
+  return run(false);
 }
 
 export class BrowserArtifactStore {
@@ -10332,6 +10344,10 @@ function parseBrowserServiceWorkerBrokerAdmissionTuple(
   );
 }
 
+function validBrokerPendingLimit(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
 function parseBrowserServiceWorkerBrokerRegistration(
   value: unknown,
 ): BrowserServiceWorkerBrokerRegistration {
@@ -10340,6 +10356,7 @@ function parseBrowserServiceWorkerBrokerRegistration(
   }
   const candidate = value as Partial<BrowserServiceWorkerBrokerRegistration>;
   if (
+    (candidate.maxPendingWork !== undefined && !validBrokerPendingLimit(candidate.maxPendingWork)) ||
     candidate.contractId !== BROWSER_SERVICE_WORKER_BROKER_CONTRACT_ID ||
     candidate.requestedLane !== BROWSER_SERVICE_WORKER_BROKER_LANE ||
     (candidate.backend !== "indexeddb" && candidate.backend !== "localstorage") ||
@@ -10362,6 +10379,7 @@ function parseBrowserServiceWorkerBrokerRegistration(
     BROWSER_BRIDGE_ONLY_FALLBACK_TARGET,
   );
   return {
+    ...(candidate.maxPendingWork === undefined ? {} : { maxPendingWork: candidate.maxPendingWork }),
     contractId: BROWSER_SERVICE_WORKER_BROKER_CONTRACT_ID,
     requestedLane: BROWSER_SERVICE_WORKER_BROKER_LANE,
     fallbackTarget,
@@ -10703,6 +10721,18 @@ export class BrowserServiceWorkerBrokerStore {
       });
   }
 
+  private requireBoundedWriteLock(
+    transaction: BrowserStorageTransaction,
+    limit: number | undefined,
+    operation: BrowserServiceWorkerBrokerOperation,
+    brokerWorkId?: string,
+  ): void {
+    if (limit !== undefined && !transaction.crossRealmSerialized) {
+      throw this.operationError(operation, "storage_failed",
+        "writing bounded broker state requires IndexedDB or a namespace Web Lock", brokerWorkId);
+    }
+  }
+
   private registrationMismatch(
     existing: BrowserServiceWorkerBrokerRegistration,
     next: BrowserServiceWorkerBrokerRegistration,
@@ -10864,6 +10894,11 @@ export class BrowserServiceWorkerBrokerStore {
   async registerBroker(
     request: BrowserServiceWorkerBrokerRegistrationRequest,
   ): Promise<BrowserServiceWorkerBrokerRegistration> {
+    const limit = request.maxPendingWork;
+    if (limit !== undefined && !validBrokerPendingLimit(limit)) {
+      throw this.operationError("write_registration", "serialization_failed",
+        "maxPendingWork must be a positive safe integer");
+    }
     const admission = normalizeBrowserServiceWorkerBrokerAdmissionTuple(request.admission);
     const controllerPresent = request.controllerPresent;
     const capabilityManifestVersion = normalizeBrowserServiceWorkerBrokerString(
@@ -10901,6 +10936,11 @@ export class BrowserServiceWorkerBrokerStore {
         const mismatch = existing ? this.registrationMismatch(existing, registration) : null;
         const publish = (): void => {
           if (existing && mismatch === null) registration.registeredAtMs = existing.registeredAtMs;
+          const effectiveLimit = limit ?? (mismatch === null ? existing?.maxPendingWork : undefined);
+          // Replacing a bounded contract can remove the old limit; that write
+          // needs the same exclusion as enabling or changing it.
+          this.requireBoundedWriteLock(transaction, existing?.maxPendingWork ?? effectiveLimit, "write_registration");
+          if (effectiveLimit !== undefined) registration.maxPendingWork = effectiveLimit;
           this.writeRecord(transaction, BROWSER_SERVICE_WORKER_BROKER_REGISTRATION_KEY,
             registration, "write_registration");
           finish(registration);
@@ -10927,6 +10967,7 @@ export class BrowserServiceWorkerBrokerStore {
     return this.transaction("set_lifecycle", "readwrite", (transaction, finish) => {
       this.readRegistrationInTransaction(transaction, "set_lifecycle", (registration) => {
         if (!registration) { finish(null); return; }
+        this.requireBoundedWriteLock(transaction, registration.maxPendingWork, "set_lifecycle");
         const updated = { ...registration, lifecycleState: state, updatedAtMs: now };
         this.writeRecord(transaction, BROWSER_SERVICE_WORKER_BROKER_REGISTRATION_KEY,
           updated, "set_lifecycle");
@@ -10986,9 +11027,28 @@ export class BrowserServiceWorkerBrokerStore {
             requestedLane: BROWSER_SERVICE_WORKER_BROKER_LANE,
             updatedAtMs: replay ? existing.updatedAtMs : now,
           };
-          this.writeRecord(transaction, `${BROWSER_SERVICE_WORKER_BROKER_WORK_PREFIX}${brokerWorkId}`,
-            descriptor, "persist_work", brokerWorkId);
-          finish(descriptor);
+          const publish = (): void => {
+            this.writeRecord(transaction, `${BROWSER_SERVICE_WORKER_BROKER_WORK_PREFIX}${brokerWorkId}`,
+              descriptor, "persist_work", brokerWorkId);
+            finish(descriptor);
+          };
+          const limit = registration.maxPendingWork;
+          // A stale update can resurrect an entry that another tab completed
+          // and replaced with a different ID. Serialize updates as well as inserts.
+          this.requireBoundedWriteLock(transaction, limit, "persist_work", brokerWorkId);
+          if (existing || limit === undefined) { publish(); return; }
+          // Count durable keys in the same transaction as admission. Existing
+          // descriptors and failed publications never need a counter repair.
+          transaction.keys((keys) => {
+            let pending = 0;
+            for (const key of keys) {
+              if (key.startsWith(BROWSER_SERVICE_WORKER_BROKER_WORK_PREFIX) && ++pending >= limit) {
+                throw this.operationError("persist_work", "pending_capacity_exhausted",
+                  `pending work limit of ${limit} reached`, brokerWorkId);
+              }
+            }
+            publish();
+          });
         });
       });
     }, brokerWorkId);
@@ -11028,6 +11088,7 @@ export class BrowserServiceWorkerBrokerStore {
             return;
           }
           this.validateWorkFence(registration, work, work, handoff, operation);
+          this.requireBoundedWriteLock(transaction, registration.maxPendingWork, operation, id);
           finish(apply(transaction, work));
         });
       });
@@ -11123,6 +11184,7 @@ export class BrowserServiceWorkerBrokerStore {
             finish(existing);
             return;
           }
+          this.requireBoundedWriteLock(transaction, registration.maxPendingWork, "persist_handoff", brokerWorkId);
           const record: BrowserServiceWorkerBrokerHandoffRecord = {
             ...prepared,
             fallbackTarget,

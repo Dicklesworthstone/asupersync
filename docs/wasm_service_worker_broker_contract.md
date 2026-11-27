@@ -99,6 +99,23 @@ remain. Clearing the registration alone does not let a new registration adopt
 orphaned descriptors. Reconcile retained work or explicitly clear the broker
 state before replacing its contract.
 
+An application can set `maxPendingWork` to a positive safe integer in
+`registerBroker()`. The limit persists across restarts and same-registration
+refreshes. On admission of a new work ID, the broker counts pending descriptor
+keys in the same transaction that publishes the descriptor. When the limit
+is full, admission rejects with `pending_capacity_exhausted`. Completion frees
+a slot. Replays, claims, and updates to existing work can proceed even if the
+application has lowered the limit below the current backlog. Durable handoff
+history and artifacts do not consume pending slots. Bounded admission requires
+IndexedDB or the namespace Web Lock on localStorage. The lock also protects
+descriptor updates, versioned completion, handoff writes, and registration
+changes, including replacement of a bounded registration. A tab without Web
+Locks can still read the backlog and replay an exact, already-versioned
+descriptor without rewriting it. When enabling a limit on a localStorage
+namespace with active legacy or lockless writers, stop those writers first
+or use a fresh namespace. Existing registrations without a configured limit
+retain their admission behavior.
+
 Work and handoff writes share a lease fence for each `brokerWorkId`:
 
 - `leaseEpoch` must be a nonnegative safe integer and cannot fall below either

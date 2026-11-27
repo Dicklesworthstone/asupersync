@@ -1211,6 +1211,45 @@ async function brokerEnvironment(backend) {
 }
 
 for (const backend of ["indexeddb", "localstorage"]) {
+  test(`${backend}: pending admission survives restart, contention and cap reductions`, async () => {
+    const { first, broker, brokerHost } = await brokerEnvironment(backend);
+    if (backend === "localstorage") brokerHost.navigator = { locks };
+    const second = broker();
+    await first.registerBroker(brokerRegistration({ maxPendingWork: 2 }));
+    await second.registerBroker(brokerRegistration());
+    assert.equal((await second.readRegistration()).maxPendingWork, 2);
+    const work = id => brokerWork({ brokerWorkId: id, idempotencyKey: id });
+    const seed = await first.persistBrokerWork(work("seed"));
+    await second.persistDurableHandoff(work("handoff-only"));
+    const attempts = await Promise.allSettled([
+      first.persistBrokerWork(work("one")), second.persistBrokerWork(work("two")),
+    ]);
+    assert.equal(attempts.filter(r => r.status === "fulfilled").length, 1);
+    const rejected = attempts.find(r => r.status === "rejected");
+    assert.ok(brokerError(rejected.reason, "pending_capacity_exhausted"));
+    await second.registerBroker(brokerRegistration({ maxPendingWork: 1 }));
+    assert.equal((await second.listPendingWork()).length, 2);
+    assert.equal((await second.persistBrokerWork(work("seed"))).completionRevision, seed.completionRevision);
+    const claimed = await second.claimBrokerWork(seed, 2);
+    assert.equal(await second.completeBrokerWork(claimed), true);
+    await assert.rejects(first.persistBrokerWork(work("third")),
+      error => brokerError(error, "pending_capacity_exhausted"));
+    assert.equal(await first.completeBrokerWork(attempts.find(r => r.status === "fulfilled").value), true);
+    assert.equal((await second.persistBrokerWork(work("third"))).brokerWorkId, "third");
+    assert.equal((await first.listDurableHandoffs()).length, 1);
+  });
+
+  test(`${backend}: pending admission rejects malformed limits and preserves legacy registrations`, async () => {
+    const { first } = await brokerEnvironment(backend);
+    const original = brokerRecord(await first.readRegistration());
+    assert.equal(original.maxPendingWork, undefined);
+    for (const maxPendingWork of [0, -1, 1.5, null, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+      await assert.rejects(first.registerBroker(brokerRegistration({ maxPendingWork })),
+        error => brokerError(error, "serialization_failed"));
+    }
+    assert.deepEqual(brokerRecord(await first.readRegistration()), original);
+  });
+
   test(`${backend}: broker claim gives exactly one contender the observed work revision`, async () => {
     const env = await brokerEnvironment(backend);
     if (backend === "localstorage") env.brokerHost.navigator = { locks };
@@ -1660,6 +1699,31 @@ test("localstorage: broker Web Locks fence independent SDK realms and snapshot q
   assert.equal(requests.at(-1).mode, "shared");
 });
 
+
+test("localstorage: a lockless tab can observe bounded work but cannot change a lease, slot or policy", async () => {
+  const { first, broker, brokerHost } = await brokerEnvironment("localstorage");
+  const lockless = broker({ globalObject: { ...brokerHost, navigator: {} } });
+  brokerHost.navigator = { locks };
+  const registered = await first.registerBroker(brokerRegistration({ maxPendingWork: 1 }));
+  const refusesWrite = promise => assert.rejects(promise, error => brokerError(error, "storage_failed"));
+
+  // With no retained work, a contract replacement would otherwise drop the bound.
+  await refusesWrite(lockless.registerBroker(brokerRegistration({ capabilityManifestVersion: "caps-v2" })));
+  await refusesWrite(lockless.setLifecycleState("validating_scope"));
+  assert.deepEqual(brokerRecord(await first.readRegistration()), brokerRecord(registered));
+
+  const receipt = await first.persistBrokerWork(brokerWork());
+  const handoff = await first.persistDurableHandoff(brokerWork());
+  assert.equal((await lockless.persistBrokerWork(brokerWork())).completionRevision, receipt.completionRevision);
+  assert.deepEqual(brokerRecord(await lockless.persistDurableHandoff(brokerWork())), brokerRecord(handoff));
+  await refusesWrite(lockless.persistBrokerWork(brokerWork({ leaseEpoch: 2 })));
+  await refusesWrite(lockless.persistDurableHandoff(brokerWork({ leaseEpoch: 2 })));
+  await refusesWrite(lockless.completeBrokerWork(receipt));
+  assert.deepEqual(brokerRecord((await first.listPendingWork())[0]), brokerRecord(receipt));
+  assert.deepEqual(brokerRecord((await first.listDurableHandoffs())[0]), brokerRecord(handoff));
+  assert.equal(await first.completeBrokerWork(receipt), true);
+  assert.equal(await lockless.completeBrokerWork(receipt), false);
+});
 
 test("localstorage: broker claim requires cross-realm exclusion before updating the lease", async () => {
   const env = await brokerEnvironment("localstorage");
