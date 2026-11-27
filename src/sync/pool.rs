@@ -294,7 +294,8 @@ pub trait Pool: Send + Sync {
     /// Get current pool statistics.
     fn stats(&self) -> PoolStats;
 
-    /// Close the pool, rejecting new acquisitions.
+    /// Close the pool, rejecting new acquisitions. In a [`GenericPool`],
+    /// pending factory futures wake and release their creation slots when polled.
     fn close(&self) -> PoolFuture<'_, ()>;
 
     /// Check if a resource is still healthy/usable.
@@ -1815,6 +1816,8 @@ where
     /// re-polled immediately instead of waiting for the next
     /// `process_returns` call.
     return_wakers: ReturnWakers,
+    /// Wakes pending factory operations on both the acquire and warmup paths.
+    factory_close: super::Notify,
     /// Lock-free snapshot of `GenericPoolState::closed` (monotone false→true).
     closed: Arc<AtomicBool>,
     /// Optional metrics handle for observability.
@@ -1856,6 +1859,7 @@ where
             time_getter,
             health_check_fn: None,
             return_wakers: Arc::new(PoolMutex::new(SmallVec::new())),
+            factory_close: super::Notify::new(),
             closed: Arc::new(AtomicBool::new(false)),
             #[cfg(feature = "metrics")]
             metrics: None,
@@ -2432,8 +2436,27 @@ where
 
     /// Create a new resource using the factory.
     async fn create_resource(&self) -> Result<R, PoolError> {
-        let fut = self.factory.create();
-        fut.await.map_err(|e| PoolError::CreateFailed(e.into()))
+        if self.closed.load(Ordering::Acquire) {
+            return Err(PoolError::Closed);
+        }
+        let mut factory = self.factory.create();
+        let mut closed = std::pin::pin!(
+            self.factory_close
+                .wait_until(|| self.closed.load(Ordering::Acquire))
+        );
+        std::future::poll_fn(|task_cx| {
+            if self.closed.load(Ordering::Acquire) {
+                return Poll::Ready(Err(PoolError::Closed));
+            }
+            if let Poll::Ready(result) = factory.as_mut().poll(task_cx) {
+                return Poll::Ready(result.map_err(|e| PoolError::CreateFailed(e.into())));
+            }
+            // Register only for a pending factory. The predicate observes a
+            // close during the factory poll or before registration, and the
+            // broadcast wakes us for any subsequent close.
+            closed.as_mut().poll(task_cx).map(|()| Err(PoolError::Closed))
+        })
+        .await
     }
 
     /// Observe cancellation during an acquire's factory or capacity wait.
@@ -3102,6 +3125,7 @@ where
             // Closing has already detached every waiter. Finish the whole
             // fanout even if a task's wake or final waker destructor panics.
             let mut panics = CheckedPoolCleanupPanics::new();
+            panics.run(|| self.factory_close.notify_waiters());
             for waiter in waiters {
                 panics.run(|| waiter.waker.clone_waker().wake());
                 panics.run(|| drop(waiter));

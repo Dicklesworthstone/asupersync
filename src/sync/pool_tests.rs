@@ -1982,6 +1982,52 @@ mod tests {
     }
 
     #[test]
+    fn pool_close_wakes_parked_acquire_and_warmup_factories() {
+        for warmup in [false, true] {
+            reset_test_pool_time();
+            let clock = Arc::new(VirtualClock::starting_at(Time::ZERO));
+            let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+            let cx = test_cx_with_timer(timer);
+            let _current = Cx::set_current(Some(cx.clone()));
+            let gate = Arc::new(PoolCreationGate::default());
+            let pool = GenericPool::with_time_getter(
+                ParkedFirstPoolFactory::new(Arc::clone(&gate)),
+                PoolConfig::with_max_size(1)
+                    .warmup_connections(1)
+                    .warmup_failure_strategy(WarmupStrategy::FailFast)
+                    .warmup_timeout(Duration::from_secs(3600))
+                    .acquire_timeout(Duration::from_secs(3600)),
+                test_pool_time_now,
+            );
+            let wake = Arc::new(PoolAcquireWake::default());
+            let waker = Waker::from(Arc::clone(&wake));
+            let mut task_cx = Context::from_waker(&waker);
+            let mut operation = std::pin::pin!(async {
+                if warmup {
+                    pool.warmup().await.map(|_| ())
+                } else {
+                    pool.acquire(&cx).await.map(|_| ())
+                }
+            });
+            assert!(operation.as_mut().poll(&mut task_cx).is_pending());
+            assert!(gate.entered.load(Ordering::Acquire));
+            assert_eq!(pool.state.lock().creating, 1);
+
+            let wakes = wake.0.load(Ordering::Acquire);
+            futures_lite::future::block_on(pool.close());
+            assert!(wake.0.load(Ordering::Acquire) > wakes);
+            assert!(matches!(
+                operation.as_mut().poll(&mut task_cx),
+                Poll::Ready(Err(PoolError::Closed))
+            ));
+            assert!(!gate.released.load(Ordering::Acquire));
+            assert_eq!(gate.dropped.load(Ordering::Acquire), 1);
+            assert_eq!(pool.state.lock().creating, 0);
+            assert_eq!(cx.now(), Time::ZERO);
+        }
+    }
+
+    #[test]
     fn pool_creation_cancel_wakes_and_releases_capacity_without_time_advance() {
         init_test("pool_creation_cancel_wakes_and_releases_capacity_without_time_advance");
         let clock = Arc::new(VirtualClock::starting_at(Time::ZERO));
