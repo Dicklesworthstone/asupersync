@@ -179,6 +179,244 @@ fn bracket_resource_passed_to_release() {
     assert_eq!(*released_value.lock(), 42);
 }
 
+mod resource_clone_cleanup {
+    use super::*;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    #[derive(Default)]
+    struct Observed {
+        acquire_polls: Cell<usize>,
+        acquire_held: Cell<bool>,
+        clones: Cell<usize>,
+        uses: Cell<usize>,
+        releases: Cell<usize>,
+        finished: Cell<usize>,
+        drops: Cell<usize>,
+        unused_drops: Cell<usize>,
+        unused_held: Cell<bool>,
+        released_generation: Cell<u32>,
+    }
+
+    struct Resource {
+        observed: Rc<Observed>,
+        generation: u32,
+        fail_clone: bool,
+    }
+
+    impl Clone for Resource {
+        fn clone(&self) -> Self {
+            self.observed.clones.set(self.observed.clones.get() + 1);
+            assert!(!self.fail_clone, "resource clone panic");
+            Self {
+                observed: Rc::clone(&self.observed),
+                generation: self.generation + 1,
+                fail_clone: false,
+            }
+        }
+    }
+
+    impl Drop for Resource {
+        fn drop(&mut self) {
+            self.observed.drops.set(self.observed.drops.get() + 1);
+        }
+    }
+
+    struct UnusedUse {
+        observed: Rc<Observed>,
+        panic_on_drop: bool,
+    }
+
+    impl Drop for UnusedUse {
+        fn drop(&mut self) {
+            assert!(
+                !self.observed.acquire_held.get(),
+                "acquire must retire before unused use captures"
+            );
+            self.observed.unused_held.set(false);
+            self.observed
+                .unused_drops
+                .set(self.observed.unused_drops.get() + 1);
+            assert!(!self.panic_on_drop, "unused use capture panic");
+        }
+    }
+
+    struct Acquisition {
+        resource: Option<Resource>,
+        observed: Rc<Observed>,
+    }
+
+    impl Future for Acquisition {
+        type Output = Result<Resource, ()>;
+
+        fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+            let this = self.get_mut();
+            this.observed
+                .acquire_polls
+                .set(this.observed.acquire_polls.get() + 1);
+            Poll::Ready(Ok(this.resource.take().expect("acquire polled twice")))
+        }
+    }
+
+    impl Drop for Acquisition {
+        fn drop(&mut self) {
+            self.observed.acquire_held.set(false);
+        }
+    }
+
+    fn acquire(observed: &Rc<Observed>, fail_clone: bool) -> Acquisition {
+        observed.acquire_held.set(true);
+        Acquisition {
+            resource: Some(Resource {
+                observed: Rc::clone(observed),
+                generation: 0,
+                fail_clone,
+            }),
+            observed: Rc::clone(observed),
+        }
+    }
+
+    fn use_resource(resource: Resource) -> impl Future<Output = Result<u32, ()>> {
+        resource.observed.uses.set(resource.observed.uses.get() + 1);
+        let generation = resource.generation;
+        drop(resource);
+        std::future::ready(Ok(generation))
+    }
+
+    fn release(resource: Resource) -> impl Future<Output = ()> {
+        let observed = Rc::clone(&resource.observed);
+        assert!(!observed.acquire_held.get(), "acquire must retire first");
+        assert!(
+            !observed.unused_held.get(),
+            "unused use captures must retire first"
+        );
+        observed.releases.set(observed.releases.get() + 1);
+        observed.released_generation.set(resource.generation);
+        async move {
+            let mut first = true;
+            std::future::poll_fn(|cx| {
+                if first {
+                    first = false;
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                } else {
+                    Poll::Ready(())
+                }
+            })
+            .await;
+            observed.finished.set(observed.finished.get() + 1);
+            drop(resource);
+        }
+    }
+
+    fn assert_clone_panic(payload: Box<dyn std::any::Any + Send>) {
+        assert_eq!(payload.downcast_ref::<&str>(), Some(&"resource clone panic"));
+    }
+
+    #[test]
+    fn clone_panic_waits_for_async_release_and_leaves_a_terminal_future() {
+        for panic_on_drop in [false, true] {
+            let observed = Rc::new(Observed::default());
+            observed.unused_held.set(true);
+            let unused = UnusedUse {
+                observed: Rc::clone(&observed),
+                panic_on_drop,
+            };
+            let mut future = Box::pin(bracket(
+                acquire(&observed, true),
+                move |resource| {
+                    drop(unused);
+                    use_resource(resource)
+                },
+                release,
+            ));
+            let mut cx = Context::from_waker(Waker::noop());
+            let first = catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(&mut cx)));
+            assert!(matches!(first, Ok(Poll::Pending)));
+            assert_eq!(observed.clones.get(), 1);
+            assert_eq!(observed.uses.get(), 0);
+            assert_eq!(observed.unused_drops.get(), 1);
+            assert_eq!(observed.releases.get(), 1);
+            assert_eq!(observed.finished.get(), 0);
+            assert_eq!(observed.drops.get(), 0, "release must still own the original");
+
+            let payload = catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(&mut cx)))
+                .expect_err("clone panic must propagate after release");
+            assert_clone_panic(payload);
+            assert_eq!(observed.finished.get(), 1);
+            assert_eq!(observed.released_generation.get(), 0);
+            assert_eq!(observed.drops.get(), 1);
+            assert_eq!(
+                future.as_mut().poll(&mut cx),
+                Poll::Ready(Err(BracketError::PolledAfterCompletion))
+            );
+            drop(future);
+            assert_eq!(observed.acquire_polls.get(), 1);
+            assert_eq!(observed.clones.get(), 1);
+            assert_eq!(observed.releases.get(), 1);
+            assert_eq!(observed.drops.get(), 1);
+        }
+    }
+
+    #[test]
+    fn dropping_after_clone_panic_finishes_release_exactly_once() {
+        let observed = Rc::new(Observed::default());
+        let mut future = Box::pin(bracket(acquire(&observed, true), use_resource, release));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(future.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(observed.finished.get(), 0);
+        let payload = catch_unwind(AssertUnwindSafe(|| drop(future)))
+            .expect_err("drop retains the original clone panic after release");
+        assert_clone_panic(payload);
+        assert_eq!(observed.uses.get(), 0);
+        assert_eq!(observed.releases.get(), 1);
+        assert_eq!(observed.finished.get(), 1);
+        assert_eq!(observed.drops.get(), 1);
+    }
+
+    #[test]
+    fn release_constructor_failure_takes_precedence_over_clone_panic() {
+        let observed = Rc::new(Observed::default());
+        let payload = catch_unwind(AssertUnwindSafe(|| {
+            poll_ready(bracket(
+                acquire(&observed, true),
+                use_resource,
+                |resource| -> std::future::Ready<()> {
+                    resource
+                        .observed
+                        .releases
+                        .set(resource.observed.releases.get() + 1);
+                    panic!("release constructor panic");
+                },
+            ))
+        }))
+        .expect_err("release failure must remain primary");
+        assert_eq!(
+            payload.downcast_ref::<&str>(),
+            Some(&"release constructor panic")
+        );
+        assert_eq!(observed.uses.get(), 0);
+        assert_eq!(observed.releases.get(), 1);
+        assert_eq!(observed.drops.get(), 1);
+    }
+
+    #[test]
+    fn successful_clone_preserves_original_use_and_cloned_release() {
+        let observed = Rc::new(Observed::default());
+        let mut future = Box::pin(bracket(acquire(&observed, false), use_resource, release));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(future.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(observed.drops.get(), 1, "use consumed the original resource");
+        assert_eq!(future.as_mut().poll(&mut cx), Poll::Ready(Ok(0)));
+        assert_eq!(observed.clones.get(), 1);
+        assert_eq!(observed.uses.get(), 1);
+        assert_eq!(observed.releases.get(), 1);
+        assert_eq!(observed.released_generation.get(), 1);
+        assert_eq!(observed.finished.get(), 1);
+        drop(future);
+        assert_eq!(observed.drops.get(), 2);
+    }
+}
+
 // =========================================================================
 // bracket_move() Function Tests
 // =========================================================================
