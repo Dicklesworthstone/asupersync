@@ -662,3 +662,502 @@ fn native_idle_controlled_supervisor_observes_its_region_deadline() {
         ));
     });
 }
+
+#[test]
+fn native_stop_child_fences_identity_dependencies_and_permanent_retirement() {
+    for sharded in [false, true] {
+        for policy in [
+            RestartPolicy::OneForOne,
+            RestartPolicy::OneForAll,
+            RestartPolicy::RestForOne,
+        ] {
+            native_case(sharded, move |cx, native| async move {
+                let starts = Arc::new(AtomicUsize::new(0));
+                let retired = Arc::new(AtomicUsize::new(0));
+                let finalized = Arc::new(AtomicUsize::new(0));
+                let managed = SupervisorBuilder::new("controlled-stop")
+                    .child(deferred("base"))
+                    .child(deferred("dependent").depends_on("base"))
+                    .child(deferred("peer"))
+                    .child(deferred("dormant"))
+                    .compile()
+                    .unwrap()
+                    .bind_managed(
+                        ["base", "dependent", "peer", "dormant"]
+                            .into_iter()
+                            .map(|name| {
+                                ManagedChildBinding::new(
+                                    name,
+                                    ManagedRestartMode::Permanent,
+                                    TrackedFactory {
+                                        starts: Arc::clone(&starts),
+                                        retired: Arc::clone(&retired),
+                                    },
+                                )
+                            })
+                            .collect(),
+                        config(policy, 0),
+                    )
+                    .unwrap();
+                let (mut supervisor, control) = managed
+                    .spawn_controlled(&cx, NonZeroUsize::new(2).unwrap())
+                    .unwrap();
+                let base = control.activate(&cx, "base").await.unwrap();
+                let dependent = control.activate(&cx, "dependent").await.unwrap();
+                let peer = control.activate(&cx, "peer").await.unwrap();
+                for generation in [base, dependent, peer] {
+                    let finalized = Arc::clone(&finalized);
+                    assert!(
+                        native.register_sync_finalizer_for_testing(generation.region, move || {
+                            finalized.fetch_add(1, Ordering::SeqCst);
+                        })
+                    );
+                }
+                assert!(matches!(
+                    control.stop_child(&cx, "missing", base).await,
+                    Err(ManagedChildControlError::UnknownChild { .. })
+                ));
+                assert!(matches!(
+                    control.stop_child(&cx, "dormant", base).await,
+                    Err(ManagedChildControlError::NotRunning { .. })
+                ));
+                assert!(matches!(
+                    control.stop_child(&cx, "peer", base).await,
+                    Err(ManagedChildControlError::StaleGeneration { expected, actual, .. })
+                        if expected == base && actual == peer
+                ));
+                assert!(matches!(
+                    control.stop_child(&cx, "base", base).await,
+                    Err(ManagedChildControlError::DependencyInUse { child, dependent })
+                        if child == "base" && dependent == "dependent"
+                ));
+                assert_eq!(retired.load(Ordering::SeqCst), 0);
+                assert_eq!(finalized.load(Ordering::SeqCst), 0);
+                assert_eq!(
+                    control.stop_child(&cx, "dependent", dependent).await.unwrap(),
+                    dependent
+                );
+                assert_eq!(retired.load(Ordering::SeqCst), 1);
+                assert_eq!(finalized.load(Ordering::SeqCst), 1);
+                assert!(matches!(
+                    control.stop_child(&cx, "dependent", dependent).await,
+                    Err(ManagedChildControlError::NotRunning { .. })
+                ));
+                assert!(matches!(
+                    control.activate(&cx, "dependent").await,
+                    Err(ManagedActivationError::AlreadyActivated { .. })
+                ));
+                assert_eq!(control.stop_child(&cx, "base", base).await.unwrap(), base);
+                assert_eq!(control.stop_child(&cx, "peer", peer).await.unwrap(), peer);
+                assert_eq!(finalized.load(Ordering::SeqCst), 3);
+                assert_eq!(starts.load(Ordering::SeqCst), 3);
+                assert_eq!(retired.load(Ordering::SeqCst), 3);
+                supervisor.abort();
+                let report = supervisor.join().await.unwrap();
+                assert_eq!((report.started, report.joined, report.restart_batches), (3, 3, 0));
+                assert_eq!(report.escalations, 0);
+                assert_eq!(retired.load(Ordering::SeqCst), 4, "retired exactly once");
+                assert!(report.children.iter().all(|child| child.region_outcome.is_some()));
+                assert!(matches!(
+                    control.stop_child(&cx, "peer", peer).await,
+                    Err(ManagedChildControlError::Closed)
+                ));
+                assert!(cx.checkpoint().is_ok(), "individual stops do not escalate");
+            });
+        }
+    }
+}
+
+#[test]
+fn native_queued_stop_shares_capacity_and_can_be_withdrawn_without_repolling() {
+    for sharded in [false, true] {
+        native_case(sharded, |cx, _| async move {
+            let starts = Arc::new(AtomicUsize::new(0));
+            let retired = Arc::new(AtomicUsize::new(0));
+            let (entered, mut entry) = oneshot::channel();
+            let entered = Arc::new(Mutex::new(Some(entered)));
+            let (release, released) = std::sync::mpsc::sync_channel(1);
+            let released = Arc::new(Mutex::new(released));
+            let managed = SupervisorBuilder::new("controlled-stop-queued")
+                .child(deferred("target"))
+                .child(deferred("blocker"))
+                .compile()
+                .unwrap()
+                .bind_managed(
+                    vec![
+                        ManagedChildBinding::new(
+                            "target",
+                            ManagedRestartMode::Permanent,
+                            TrackedFactory {
+                                starts: Arc::clone(&starts),
+                                retired: Arc::clone(&retired),
+                            },
+                        ),
+                        ManagedChildBinding::new(
+                            "blocker",
+                            ManagedRestartMode::Temporary,
+                            move |child: Cx, _: ManagedGeneration| {
+                                entered.lock().take().unwrap().send_blocking(()).unwrap();
+                                released.lock().recv_timeout(Duration::from_secs(10)).unwrap();
+                                async move { until_cancelled(&child).await }
+                            },
+                        ),
+                    ],
+                    config(RestartPolicy::OneForAll, 0),
+                )
+                .unwrap();
+            let (mut supervisor, control) = managed
+                .spawn_controlled(&cx, NonZeroUsize::new(2).unwrap())
+                .unwrap();
+            let generation = control.activate(&cx, "target").await.unwrap();
+            let mut activation = Box::pin(control.activate(&cx, "blocker"));
+            poll_fn(|task| {
+                assert!(activation.as_mut().poll(task).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            entry.recv(&cx).await.unwrap();
+            let request_cx = cx.derive_cancel_scope();
+            let mut dropped = Box::pin(control.stop_child(&cx, "target", generation));
+            let mut cancelled = Box::pin(control.stop_child(&request_cx, "target", generation));
+            poll_fn(|task| {
+                assert!(dropped.as_mut().poll(task).is_pending());
+                assert!(cancelled.as_mut().poll(task).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            assert!(matches!(
+                control.stop_child(&cx, "target", generation).await,
+                Err(ManagedChildControlError::Full)
+            ));
+            assert!(matches!(
+                control.activate(&cx, "missing").await,
+                Err(ManagedActivationError::Full)
+            ));
+            drop(dropped);
+            request_cx.cancel_with(CancelKind::User, Some("withdraw queued stop"));
+            release.send(()).unwrap();
+            activation.await.unwrap();
+            loop {
+                match control.activate(&cx, "missing").await {
+                    Err(ManagedActivationError::Full) => crate::runtime::yield_now().await,
+                    Err(ManagedActivationError::UnknownChild { .. }) => break,
+                    other => panic!("unexpected control barrier: {other:?}"),
+                }
+            }
+            assert_eq!(retired.load(Ordering::SeqCst), 0, "neither request stopped target");
+            assert!(matches!(
+                cancelled.await,
+                Err(ManagedChildControlError::Cancelled { may_have_applied: false, .. })
+            ));
+            assert_eq!(
+                control.stop_child(&cx, "target", generation).await.unwrap(),
+                generation
+            );
+            assert_eq!(starts.load(Ordering::SeqCst), 1);
+            assert_eq!(retired.load(Ordering::SeqCst), 1);
+            supervisor.abort();
+            let report = supervisor.join().await.unwrap();
+            assert_eq!((report.started, report.joined, report.restart_batches), (2, 2, 0));
+        });
+    }
+}
+
+#[test]
+fn native_claimed_stop_retains_name_until_descendants_and_finalizers_drain() {
+    for sharded in [false, true] {
+        for cancel_request in [false, true] {
+            native_case(sharded, move |cx, native| async move {
+                let parent = cx.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+                let registry = Arc::new(Mutex::new(crate::cx::registry::NameRegistry::new()));
+                let (ready, mut started) = oneshot::channel();
+                let (cleaning, mut cleanup) = oneshot::channel();
+                let (finish_cleanup, cleanup_gate) = oneshot::channel();
+                let setup = Arc::new(Mutex::new(Some((ready, cleaning, cleanup_gate))));
+                let finalized = Arc::new(AtomicUsize::new(0));
+                let managed = SupervisorBuilder::new("controlled-stop-cleanup")
+                    .child(deferred("worker").with_registration(NameRegistrationPolicy::Register {
+                        name: "stopping-service".into(),
+                        collision: NameCollisionPolicy::Fail,
+                    }))
+                    .compile()
+                    .unwrap()
+                    .bind_managed_with_registry(
+                        vec![ManagedChildBinding::new(
+                            "worker",
+                            ManagedRestartMode::Permanent,
+                            move |child: Cx, _: ManagedGeneration| {
+                                let (ready, cleaning, mut cleanup_gate) = setup.lock().take().unwrap();
+                                async move {
+                                    let (parked, mut parked_child) = oneshot::channel();
+                                    let descendant = child.spawn(move |descendant| async move {
+                                        let (_sender, mut receiver) = mpsc::channel::<()>(1);
+                                        let mut receive = Box::pin(receiver.recv(&descendant));
+                                        let mut parked = Some(parked);
+                                        assert!(matches!(
+                                            poll_fn(|task| {
+                                                let result = receive.as_mut().poll(task);
+                                                if result.is_pending() {
+                                                    if let Some(parked) = parked.take() {
+                                                        parked.send_blocking(()).unwrap();
+                                                    }
+                                                }
+                                                result
+                                            }).await,
+                                            Err(mpsc::RecvError::Cancelled)
+                                        ));
+                                        cleaning.send_blocking(()).unwrap();
+                                        cleanup_gate.recv_uninterruptible().await.unwrap();
+                                    }).unwrap();
+                                    parked_child.recv(&child).await.unwrap();
+                                    ready.send_blocking(()).unwrap();
+                                    let outcome = until_cancelled(&child).await;
+                                    drop(descendant);
+                                    outcome
+                                }
+                            },
+                        )],
+                        config(RestartPolicy::OneForOne, 0),
+                        Arc::clone(&registry),
+                    )
+                    .unwrap();
+                let (mut supervisor, control) = managed
+                    .spawn_controlled(parent.cx(), NonZeroUsize::new(1).unwrap())
+                    .unwrap();
+                let generation = control.activate(&cx, "worker").await.unwrap();
+                started.recv(&cx).await.unwrap();
+                let finalizer = Arc::clone(&finalized);
+                assert!(
+                    native.register_sync_finalizer_for_testing(generation.region, move || {
+                        finalizer.fetch_add(1, Ordering::SeqCst);
+                    })
+                );
+                let request_cx = cx.derive_cancel_scope();
+                let mut stopped = Box::pin(control.stop_child(&request_cx, "worker", generation));
+                poll_fn(|task| {
+                    assert!(stopped.as_mut().poll(task).is_pending());
+                    Poll::Ready(())
+                })
+                .await;
+                cleanup.recv(&cx).await.unwrap();
+                poll_fn(|task| {
+                    assert!(stopped.as_mut().poll(task).is_pending(), "descendant still owns cleanup");
+                    Poll::Ready(())
+                })
+                .await;
+                assert_eq!(registry.lock().whereis("stopping-service"), Some(generation.task));
+                assert_eq!(finalized.load(Ordering::SeqCst), 0);
+                let report = if cancel_request {
+                    request_cx.cancel_with(CancelKind::User, Some("stop observing claimed stop"));
+                    assert!(matches!(
+                        stopped.await,
+                        Err(ManagedChildControlError::Cancelled { may_have_applied: true, .. })
+                    ));
+                    parent.cancel(CancelReason::user("shutdown while individual stop drains")).unwrap();
+                    let mut joined = Box::pin(supervisor.join());
+                    poll_fn(|task| {
+                        assert!(joined.as_mut().poll(task).is_pending());
+                        Poll::Ready(())
+                    })
+                    .await;
+                    assert_eq!(registry.lock().whereis("stopping-service"), Some(generation.task));
+                    finish_cleanup.send_blocking(()).unwrap();
+                    joined.await.unwrap()
+                } else {
+                    let mut retry = Box::pin(control.stop_child(&cx, "worker", generation));
+                    poll_fn(|task| {
+                        assert!(retry.as_mut().poll(task).is_pending());
+                        Poll::Ready(())
+                    })
+                    .await;
+                    finish_cleanup.send_blocking(()).unwrap();
+                    assert_eq!(stopped.await.unwrap(), generation);
+                    assert!(matches!(
+                        retry.await,
+                        Err(ManagedChildControlError::NotRunning { .. })
+                    ));
+                    assert!(registry.lock().is_empty(), "receipt includes name release");
+                    assert_eq!(finalized.load(Ordering::SeqCst), 1);
+                    supervisor.abort();
+                    supervisor.join().await.unwrap()
+                };
+                assert!(matches!(report.outcome, Outcome::Cancelled(_)), "{report:?}");
+                assert_eq!((report.started, report.joined, report.restart_batches), (1, 1, 0));
+                assert_eq!(report.children[0].generation, generation);
+                assert!(report.children[0].region_outcome.is_some());
+                assert!(registry.lock().is_empty());
+                assert_eq!(finalized.load(Ordering::SeqCst), 1);
+                parent.close().await.unwrap();
+                assert!(cx.checkpoint().is_ok());
+            });
+        }
+    }
+}
+
+#[test]
+fn native_stop_checks_transitive_dependents_after_intermediate_retirement() {
+    for sharded in [false, true] {
+        native_case(sharded, |cx, native| async move {
+            let starts = Arc::new(AtomicUsize::new(0));
+            let retired = Arc::new(AtomicUsize::new(0));
+            let (release_middle, middle_gate) = oneshot::channel();
+            let middle_gate = Arc::new(Mutex::new(Some(middle_gate)));
+            let managed = SupervisorBuilder::new("controlled-transitive-stop")
+                .child(deferred("base"))
+                .child(deferred("middle").depends_on("base"))
+                .child(deferred("leaf").depends_on("middle"))
+                .compile()
+                .unwrap()
+                .bind_managed(
+                    vec![
+                        ManagedChildBinding::new(
+                            "base",
+                            ManagedRestartMode::Permanent,
+                            TrackedFactory {
+                                starts: Arc::clone(&starts),
+                                retired: Arc::clone(&retired),
+                            },
+                        ),
+                        ManagedChildBinding::new(
+                            "middle",
+                            ManagedRestartMode::Temporary,
+                            move |child: Cx, _: ManagedGeneration| {
+                                let mut gate = middle_gate.lock().take().unwrap();
+                                async move {
+                                    gate.recv(&child).await.unwrap();
+                                    Outcome::<(), &'static str>::Ok(())
+                                }
+                            },
+                        ),
+                        ManagedChildBinding::new(
+                            "leaf",
+                            ManagedRestartMode::Permanent,
+                            TrackedFactory {
+                                starts: Arc::clone(&starts),
+                                retired: Arc::clone(&retired),
+                            },
+                        ),
+                    ],
+                    config(RestartPolicy::OneForOne, 0),
+                )
+                .unwrap();
+            let (mut supervisor, control) = managed
+                .spawn_controlled(&cx, NonZeroUsize::new(1).unwrap())
+                .unwrap();
+            let base = control.activate(&cx, "base").await.unwrap();
+            let middle = control.activate(&cx, "middle").await.unwrap();
+            let leaf = control.activate(&cx, "leaf").await.unwrap();
+            let (finalized, mut middle_closed) = oneshot::channel();
+            assert!(
+                native.register_sync_finalizer_for_testing(middle.region, move || {
+                    finalized.send_blocking(()).unwrap();
+                })
+            );
+            release_middle.send_blocking(()).unwrap();
+            middle_closed.recv(&cx).await.unwrap();
+            assert!(matches!(
+                control.stop_child(&cx, "middle", middle).await,
+                Err(ManagedChildControlError::NotRunning { .. })
+            ));
+            assert!(matches!(
+                control.stop_child(&cx, "base", base).await,
+                Err(ManagedChildControlError::DependencyInUse { dependent, .. })
+                    if dependent == "leaf"
+            ));
+            assert_eq!(control.stop_child(&cx, "leaf", leaf).await.unwrap(), leaf);
+            assert_eq!(control.stop_child(&cx, "base", base).await.unwrap(), base);
+            drop(control);
+            let report = supervisor.join().await.unwrap();
+            assert!(report.outcome.is_ok(), "{report:?}");
+            assert_eq!((report.started, report.joined, report.restart_batches), (3, 3, 0));
+            assert_eq!(retired.load(Ordering::SeqCst), 2);
+        });
+    }
+}
+
+#[test]
+fn native_failed_stop_preserves_cleanup_failure_and_retires_factory_once() {
+    struct RetirementFailure {
+        retired: Arc<AtomicUsize>,
+        panic_on_retirement: bool,
+    }
+
+    impl ManagedChildFactory<&'static str> for RetirementFailure {
+        fn start(&self, cx: Cx, _: ManagedGeneration) -> ManagedChildFuture<&'static str> {
+            Box::pin(async move { until_cancelled(&cx).await })
+        }
+
+        fn retired(&self) {
+            assert_eq!(self.retired.fetch_add(1, Ordering::SeqCst), 0);
+            assert!(!self.panic_on_retirement, "individual stop retirement panic");
+        }
+    }
+
+    for sharded in [false, true] {
+        for fail_cleanup in [false, true] {
+            native_case(sharded, move |cx, native| async move {
+                let parent = cx
+                    .open_child_region(ChildRegionSpec::inherit())
+                    .await
+                    .unwrap();
+                let retired = Arc::new(AtomicUsize::new(0));
+                let finalized = Arc::new(AtomicUsize::new(0));
+                let managed = SupervisorBuilder::new("controlled-stop-failure")
+                    .child(deferred("worker"))
+                    .compile()
+                    .unwrap()
+                    .bind_managed(
+                        vec![ManagedChildBinding::new(
+                            "worker",
+                            ManagedRestartMode::Permanent,
+                            RetirementFailure {
+                                retired: Arc::clone(&retired),
+                                panic_on_retirement: !fail_cleanup,
+                            },
+                        )],
+                        config(RestartPolicy::OneForAll, 8),
+                    )
+                    .unwrap();
+                let (mut supervisor, control) = managed
+                    .spawn_controlled(parent.cx(), NonZeroUsize::new(1).unwrap())
+                    .unwrap();
+                let generation = control.activate(&cx, "worker").await.unwrap();
+                let finalizer = Arc::clone(&finalized);
+                assert!(
+                    native.register_sync_finalizer_for_testing(generation.region, move || {
+                        finalizer.fetch_add(1, Ordering::SeqCst);
+                        assert!(!fail_cleanup, "individual stop finalizer panic");
+                    })
+                );
+                assert!(matches!(
+                    control.stop_child(&cx, "worker", generation).await,
+                    Err(ManagedChildControlError::StopFailed { .. })
+                ));
+                let report = supervisor.join().await.unwrap();
+                assert!(report.outcome.is_panicked(), "{report:?}");
+                assert_eq!(
+                    (report.started, report.joined, report.restart_batches),
+                    (1, 1, 0)
+                );
+                assert_eq!(report.escalations, u8::from(fail_cleanup));
+                assert_eq!(report.children[0].generation, generation);
+                assert!(report.children[0].region_outcome.is_some());
+                assert_eq!(
+                    report.children[0]
+                        .cleanup_outcome
+                        .as_ref()
+                        .is_some_and(Outcome::is_panicked),
+                    fail_cleanup
+                );
+                assert_eq!(finalized.load(Ordering::SeqCst), 1);
+                assert_eq!(retired.load(Ordering::SeqCst), 1);
+                assert!(matches!(
+                    control.activate(&cx, "worker").await,
+                    Err(ManagedActivationError::Closed)
+                ));
+                parent.close().await.unwrap();
+                assert!(cx.checkpoint().is_ok(), "failure stays in the owned subtree");
+            });
+        }
+    }
+}

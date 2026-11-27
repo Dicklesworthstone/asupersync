@@ -1820,7 +1820,9 @@ mod managed_names;
 #[path = "supervision/managed_control.rs"]
 #[allow(clippy::redundant_pub_crate)]
 mod managed_control;
-pub use managed_control::{ManagedActivationError, ManagedSupervisorControl};
+pub use managed_control::{
+    ManagedActivationError, ManagedChildControlError, ManagedSupervisorControl,
+};
 
 #[cfg(test)]
 #[path = "supervision/managed_control_tests.rs"]
@@ -1828,7 +1830,8 @@ mod managed_control_tests;
 
 mod managed {
     use super::managed_control::{
-        ActivationReceiver, ActivationRequest, ManagedActivationError, ManagedSupervisorControl,
+        ActivationRequest, ControlReceiver, ControlRequest, ManagedActivationError,
+        ManagedChildControlError, ManagedSupervisorControl, StopRequest,
     };
     use super::managed_names::{GenerationName, RegistrationFailure};
     use super::{
@@ -2502,13 +2505,13 @@ mod managed {
 
     enum ControllerEvent {
         Terminal(usize),
-        Activate(ActivationRequest),
+        Control(ControlRequest),
     }
 
     struct Controller<E> {
         supervisor: ManagedSupervisor<E>,
         cx: Cx,
-        control: Option<ActivationReceiver>,
+        control: Option<ControlReceiver>,
         root: Option<ChildRegion>,
         running: Vec<Option<RunningChild<E>>>,
         latest: Vec<Option<ManagedChildCompletion<E>>>,
@@ -3280,7 +3283,7 @@ mod managed {
                 if let Some(control) = self.control.as_mut() {
                     match control.poll_recv(&self.cx, poll_cx) {
                         Poll::Ready(Ok(request)) => {
-                            return Poll::Ready(Some(ControllerEvent::Activate(request)));
+                            return Poll::Ready(Some(ControllerEvent::Control(request)));
                         }
                         Poll::Ready(Err(_)) => {
                             self.control = None;
@@ -3393,6 +3396,87 @@ mod managed {
                     }
                 }
             }
+        }
+
+        async fn stop_child(&mut self, request: StopRequest) {
+            let Some(index) = self
+                .supervisor
+                .children
+                .iter()
+                .position(|child| child.name == request.child)
+            else {
+                let child = request.child.clone();
+                request.complete(Err(ManagedChildControlError::UnknownChild { child }));
+                return;
+            };
+            let child = self.supervisor.children[index].name.clone();
+            let current = self.running[index].as_ref().and_then(|running| {
+                running
+                    .start_observed
+                    .then(|| running.publication.lock().identity)
+                    .flatten()
+            });
+            let Some(actual) = current else {
+                request.complete(Err(ManagedChildControlError::NotRunning { child }));
+                return;
+            };
+            if actual != request.expected {
+                let expected = request.expected;
+                request.complete(Err(ManagedChildControlError::StaleGeneration {
+                    child,
+                    expected,
+                    actual,
+                }));
+                return;
+            }
+            // Follow through inactive intermediate bindings too: a descendant
+            // can outlive a dependency that terminated independently.
+            let mut pending = vec![index];
+            let mut visited = vec![false; self.running.len()];
+            visited[index] = true;
+            while let Some(dependency) = pending.pop() {
+                for (dependent, spec) in self.supervisor.children.iter().enumerate() {
+                    if !visited[dependent]
+                        && spec
+                            .depends_on
+                            .contains(&self.supervisor.children[dependency].name)
+                    {
+                        if self.running[dependent].is_some() {
+                            request.complete(Err(ManagedChildControlError::DependencyInUse {
+                                child,
+                                dependent: spec.name.clone(),
+                            }));
+                            return;
+                        }
+                        visited[dependent] = true;
+                        pending.push(dependent);
+                    }
+                }
+            }
+            if self.cancelled() {
+                self.record_cancel();
+                request.complete(Err(ManagedChildControlError::Closed));
+                return;
+            }
+            if self.deadline_passed() {
+                self.record_deadline();
+                request.complete(Err(ManagedChildControlError::Closed));
+                return;
+            }
+            if !request.claim() {
+                return;
+            }
+            if let Err(error) = self.drain(index).await {
+                self.record_error(error);
+                request.complete(Err(ManagedChildControlError::StopFailed { child }));
+                return;
+            }
+            if !self.retire_factory(index) {
+                request.complete(Err(ManagedChildControlError::StopFailed { child }));
+                return;
+            }
+            self.trace("stopped", index, actual);
+            request.complete(Ok(actual));
         }
 
         async fn backoff(&mut self, delay: Option<Duration>, failed: usize) -> bool {
@@ -3545,8 +3629,11 @@ mod managed {
             while let Some(event) = self.wait_event().await {
                 let failed = match event {
                     ControllerEvent::Terminal(index) => index,
-                    ControllerEvent::Activate(request) => {
-                        self.activate(request).await;
+                    ControllerEvent::Control(request) => {
+                        match request {
+                            ControlRequest::Activate(request) => self.activate(request).await,
+                            ControlRequest::Stop(request) => self.stop_child(request).await,
+                        }
                         // Refused commands must not monopolize a worker while
                         // producers keep refilling the bounded mailbox.
                         crate::runtime::yield_now().await;
@@ -4059,7 +4146,7 @@ mod managed {
         async fn run_with_control(
             self,
             cx: &Cx,
-            control: Option<ActivationReceiver>,
+            control: Option<ControlReceiver>,
         ) -> ManagedSupervisorReport<E> {
             let mut controller = Controller::new(self, cx);
             controller.control = control;
