@@ -74,7 +74,11 @@ ID-only blocks. An ID in an unfinished EOF block is not committed. `retry` is
 than JavaScript's numeric range without truncation. This module does **not**
 reconnect, follow redirects, synthesize `Last-Event-ID`, interpret `[DONE]`, parse
 event payloads as JSON, or guarantee replay/deduplication. The caller must make
-any next request explicitly through its granted scope.
+any next request explicitly through its granted scope. When resuming, use the
+prior stream's `lastEventId` in the authorized request and pass that same
+value as `initialLastEventId` to the new decoder. Events without an `id`
+then inherit the prior cursor until a blank line commits a replacement or
+an empty `id:` resets it. The initial cursor must fit `maxLineBytes` in UTF-8.
 
 The adapter retains at most one fetch chunk, a bounded raw-byte line, one
 bounded event-data buffer, and bounded ID/type/retry strings. It emits one event

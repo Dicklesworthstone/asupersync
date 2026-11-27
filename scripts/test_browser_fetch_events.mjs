@@ -125,6 +125,44 @@ test("ID persists, NUL IDs are ignored, and incomplete IDs do not commit", { tim
   assert.ok(Object.isFrozen(records[0]));
 });
 
+test("resuming an authorized HTTP request preserves its cursor until a completed ID update", { timeout: 3000 }, async (t) => {
+  const received = [];
+  const server = createServer((request, response) => {
+    received.push(request.headers["last-event-id"]);
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.end(received.length === 1 ? "id: checkpoint\ndata: first\n\n" :
+      "data: inherited\n\nid: newer\ndata: update\n\nid:\ndata: reset\n\nid: incomplete\n");
+  });
+  await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
+  t.after(async () => { server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); });
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const f = await fixture(t, { origin, fetch: (url, init) => fetch(url, init) });
+  const first = sse(f);
+  await all(first);
+  assert.equal(first.lastEventId, "checkpoint");
+  const resumedFetch = f.start({ headers: { "Last-Event-ID": first.lastEventId } });
+  assert.equal(resumedFetch.outcome, "ok");
+  const resumed = sse(f, resumedFetch.value, { initialLastEventId: first.lastEventId });
+  assert.equal(resumed.lastEventId, "checkpoint");
+  assert.deepEqual((await all(resumed)).map(event => event.lastEventId), ["checkpoint", "newer", ""]);
+  assert.equal(resumed.lastEventId, "");
+  assert.deepEqual(received, [undefined, "checkpoint"]);
+  assert.equal((await resumed.closed).outcome, "ok");
+});
+
+test("invalid resume cursors refuse before body transfer and count UTF-8 bytes", async (t) => {
+  const f = await fixture(t, { body: bodyOf(["data:\n\nid:x\n"]) });
+  const fetch = f.start().value;
+  for (const id of [null, 42, "a\0b", "\r", "\n", "\ud800", "\udc00", "😀éa"]) {
+    const result = f.serverSentEvents(fetch, { initialLastEventId: id, maxLineBytes: 6 });
+    assert.equal(result.outcome, "err");
+    assert.equal(result.failure.code, "compatibility_rejected");
+  }
+  const stream = sse(f, fetch, { initialLastEventId: "😀é", maxLineBytes: 6 });
+  assert.deepEqual((await all(stream)).map(event => event.lastEventId), ["😀é"]);
+  assert.equal(stream.lastEventId, "😀é");
+});
+
 test("retry preserves exact digit values without numeric overflow or executing timers", { timeout: 3000 }, async (t) => {
   const f = await fixture(t, { body: bodyOf(["retry: 009007199254740993\nretry: +5\nretry:\nretry: １２\nretry: -3\n\n"]) });
   const events = sse(f);

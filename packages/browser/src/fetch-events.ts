@@ -19,6 +19,8 @@ export interface ServerSentEvent {
 }
 
 export interface ServerSentEventOptions {
+  /** Previously committed cursor for this response. Does not set request headers. */
+  initialLastEventId?: string;
   /** Raw UTF-8 bytes in a line, excluding its delimiter. */
   maxLineBytes?: number;
   /** Decoded UTF-16 code units in accumulated data, including appended LFs. */
@@ -45,7 +47,8 @@ export interface ServerSentEventStream extends FetchRecordStream<ServerSentEvent
  * redirect, Last-Event-ID header, event callback or task-ABI owner is created.
  * GET/POST, credentials, request headers, deadlines, signals, total response
  * bytes and scope closure stay governed by the original fetch. A caller may
- * explicitly use lastEventId/retry for a separately authorized next request.
+ * explicitly use lastEventId/retry for a separately authorized next request and
+ * pass that cursor as initialLastEventId when decoding the resumed response.
  *
  * At most one fetch chunk, one bounded line and one bounded event are retained.
  * There is no parsed-event backlog or read-ahead after producing one event.
@@ -71,8 +74,25 @@ export function serverSentEvents(fetch: FetchStreamHandle, options: ServerSentEv
     let data: string[] = [];
     let chars = 0;
     let type = "";
-    let id = "";
-    let lastEventId = "";
+    const { initialLastEventId = "" } = options;
+    if (typeof initialLastEventId !== "string" || initialLastEventId.length > maxLineBytes) {
+      throw recordError(recordFailure("invalid initialLastEventId", "compatibility_rejected"));
+    }
+    // A cursor from a decoded id field is a bounded UTF-8 scalar string.
+    // Count it without allocating a second buffer or requiring a host encoder.
+    let cursorBytes = 0;
+    for (const character of initialLastEventId) {
+      const scalar = character.codePointAt(0)!;
+      if (scalar === 0 || scalar === 10 || scalar === 13 || (scalar >= 0xd800 && scalar <= 0xdfff)) {
+        throw recordError(recordFailure("invalid initialLastEventId", "compatibility_rejected"));
+      }
+      cursorBytes += scalar <= 0x7f ? 1 : scalar <= 0x7ff ? 2 : scalar <= 0xffff ? 3 : 4;
+      if (cursorBytes > maxLineBytes) {
+        throw recordError(recordFailure("initialLastEventId exceeds maxLineBytes", "compatibility_rejected"));
+      }
+    }
+    let id = initialLastEventId;
+    let lastEventId = initialLastEventId;
     let retry: string | null = null;
     const clearEvent = () => { data = []; chars = 0; type = ""; };
     const result = createFetchRecordStream<ServerSentEvent>(fetch, {
