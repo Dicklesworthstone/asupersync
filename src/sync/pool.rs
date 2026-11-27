@@ -249,6 +249,80 @@ fn wall_clock_now() -> Instant {
     Instant::now()
 }
 
+/// The clock that owns a pool operation's deadlines and wake registrations.
+///
+/// Acquisition has an explicit owner; warmup captures its polling context once.
+/// A driverless owner uses the process clock even if a later poll has a driver.
+struct PoolDeadlineClock {
+    timer: Option<crate::time::TimerDriverHandle>,
+}
+
+impl PoolDeadlineClock {
+    fn for_acquire(cx: &Cx) -> Self {
+        Self {
+            timer: cx.timer_driver(),
+        }
+    }
+
+    fn current() -> Self {
+        Self {
+            timer: Cx::current().and_then(|cx| cx.timer_driver()),
+        }
+    }
+
+    fn now(&self) -> crate::types::Time {
+        self.timer.as_ref().map_or_else(
+            crate::time::raw_wall_now,
+            crate::time::TimerDriverHandle::now,
+        )
+    }
+
+    async fn timeout_at<F: Future>(
+        &self,
+        deadline: crate::types::Time,
+        future: F,
+    ) -> Result<F::Output, crate::time::Elapsed> {
+        let mut future = std::pin::pin!(future);
+        let mut sleep = None;
+        std::future::poll_fn(|task_cx| {
+            // Preserve TimeoutFuture's ordering on the owning clock: a driven
+            // timeout wins strictly after its deadline; ready work wins at the
+            // boundary. Driverless waits retain their ready-work-first order.
+            if self
+                .timer
+                .as_ref()
+                .is_some_and(|timer| timer.now() > deadline)
+            {
+                return Poll::Ready(Err(crate::time::Elapsed::new(deadline)));
+            }
+            if let Poll::Ready(output) = future.as_mut().poll(task_cx) {
+                return Poll::Ready(Ok(output));
+            }
+
+            // Bind only after the operation parks, so immediately ready work
+            // does not start the shared fallback timer pump.
+            let sleep = sleep.get_or_insert_with(|| match &self.timer {
+                Some(timer) => crate::time::Sleep::with_timer_driver(deadline, timer.clone()),
+                None => crate::time::Sleep::with_wall_clock(deadline),
+            });
+            Pin::new(sleep)
+                .poll_deadline(task_cx)
+                .map(|()| Err(crate::time::Elapsed::new(deadline)))
+        })
+        .await
+    }
+}
+
+/// Keep the ordinary checkpoint's mask, quota and acknowledgement semantics,
+/// while preventing its driverless fallback from borrowing a foreign clock.
+fn acquire_checkpoint(cx: &Cx) -> Result<(), PoolError> {
+    let _owner = cx
+        .timer_driver()
+        .is_none()
+        .then(|| Cx::set_current(Some(cx.clone())));
+    cx.checkpoint().map_err(|_| PoolError::Cancelled)
+}
+
 /// Boxed future helper for async trait-like APIs.
 pub type PoolFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -1436,7 +1510,7 @@ where
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if self.cx.checkpoint().is_err() {
+        if acquire_checkpoint(self.cx).is_err() {
             self.completed = true;
             return Poll::Ready(());
         }
@@ -1909,13 +1983,13 @@ where
         &self,
         cx: &Cx,
     ) -> Result<Option<CheckedPooledResource<R>>, CheckedPoolError> {
-        cx.checkpoint().map_err(|_| PoolError::Cancelled)?;
+        acquire_checkpoint(cx)?;
         if self.closed.load(Ordering::Acquire) {
             return Err(PoolError::Closed.into());
         }
         let pooled = self.try_acquire_inner(false);
         // Health and clock callbacks may cancel after the initial checkpoint.
-        cx.checkpoint().map_err(|_| PoolError::Cancelled)?;
+        acquire_checkpoint(cx)?;
         match pooled {
             Some(pooled) => CheckedPooledResource::admit(pooled, cx).map(Some),
             None if self.closed.load(Ordering::Acquire) => Err(PoolError::Closed.into()),
@@ -1989,7 +2063,8 @@ where
     pub async fn warmup(&self) -> Result<usize, PoolError> {
         let mut created = 0;
         let mut last_error = None;
-        let warmup_deadline = crate::time::wall_now() + self.config.warmup_timeout;
+        let clock = PoolDeadlineClock::current();
+        let warmup_deadline = clock.now() + self.config.warmup_timeout;
 
         let target = self.config.warmup_connections;
         for _ in 0..target {
@@ -2000,12 +2075,15 @@ where
                 break; // max_size reached (possibly by concurrent activity)
             };
 
-            let now = crate::time::wall_now();
+            let now = clock.now();
             let remaining = Duration::from_nanos(warmup_deadline.duration_since(now));
             let create_result = if remaining.is_zero() {
                 Err(PoolError::Timeout)
             } else {
-                match crate::time::timeout(now, remaining, self.create_resource()).await {
+                match clock
+                    .timeout_at(warmup_deadline, self.create_resource())
+                    .await
+                {
                     Ok(result) => result,
                     Err(_elapsed) => Err(PoolError::Timeout),
                 }
@@ -2472,7 +2550,7 @@ where
         let mut operation = std::pin::pin!(operation);
         let mut cancellation = None;
         std::future::poll_fn(|task_cx| {
-            if cx.checkpoint().is_err() {
+            if acquire_checkpoint(cx).is_err() {
                 return Poll::Ready(Err(PoolError::Cancelled));
             }
 
@@ -2486,7 +2564,7 @@ where
             // The factory, or a Waker clone/retirement callback during
             // registration, may have cancelled the caller. Do not hand out a
             // resource produced in that race or miss a pre-registration cancel.
-            if cx.checkpoint().is_err() {
+            if acquire_checkpoint(cx).is_err() {
                 return Poll::Ready(Err(PoolError::Cancelled));
             }
             polled.map(Ok)
@@ -2697,10 +2775,8 @@ where
                 }
             }
 
-            let get_now = || {
-                cx.timer_driver()
-                    .map_or_else(crate::time::wall_now, |d| d.now())
-            };
+            let clock = PoolDeadlineClock::for_acquire(cx);
+            let get_now = || clock.now();
             let acquire_start = get_now();
             let mut cleanup = WaiterCleanup {
                 pool: self,
@@ -2714,7 +2790,7 @@ where
                 // A waiter can resume because of cancellation/deadline as well
                 // as because a resource became available. Re-check before taking
                 // any fast path so cancelled acquirers do not steal capacity.
-                if cx.checkpoint().is_err() {
+                if acquire_checkpoint(cx).is_err() {
                     return Err(PoolError::Cancelled);
                 }
 
@@ -2741,7 +2817,7 @@ where
                         true
                     };
 
-                    if cx.checkpoint().is_err() {
+                    if acquire_checkpoint(cx).is_err() {
                         return Err(PoolError::Cancelled);
                     }
                     // Health checks run outside state and may close the pool.
@@ -2770,7 +2846,7 @@ where
                     // Keep checkout rollback armed until those callbacks and
                     // the final cancellation/close checks have completed.
                     drop(cleanup);
-                    if cx.checkpoint().is_err() {
+                    if acquire_checkpoint(cx).is_err() {
                         return Err(PoolError::Cancelled);
                     }
                     if self.closed.load(Ordering::Acquire) {
@@ -2835,7 +2911,7 @@ where
                                 now.duration_since(acquire_start),
                             ));
                         }
-                        return if cx.checkpoint().is_err() {
+                        return if acquire_checkpoint(cx).is_err() {
                             Err(PoolError::Cancelled)
                         } else {
                             Err(PoolError::Timeout)
@@ -2844,20 +2920,20 @@ where
 
                     let create_result = Self::wait_for_acquire_operation(
                         cx,
-                        crate::time::timeout(now, remaining, self.create_resource()),
+                        clock.timeout_at(now + remaining, self.create_resource()),
                     )
                     .await;
                     // Dropping a completed factory or its wake registration
                     // can also run user code. Check again before committing the
                     // reserved slot or publishing the factory's result.
-                    if cx.checkpoint().is_err() {
+                    if acquire_checkpoint(cx).is_err() {
                         return Err(PoolError::Cancelled);
                     }
                     let resource = match create_result? {
                         Ok(Ok(res)) => res,
                         Ok(Err(e)) => return Err(e),
                         Err(_) => {
-                            if cx.checkpoint().is_err() {
+                            if acquire_checkpoint(cx).is_err() {
                                 return Err(PoolError::Cancelled);
                             }
 
@@ -2890,7 +2966,7 @@ where
 
                     let acquired_at = (self.time_getter)();
                     drop(cleanup);
-                    if cx.checkpoint().is_err() {
+                    if acquire_checkpoint(cx).is_err() {
                         return Err(PoolError::Cancelled);
                     }
                     if self.closed.load(Ordering::Acquire) {
@@ -2940,7 +3016,7 @@ where
                 };
 
                 // Check for cancellation
-                if let Err(_e) = cx.checkpoint() {
+                if let Err(_e) = acquire_checkpoint(cx) {
                     return Err(PoolError::Cancelled);
                 }
 
@@ -2954,7 +3030,7 @@ where
                 };
                 let timed_out = match Self::wait_for_acquire_operation(
                     cx,
-                    crate::time::timeout(now, remaining, wait_fut),
+                    clock.timeout_at(now + remaining, wait_fut),
                 )
                 .await
                 {
@@ -2969,7 +3045,7 @@ where
                 if timed_out {
                     let wait_duration =
                         Duration::from_nanos(get_now().duration_since(wait_started));
-                    if cx.checkpoint().is_err() {
+                    if acquire_checkpoint(cx).is_err() {
                         self.record_wait_time(wait_duration);
                         return Err(PoolError::Cancelled);
                     }

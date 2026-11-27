@@ -3177,6 +3177,372 @@ mod tests {
         crate::test_complete!("record_wait_time_accumulates_in_pool_stats");
     }
 
+    #[derive(Clone, Copy, Debug)]
+    enum PoolOwnerClockFinish {
+        Timeout,
+        Budget,
+        Cancel,
+    }
+
+    fn assert_pool_owner_clock_wait(
+        factory_wait: bool,
+        foreign_start: Time,
+        finish: PoolOwnerClockFinish,
+    ) {
+        reset_test_pool_time();
+        let start = Time::from_secs(100);
+        let clock = Arc::new(VirtualClock::starting_at(start));
+        let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+        let duration = if matches!(finish, PoolOwnerClockFinish::Budget) {
+            Duration::from_millis(10)
+        } else {
+            Duration::from_millis(25)
+        };
+        let budget = if matches!(finish, PoolOwnerClockFinish::Budget) {
+            Budget::new().with_deadline(start + duration)
+        } else {
+            Budget::INFINITE
+        };
+        let owner = test_cx_with_timer_and_budget(timer.clone(), budget);
+        let successor = test_cx_with_timer(timer.clone());
+        let gate = Arc::new(PoolCreationGate::default());
+        gate.released.store(!factory_wait, Ordering::Release);
+        let pool = GenericPool::with_time_getter(
+            ParkedFirstPoolFactory::new(Arc::clone(&gate)),
+            PoolConfig::with_max_size(1).acquire_timeout(Duration::from_millis(25)),
+            test_pool_time_now,
+        );
+        let held = if factory_wait {
+            None
+        } else {
+            Some(futures_lite::future::block_on(pool.acquire(&successor)).unwrap())
+        };
+        let foreign_clock = Arc::new(VirtualClock::starting_at(foreign_start));
+        let foreign_timer = TimerDriverHandle::with_virtual_clock(foreign_clock);
+        let foreign = test_cx_with_timer(foreign_timer.clone());
+        let _foreign = Cx::set_current(Some(foreign.clone()));
+        let wake = Arc::new(PoolAcquireWake::default());
+        let waker = Waker::from(Arc::clone(&wake));
+        let mut task_cx = Context::from_waker(&waker);
+        let mut acquisition = pool.acquire(&owner);
+
+        assert!(
+            acquisition.as_mut().poll(&mut task_cx).is_pending(),
+            "owner must park: factory={factory_wait}, foreign={foreign_start:?}, finish={finish:?}"
+        );
+        assert_eq!(pool.state.lock().creating, usize::from(factory_wait));
+        assert_eq!(pool.stats().waiters, usize::from(!factory_wait));
+        assert_eq!(timer.pending_count(), 1, "the owner must supply the wake");
+        assert_eq!(foreign_timer.pending_count(), 0);
+
+        // Neither a foreign clock nor cancellation of the polling task owns
+        // this operation. It must remain parked until the explicit owner acts.
+        foreign.cancel_fast(crate::types::CancelKind::User);
+        assert!(acquisition.as_mut().poll(&mut task_cx).is_pending());
+        assert_eq!(foreign_timer.pending_count(), 0);
+        let wakes = wake.0.load(Ordering::Acquire);
+        if matches!(finish, PoolOwnerClockFinish::Cancel) {
+            owner.cancel_fast(crate::types::CancelKind::User);
+        } else {
+            let before_deadline = duration - Duration::from_millis(1);
+            clock.advance(before_deadline.as_nanos() as u64);
+            assert_eq!(timer.process_timers(), 0);
+            assert!(acquisition.as_mut().poll(&mut task_cx).is_pending());
+            clock.advance(Time::from_millis(1).as_nanos());
+            assert_eq!(timer.process_timers(), 1);
+        }
+        assert!(
+            wake.0.load(Ordering::Acquire) > wakes,
+            "owner progress must wake its parked acquisition"
+        );
+        let result = acquisition.as_mut().poll(&mut task_cx);
+        match finish {
+            PoolOwnerClockFinish::Timeout => {
+                assert!(matches!(result, Poll::Ready(Err(PoolError::Timeout))));
+            }
+            PoolOwnerClockFinish::Budget | PoolOwnerClockFinish::Cancel => {
+                assert!(matches!(result, Poll::Ready(Err(PoolError::Cancelled))));
+            }
+        }
+        drop(acquisition);
+
+        assert_eq!(timer.pending_count(), 0);
+        assert_eq!(foreign_timer.pending_count(), 0);
+        assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+        assert!(pool.return_wakers.lock().is_empty());
+        assert_eq!(pool.state.lock().creating, 0);
+        assert_eq!(gate.dropped.load(Ordering::Acquire), 1);
+        assert!(gate.waker.lock().is_none());
+        let stats = pool.stats();
+        assert_eq!(
+            (stats.active, stats.waiters),
+            (usize::from(!factory_wait), 0)
+        );
+        if !factory_wait {
+            let waited = if matches!(finish, PoolOwnerClockFinish::Cancel) {
+                Duration::ZERO
+            } else {
+                duration
+            };
+            assert_eq!(stats.total_wait_time, waited);
+        }
+        assert_eq!(
+            Cx::current().unwrap().timer_driver().unwrap().now(),
+            foreign_start,
+            "pool checks must restore the polling context"
+        );
+
+        // Both the cancelled creation reservation and the detached capacity
+        // waiter leave a healthy successor able to acquire the only slot.
+        drop(held);
+        let mut next = pool.acquire(&successor);
+        let Poll::Ready(Ok(resource)) = next.as_mut().poll(&mut task_cx) else {
+            panic!("the completed owner wait must not strand pool capacity");
+        };
+        assert_eq!(*resource, 73);
+        resource.return_to_pool();
+        let stats = pool.stats();
+        assert_eq!((stats.active, stats.idle, stats.waiters), (0, 1, 0));
+    }
+
+    #[test]
+    fn pool_acquire_timeout_uses_owner_clock_for_capacity_and_factory() {
+        for factory_wait in [false, true] {
+            for foreign_start in [Time::ZERO, Time::from_secs(1_000_000)] {
+                assert_pool_owner_clock_wait(
+                    factory_wait,
+                    foreign_start,
+                    PoolOwnerClockFinish::Timeout,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pool_acquire_budget_uses_owner_clock_for_capacity_and_factory() {
+        for factory_wait in [false, true] {
+            for foreign_start in [Time::ZERO, Time::from_secs(1_000_000)] {
+                assert_pool_owner_clock_wait(
+                    factory_wait,
+                    foreign_start,
+                    PoolOwnerClockFinish::Budget,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pool_acquire_cancellation_cleans_foreign_polled_waits() {
+        for factory_wait in [false, true] {
+            for foreign_start in [Time::ZERO, Time::from_secs(1_000_000)] {
+                assert_pool_owner_clock_wait(
+                    factory_wait,
+                    foreign_start,
+                    PoolOwnerClockFinish::Cancel,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pool_driverless_owner_keeps_wall_deadline_and_cancellation_mask() {
+        for factory_wait in [false, true] {
+            for foreign_start in [
+                Time::ZERO,
+                crate::time::raw_wall_now() + Duration::from_secs(86_400),
+            ] {
+                reset_test_pool_time();
+                let owner = Cx::for_testing_with_budget(
+                    Budget::new()
+                        .with_deadline(crate::time::raw_wall_now() + Duration::from_secs(3600)),
+                );
+                assert!(owner.timer_driver().is_none());
+                let gate = Arc::new(PoolCreationGate::default());
+                gate.released.store(!factory_wait, Ordering::Release);
+                let pool = GenericPool::with_time_getter(
+                    ParkedFirstPoolFactory::new(Arc::clone(&gate)),
+                    PoolConfig::with_max_size(1).acquire_timeout(Duration::from_secs(3600)),
+                    test_pool_time_now,
+                );
+                let held = if factory_wait {
+                    None
+                } else {
+                    Some(futures_lite::future::block_on(pool.acquire(&owner)).unwrap())
+                };
+                let foreign_clock = Arc::new(VirtualClock::starting_at(foreign_start));
+                let foreign_timer = TimerDriverHandle::with_virtual_clock(foreign_clock);
+                let foreign = test_cx_with_timer(foreign_timer.clone());
+                let _foreign = Cx::set_current(Some(foreign.clone()));
+                let wake = Arc::new(PoolAcquireWake::default());
+                let waker = Waker::from(Arc::clone(&wake));
+                let mut task_cx = Context::from_waker(&waker);
+                let mut acquisition = pool.acquire(&owner);
+
+                assert!(acquisition.as_mut().poll(&mut task_cx).is_pending());
+                assert_eq!(foreign_timer.pending_count(), 0);
+                foreign.cancel_fast(crate::types::CancelKind::User);
+                assert!(acquisition.as_mut().poll(&mut task_cx).is_pending());
+                owner.masked(|| {
+                    owner.cancel_fast(crate::types::CancelKind::User);
+                    assert!(acquisition.as_mut().poll(&mut task_cx).is_pending());
+                    assert_eq!(pool.state.lock().creating, usize::from(factory_wait));
+                    assert_eq!(pool.stats().waiters, usize::from(!factory_wait));
+                });
+                assert!(wake.0.load(Ordering::Acquire) > 0);
+                assert!(matches!(
+                    acquisition.as_mut().poll(&mut task_cx),
+                    Poll::Ready(Err(PoolError::Cancelled))
+                ));
+                drop(acquisition);
+
+                assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+                assert!(pool.return_wakers.lock().is_empty());
+                assert_eq!(pool.state.lock().creating, 0);
+                assert_eq!(pool.stats().waiters, 0);
+                assert_eq!(gate.dropped.load(Ordering::Acquire), 1);
+                assert!(gate.waker.lock().is_none());
+                assert_eq!(foreign_timer.pending_count(), 0);
+                assert_eq!(
+                    Cx::current().unwrap().timer_driver().unwrap().now(),
+                    foreign_start
+                );
+                drop(held);
+            }
+        }
+    }
+
+    #[test]
+    fn pool_owner_clock_preserves_ready_work_at_exact_timeout_boundary() {
+        for factory_wait in [false, true] {
+            for late in [false, true] {
+                reset_test_pool_time();
+                let clock = Arc::new(VirtualClock::starting_at(Time::from_secs(100)));
+                let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+                let owner = test_cx_with_timer(timer.clone());
+                let gate = Arc::new(PoolCreationGate::default());
+                gate.released.store(!factory_wait, Ordering::Release);
+                let pool = GenericPool::with_time_getter(
+                    ParkedFirstPoolFactory::new(Arc::clone(&gate)),
+                    PoolConfig::with_max_size(1).acquire_timeout(Duration::from_millis(25)),
+                    test_pool_time_now,
+                );
+                let held = if factory_wait {
+                    None
+                } else {
+                    Some(futures_lite::future::block_on(pool.acquire(&owner)).unwrap())
+                };
+                let foreign_timer = TimerDriverHandle::with_virtual_clock(Arc::new(
+                    VirtualClock::starting_at(Time::from_secs(1_000_000)),
+                ));
+                let _foreign = Cx::set_current(Some(test_cx_with_timer(foreign_timer.clone())));
+                let mut task_cx = Context::from_waker(Waker::noop());
+                let mut acquisition = pool.acquire(&owner);
+                assert!(acquisition.as_mut().poll(&mut task_cx).is_pending());
+
+                clock.advance(Time::from_millis(if late { 26 } else { 25 }).as_nanos());
+                assert_eq!(timer.process_timers(), 1);
+                gate.released.store(true, Ordering::Release);
+                drop(held);
+                let result = acquisition.as_mut().poll(&mut task_cx);
+                if late {
+                    assert!(matches!(result, Poll::Ready(Err(PoolError::Timeout))));
+                } else {
+                    let Poll::Ready(Ok(resource)) = result else {
+                        panic!("ready work must win at the owner's exact deadline");
+                    };
+                    assert_eq!(*resource, 73);
+                    resource.return_to_pool();
+                }
+                drop(acquisition);
+                assert_eq!(pool.state.lock().creating, 0);
+                assert_eq!(pool.stats().waiters, 0);
+                assert_eq!(timer.pending_count(), 0);
+                assert_eq!(foreign_timer.pending_count(), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn pool_warmup_keeps_one_owner_clock_and_deadline_across_factories() {
+        for foreign_start in [Time::ZERO, Time::from_secs(1_000_000)] {
+            reset_test_pool_time();
+            let clock = Arc::new(VirtualClock::starting_at(Time::from_secs(100)));
+            let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+            let owner = test_cx_with_timer(timer.clone());
+            let gates = [
+                Arc::new(PoolCreationGate::default()),
+                Arc::new(PoolCreationGate::default()),
+            ];
+            let factory_gates = gates.clone();
+            let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let factory_attempts = Arc::clone(&attempts);
+            let pool = GenericPool::with_time_getter(
+                move || {
+                    let attempt = factory_attempts.fetch_add(1, Ordering::AcqRel);
+                    let gate = Arc::clone(&factory_gates[attempt]);
+                    async move {
+                        PoolCreationWait(gate).await;
+                        Ok::<u32, std::io::Error>(73)
+                    }
+                },
+                PoolConfig::with_max_size(2)
+                    .warmup_connections(2)
+                    .warmup_timeout(Duration::from_millis(25))
+                    .warmup_failure_strategy(WarmupStrategy::FailFast),
+                test_pool_time_now,
+            );
+            let wake = Arc::new(PoolAcquireWake::default());
+            let waker = Waker::from(Arc::clone(&wake));
+            let mut task_cx = Context::from_waker(&waker);
+            let mut warmup = std::pin::pin!(pool.warmup());
+            {
+                let _owner = Cx::set_current(Some(owner));
+                assert!(warmup.as_mut().poll(&mut task_cx).is_pending());
+            }
+            assert_eq!(timer.pending_count(), 1);
+            assert!(gates[0].entered.load(Ordering::Acquire));
+
+            let foreign_clock = Arc::new(VirtualClock::starting_at(foreign_start));
+            let foreign_timer = TimerDriverHandle::with_virtual_clock(foreign_clock);
+            let foreign = test_cx_with_timer(foreign_timer.clone());
+            let _foreign = Cx::set_current(Some(foreign.clone()));
+            foreign.cancel_fast(crate::types::CancelKind::User);
+            assert!(warmup.as_mut().poll(&mut task_cx).is_pending());
+
+            // The next factory gets only the remaining global budget, even
+            // though this poll is executing under an unrelated clock.
+            clock.advance(Time::from_millis(10).as_nanos());
+            gates[0].released.store(true, Ordering::Release);
+            assert!(warmup.as_mut().poll(&mut task_cx).is_pending());
+            assert_eq!(attempts.load(Ordering::Acquire), 2);
+            assert!(gates[1].entered.load(Ordering::Acquire));
+            assert_eq!(pool.stats().idle, 1);
+            assert_eq!(pool.state.lock().creating, 1);
+            assert_eq!(timer.pending_count(), 1);
+            assert_eq!(foreign_timer.pending_count(), 0);
+
+            clock.advance(Time::from_millis(14).as_nanos());
+            assert_eq!(timer.process_timers(), 0);
+            assert!(warmup.as_mut().poll(&mut task_cx).is_pending());
+            let wakes = wake.0.load(Ordering::Acquire);
+            clock.advance(Time::from_millis(1).as_nanos());
+            assert_eq!(timer.process_timers(), 1);
+            assert!(wake.0.load(Ordering::Acquire) > wakes);
+            assert!(matches!(
+                warmup.as_mut().poll(&mut task_cx),
+                Poll::Ready(Err(PoolError::Timeout))
+            ));
+            assert_eq!(pool.state.lock().creating, 0);
+            assert_eq!((pool.stats().idle, pool.stats().total), (1, 1));
+            for gate in &gates {
+                assert_eq!(gate.dropped.load(Ordering::Acquire), 1);
+                assert!(gate.waker.lock().is_none());
+            }
+            assert_eq!(timer.pending_count(), 0);
+            assert_eq!(foreign_timer.pending_count(), 0);
+        }
+    }
+
     #[test]
     fn acquire_timeout_reports_timeout_and_cleans_waiter_state() {
         init_test("acquire_timeout_reports_timeout_and_cleans_waiter_state");
