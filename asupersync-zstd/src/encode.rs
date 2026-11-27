@@ -5,7 +5,9 @@
 use crate::huffman::HuffmanCode;
 use crate::literals::encode_literals;
 use crate::matcher::{DoubleFastFinder, Match, MatchFinder};
-use crate::sequences::{EncodedSequence, encode_sequences, offset_value};
+use crate::sequences::{
+    EncodedSequence, EncoderTables, encode_sequences_with_history, offset_value,
+};
 use crate::xxhash64::xxh64;
 
 /// The largest block (Block_Maximum_Size with a window of at least 128 KiB).
@@ -167,6 +169,25 @@ fn store_blocks(input: &[u8], out: &mut Vec<u8>) {
     }
 }
 
+/// Offsets and entropy tables from emitted compressed blocks in this frame.
+struct BlockHistory {
+    offsets: [usize; 3],
+    literals: Option<HuffmanCode>,
+    sequences: EncoderTables,
+}
+
+impl BlockHistory {
+    fn commit(&mut self, next: Self, level: Level) {
+        self.offsets = next.offsets;
+        if level == Level::DoubleFast {
+            if next.literals.is_some() {
+                self.literals = next.literals;
+            }
+            self.sequences.apply(next.sequences);
+        }
+    }
+}
+
 /// Compressed blocks of at most [`MAX_BLOCK`] bytes; a block whose
 /// compressed form is not smaller is stored raw (and leaves the repeat
 /// offsets as they were, as the decoder does).
@@ -177,28 +198,28 @@ fn compressed_blocks(
     mut find: impl FnMut(usize, usize, usize, &mut Vec<Match>),
 ) {
     write_frame_header(input.len(), params.checksum, WINDOW_1_MIB, out);
-    let mut huffman = None;
+    let mut history = BlockHistory {
+        offsets: [1, 4, 8],
+        literals: None,
+        sequences: EncoderTables::default(),
+    };
     let mut matches = Vec::new();
     let mut body = Vec::new();
-    let mut rep = [1, 4, 8];
     let mut pos = 0;
     loop {
         let end = (pos + MAX_BLOCK).min(input.len());
         let last = end >= input.len();
         let compressed = if end > pos {
             find(pos, end, end.saturating_sub(FAST_WINDOW), &mut matches);
-            compress_block(input, pos, end, rep, &matches, huffman.as_ref(), &mut body)
+            compress_block(&input[pos..end], &history, &matches, &mut body)
         } else {
             None
         };
         match compressed {
-            Some((next_rep, next_huffman)) if body.len() < end - pos => {
+            Some(next) if body.len() < end - pos => {
                 write_block_header(body.len(), 2, last, out);
                 out.extend_from_slice(&body);
-                rep = next_rep;
-                if params.level == Level::DoubleFast && next_huffman.is_some() {
-                    huffman = next_huffman;
-                }
+                history.commit(next, params.level);
             }
             _ => {
                 write_block_header(end - pos, 0, last, out);
@@ -212,21 +233,18 @@ fn compressed_blocks(
     }
 }
 
-/// Writes the compressed form of `src[start..end]` into `body` and returns
-/// the repeat offsets after it, or `None` if the block cannot be expressed.
+/// Encodes one block and returns its updated offsets and any newly described tables.
 fn compress_block(
     src: &[u8],
-    start: usize,
-    end: usize,
-    mut rep: [usize; 3],
+    history: &BlockHistory,
     matches: &[Match],
-    previous: Option<&HuffmanCode>,
     body: &mut Vec<u8>,
-) -> Option<([usize; 3], Option<HuffmanCode>)> {
+) -> Option<BlockHistory> {
+    let mut rep = history.offsets;
     body.clear();
-    let mut literals = Vec::with_capacity(end - start);
+    let mut literals = Vec::with_capacity(src.len());
     let mut sequences = Vec::with_capacity(matches.len());
-    let mut pos = start;
+    let mut pos = 0;
     for found in matches {
         literals.extend_from_slice(&src[pos..pos + found.literals_length]);
         pos += found.literals_length + found.length;
@@ -238,10 +256,14 @@ fn compress_block(
             match_length: u32::try_from(found.length).ok()?,
         });
     }
-    literals.extend_from_slice(&src[pos..end]);
-    let new_table = encode_literals(&literals, previous, body);
-    encode_sequences(&sequences, body)?;
-    Some((rep, new_table))
+    literals.extend_from_slice(&src[pos..]);
+    let literals = encode_literals(&literals, history.literals.as_ref(), body);
+    let sequences = encode_sequences_with_history(&sequences, &history.sequences, body)?;
+    Some(BlockHistory {
+        offsets: rep,
+        literals,
+        sequences,
+    })
 }
 
 #[cfg(test)]

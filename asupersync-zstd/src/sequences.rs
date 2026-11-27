@@ -1,6 +1,8 @@
 //! The sequences section of a compressed block and its execution,
 //! RFC 8878 §3.1.1.3.2 and §3.1.1.4-3.1.1.5.
 
+use std::borrow::Cow;
+
 use crate::bitio::{BackwardBitReader, BitWriter};
 use crate::frame::DecodeError;
 use crate::fse::{
@@ -552,33 +554,71 @@ const MATCH_LENGTH_KIND: SymbolKind = SymbolKind {
 };
 
 /// How one symbol type is coded in a block.
+#[derive(Clone)]
 enum SymbolTable {
     /// RLE mode: one symbol, no state and no bits.
-    Rle,
+    Rle(u8),
     /// Predefined or FSE_Compressed mode.
-    Fse(EncodeTable),
+    Fse {
+        table: EncodeTable,
+        norm: Cow<'static, [i16]>,
+        log: u8,
+    },
 }
 
 impl SymbolTable {
     fn initial_state(&self, symbol: u8) -> usize {
         match self {
-            Self::Rle => 0,
-            Self::Fse(table) => table.initial_state(symbol),
+            Self::Rle(_) => 0,
+            Self::Fse { table, .. } => table.initial_state(symbol),
         }
     }
 
     fn encode(&self, state: usize, symbol: u8, writer: &mut BitWriter) -> usize {
         match self {
-            Self::Rle => 0,
-            Self::Fse(table) => table.encode(state, symbol, writer),
+            Self::Rle(_) => 0,
+            Self::Fse { table, .. } => table.encode(state, symbol, writer),
         }
     }
 
     fn flush(&self, state: usize, writer: &mut BitWriter) {
-        if let Self::Fse(table) = self {
+        if let Self::Fse { table, .. } = self {
             table.flush(state, writer);
         }
     }
+}
+
+/// Table changes become visible only when their block is committed.
+#[derive(Default)]
+pub(crate) struct EncoderTables([Option<SymbolTable>; 3]);
+
+impl EncoderTables {
+    pub(crate) fn apply(&mut self, updates: Self) {
+        for (slot, change) in self.0.iter_mut().zip(updates.0) {
+            if change.is_some() {
+                *slot = change;
+            }
+        }
+    }
+}
+
+/// Estimated cost in 1/256 bits. With frame history, interpolate log2 between
+/// powers of two so similarly shaped tables can be distinguished. The initial
+/// table retains the established whole-bit choice used by the Fast encoder.
+fn table_cost(counts: &[u32], norm: &[i16], log: u8, fractional: bool) -> Option<i64> {
+    let mut total = 0;
+    for (symbol, &n) in counts.iter().enumerate().filter(|&(_, &n)| n != 0) {
+        let cells = u32::from(norm.get(symbol)?.unsigned_abs());
+        let floor = cells.checked_ilog2()?;
+        let fraction = if fractional {
+            ((cells << 8) >> floor) - 256
+        } else {
+            0
+        };
+        let bits = 256 * (u32::from(log) - floor) - fraction;
+        total += i64::from(n) * i64::from(bits);
+    }
+    Some(total)
 }
 
 /// The accuracy log for a table of `distinct` symbols coding `count` codes.
@@ -592,51 +632,67 @@ fn pick_log(distinct: usize, count: usize, max_log: u8) -> u8 {
 }
 
 /// Chooses the compression mode for one symbol type: RLE for a single
-/// symbol, otherwise the predefined table unless a described table costs
-/// fewer bits (description included). Costs are whole bits per symbol, an
-/// integer estimate that keeps the choice deterministic. Returns the mode,
+/// symbol, otherwise the cheapest compatible previous, predefined or newly
+/// described table (description included). Integer arithmetic keeps the choice
+/// deterministic. Returns the mode,
 /// the table description to write, and the table.
-fn choose_table(kind: &SymbolKind, codes: &[u8]) -> Option<(u8, Vec<u8>, SymbolTable)> {
+fn choose_table<'a>(
+    kind: &SymbolKind,
+    codes: &[u8],
+    previous: Option<&'a SymbolTable>,
+) -> Option<(u8, Vec<u8>, Cow<'a, SymbolTable>)> {
     let &first = codes.first()?;
     if codes.iter().all(|&code| code == first) {
-        return Some((1, vec![first], SymbolTable::Rle));
+        if let Some(table @ SymbolTable::Rle(symbol)) = previous
+            && *symbol == first
+        {
+            return Some((3, Vec::new(), Cow::Borrowed(table)));
+        }
+        return Some((1, vec![first], Cow::Owned(SymbolTable::Rle(first))));
     }
     let mut counts = vec![0_u32; kind.alphabet];
     for &code in codes {
         *counts.get_mut(usize::from(code))? += 1;
     }
-    let present = || counts.iter().enumerate().filter(|&(_, &count)| count > 0);
-    // Bits a state of a symbol with `cells` of `1 << log` cells costs.
-    let cost = |count: u32, log: u8, cells: i16| {
-        i64::from(count) * (i64::from(log) - i64::from(cells.unsigned_abs().max(1).ilog2()))
-    };
-    let predefined_cost: Option<i64> = present()
-        .map(|(symbol, &count)| {
-            let cells = *kind.predefined.get(symbol)?;
-            (cells != 0).then(|| cost(count, kind.predefined_log, cells))
-        })
-        .sum();
-    let log = pick_log(present().count(), codes.len(), kind.max_log);
+    let distinct = counts.iter().filter(|&&n| n != 0).count();
+    let log = pick_log(distinct, codes.len(), kind.max_log);
     let norm = normalize(&counts, log)?;
     let description = write_table_description(&norm, log);
-    let described_cost = 8 * i64::try_from(description.len()).ok()?
-        + present()
-            .map(|(symbol, &count)| cost(count, log, norm[symbol]))
-            .sum::<i64>();
-    if predefined_cost.is_some_and(|predefined| predefined <= described_cost) {
-        let table = EncodeTable::new(kind.predefined, kind.predefined_log);
-        return Some((0, Vec::new(), SymbolTable::Fse(table)));
+    let fractional = previous.is_some();
+    let described_cost = (8 * 256) * i64::try_from(description.len()).ok()?
+        + table_cost(&counts, &norm, log, fractional)?;
+    let predefined_cost = table_cost(&counts, kind.predefined, kind.predefined_log, fractional);
+    let best_cost = described_cost.min(predefined_cost.unwrap_or(i64::MAX));
+    if let Some(table @ SymbolTable::Fse { norm, log, .. }) = previous
+        && table_cost(&counts, norm, *log, fractional).is_some_and(|cost| cost <= best_cost)
+    {
+        return Some((3, Vec::new(), Cow::Borrowed(table)));
     }
+    let (mode, description, norm, log) = if predefined_cost == Some(best_cost) {
+        (
+            0,
+            Vec::new(),
+            Cow::Borrowed(kind.predefined),
+            kind.predefined_log,
+        )
+    } else {
+        (2, description, Cow::Owned(norm), log)
+    };
+    let table = EncodeTable::new(&norm, log);
     Some((
-        2,
+        mode,
         description,
-        SymbolTable::Fse(EncodeTable::new(&norm, log)),
+        Cow::Owned(SymbolTable::Fse { table, norm, log }),
     ))
 }
 
 /// Appends the sequences section (RFC 8878 §3.1.1.3.2) for `sequences`.
 /// `None` only when a sequence is outside what the format can express.
-pub fn encode_sequences(sequences: &[EncodedSequence], out: &mut Vec<u8>) -> Option<()> {
+pub(crate) fn encode_sequences_with_history(
+    sequences: &[EncodedSequence],
+    previous: &EncoderTables,
+    out: &mut Vec<u8>,
+) -> Option<EncoderTables> {
     let count = sequences.len();
     match count {
         0..128 => out.push(u8::try_from(count).ok()?),
@@ -650,7 +706,7 @@ pub fn encode_sequences(sequences: &[EncodedSequence], out: &mut Vec<u8>) -> Opt
         }
     }
     let Some(last) = count.checked_sub(1) else {
-        return Some(());
+        return Some(EncoderTables::default());
     };
     let literal_codes: Vec<u8> = sequences
         .iter()
@@ -664,12 +720,18 @@ pub fn encode_sequences(sequences: &[EncodedSequence], out: &mut Vec<u8>) -> Opt
         .iter()
         .map(|sequence| u8::try_from(sequence.offset_value.checked_ilog2()?).ok())
         .collect::<Option<Vec<u8>>>()?;
-    let (literal_mode, literal_description, literal_table) =
-        choose_table(&LITERALS_LENGTH_KIND, &literal_codes)?;
+    let (literal_mode, literal_description, literal_table) = choose_table(
+        &LITERALS_LENGTH_KIND,
+        &literal_codes,
+        previous.0[LITERALS_LENGTH].as_ref(),
+    )?;
     let (offset_mode, offset_description, offset_table) =
-        choose_table(&OFFSET_KIND, &offset_codes)?;
-    let (match_mode, match_description, match_table) =
-        choose_table(&MATCH_LENGTH_KIND, &match_codes)?;
+        choose_table(&OFFSET_KIND, &offset_codes, previous.0[OFFSET].as_ref())?;
+    let (match_mode, match_description, match_table) = choose_table(
+        &MATCH_LENGTH_KIND,
+        &match_codes,
+        previous.0[MATCH_LENGTH].as_ref(),
+    )?;
     out.push((literal_mode << 6) | (offset_mode << 4) | (match_mode << 2));
     out.extend_from_slice(&literal_description);
     out.extend_from_slice(&offset_description);
@@ -716,7 +778,17 @@ pub fn encode_sequences(sequences: &[EncodedSequence], out: &mut Vec<u8>) -> Opt
     offset_table.flush(offset_state, &mut writer);
     literal_table.flush(literal_state, &mut writer);
     out.extend_from_slice(&writer.finish());
-    Some(())
+    Some(EncoderTables(
+        [literal_table, offset_table, match_table].map(|table| match table {
+            Cow::Owned(new_table) => Some(new_table),
+            Cow::Borrowed(_) => None,
+        }),
+    ))
+}
+
+#[cfg(test)]
+pub fn encode_sequences(sequences: &[EncodedSequence], out: &mut Vec<u8>) -> Option<()> {
+    encode_sequences_with_history(sequences, &EncoderTables::default(), out).map(|_| ())
 }
 
 #[cfg(test)]
@@ -940,6 +1012,99 @@ mod tests {
             .zip(&modes)
         {
             assert_eq!(seen, &BTreeSet::from([0, 1, 2]), "{name} modes");
+        }
+    }
+
+    #[test]
+    fn repeated_tables_follow_only_committed_nonempty_sections() {
+        use super::{EncoderTables, encode_sequences_with_history};
+
+        let mut previous = EncoderTables::default();
+        let mut decoder = SequenceState::new().unwrap();
+        let mut out = vec![42; 32];
+        let shapes: Vec<_> = (0..120)
+            .map(|index| EncodedSequence {
+                literals_length: 2 + u32::from(index % 3 == 0),
+                offset_value: 4,
+                match_length: 4 + u32::from(index % 5 == 0),
+            })
+            .collect();
+        let mut changed = shapes.clone();
+        changed[0].offset_value = 12;
+        // The prior custom tables do not contain these length codes. A short
+        // section selects predefined tables, which can themselves be repeated.
+        let small = [
+            EncodedSequence {
+                literals_length: 0,
+                offset_value: 4,
+                match_length: 3,
+            },
+            EncodedSequence {
+                literals_length: 1,
+                offset_value: 4,
+                match_length: 8,
+            },
+        ];
+        for (step, block) in [&shapes[..], &[], &shapes, &changed, &small, &small]
+            .into_iter()
+            .enumerate()
+        {
+            let mut section = Vec::new();
+            let updates = encode_sequences_with_history(block, &previous, &mut section).unwrap();
+            if step == 0 {
+                assert_eq!(section[1], 0x98, "described, RLE, described");
+            } else if step == 2 {
+                assert_eq!(
+                    section[1], 0xfc,
+                    "all three tables repeat after an empty section"
+                );
+            } else if step == 3 {
+                assert_ne!(
+                    (section[1] >> 4) & 3,
+                    3,
+                    "new offset code cannot use prior RLE"
+                );
+            } else if step == 4 {
+                assert_eq!(
+                    section[1] & 0xcc,
+                    0,
+                    "both length tables must be predefined"
+                );
+            } else if step == 5 {
+                assert_eq!(
+                    section[1], 0xfc,
+                    "repeat the new predefined tables plus RLE"
+                );
+            }
+            let mut expected = out.clone();
+            let mut literals = Vec::new();
+            for sequence in block {
+                for _ in 0..sequence.literals_length {
+                    let byte = expected.len().to_le_bytes()[0];
+                    literals.push(byte);
+                    expected.push(byte);
+                }
+                // All fixture offsets are explicit (offset_value = distance + 3).
+                let distance = usize::try_from(sequence.offset_value - 3).unwrap();
+                for _ in 0..sequence.match_length {
+                    expected.push(expected[expected.len() - distance]);
+                }
+            }
+            let bounds = BlockBounds {
+                frame_start: 0,
+                window: 1 << 20,
+                block_maximum: 128 << 10,
+                limit: 1 << 20,
+            };
+            decode_sequences(&section, &literals, &mut decoder, &mut out, bounds).unwrap();
+            assert_eq!(out, expected);
+            previous.apply(updates);
+            if step == 0 {
+                // An outer block may discard this candidate and emit raw data.
+                // Building a replacement table must not mutate frame history.
+                let mut discarded = Vec::new();
+                let _ = encode_sequences_with_history(&changed, &previous, &mut discarded).unwrap();
+            }
         }
     }
 
