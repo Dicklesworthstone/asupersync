@@ -837,18 +837,7 @@ impl<S: GenServer> GenServerCell<S> {
         // A sender may have checked the state before stop(). Revoke open
         // reservations before deciding the mailbox has no work to drain.
         self.mailbox.close();
-        if !self.mailbox.is_empty() {
-            return true;
-        }
-        // A DOWN or trapped exit can arrive independently of the mailbox.
-        // Seal an empty lane under its publication lock so a late event
-        // cannot reach a handler after we have committed to skipping init.
-        let mut system = self.system.inner.lock();
-        if system.queue.is_empty() {
-            system.closed = true;
-            return false;
-        }
-        true
+        self.system.seal_has_pending() || !self.mailbox.is_empty()
     }
 }
 
@@ -958,6 +947,13 @@ impl<S: GenServer> SystemLane<S> {
         drop(inner);
         drop(retired);
         None
+    }
+
+    /// Stops system publishers without removing notifications accepted for dispatch.
+    fn seal_has_pending(&self) -> bool {
+        let mut inner = self.inner.lock();
+        inner.closed = true;
+        !inner.queue.is_empty()
     }
 
     /// Stops accepting messages and returns the ones still queued.
@@ -1499,12 +1495,13 @@ impl<S: GenServer> GenServerHandle<S> {
 
     /// Signals the server to stop gracefully.
     ///
-    /// Closes the mailbox and waits for the server to process remaining messages.
+    /// Seals both input queues and wakes senders waiting for capacity. The
+    /// server processes accepted messages before it exits. Await `join` to
+    /// wait for shutdown.
     pub fn stop(&self) {
         self.state.request_stop();
-        // Ensure a server blocked in `mailbox.recv()` is woken so it can observe
-        // the state change and run drain/on_stop deterministically.
-        self.sender.wake_receiver();
+        self.system.seal_has_pending();
+        self.sender.close_receiver();
     }
 
     /// Request the server to stop immediately by aborting its task.
@@ -1514,7 +1511,7 @@ impl<S: GenServer> GenServerHandle<S> {
     pub fn abort(&self) {
         self.state.request_stop();
         let effects = prepare_actor_abort(&self.inner, self.task.as_ref(), "server aborted");
-        dispatch_actor_shutdown_wakes(effects, || self.sender.wake_receiver());
+        dispatch_actor_shutdown_wakes(effects, || self.sender.close_receiver());
     }
 
     /// Wait for the server to finish and return its final state.
@@ -1567,7 +1564,7 @@ impl<S: GenServer> GenServerJoinFuture<'_, S> {
     fn abort(&self) {
         self.state.request_stop();
         let effects = prepare_actor_abort(&self.cx_inner, self.task.as_deref(), "server aborted");
-        dispatch_actor_shutdown_wakes(effects, || self.sender.wake_receiver());
+        dispatch_actor_shutdown_wakes(effects, || self.sender.close_receiver());
     }
 }
 

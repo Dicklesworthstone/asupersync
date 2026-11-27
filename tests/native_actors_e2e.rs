@@ -182,6 +182,7 @@ impl GenServer for Probe {
         _cx: &Cx,
         msg: Option<u64>,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        assert!(self.started, "casts run only after initialization");
         let Some(n) = msg else {
             panic!("the probe server was told to panic");
         };
@@ -349,6 +350,49 @@ fn dropping_a_pending_native_server_join_aborts_it() {
         );
         assert!(final_state.stopped, "{flavor}: abort still runs on_stop");
     }
+}
+
+/// The spawning task owns the only worker until it yields. Queue a cast
+/// and a call, then park a third sender at the capacity boundary.
+#[test]
+fn stopping_a_native_server_seals_and_drains_pre_start_work() {
+    use asupersync::gen_server::CastError;
+    use std::task::{Context, Poll, Wake, Waker};
+
+    #[derive(Default)]
+    struct WakeCount(AtomicUsize);
+    impl Wake for WakeCount {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    let rt = RuntimeBuilder::current_thread().build().expect("runtime");
+    in_child_region(&rt, |cx| async move {
+        let mut server = cx.spawn_gen_server(Probe::default(), 2).expect("spawn");
+        server.try_cast(Some(7)).expect("queue cast");
+        let sender = server.server_ref();
+        let mut call = pin!(sender.call(&cx, Request::Total));
+        let mut blocked = pin!(sender.cast(&cx, Some(11)));
+        let wake = Arc::new(WakeCount::default());
+        let waker = Waker::from(Arc::clone(&wake));
+        {
+            let mut task_cx = Context::from_waker(&waker);
+            assert!(call.as_mut().poll(&mut task_cx).is_pending());
+            assert!(blocked.as_mut().poll(&mut task_cx).is_pending());
+            let before = wake.0.load(Ordering::SeqCst);
+            server.stop();
+            assert!(wake.0.load(Ordering::SeqCst) > before);
+            assert!(matches!(
+                blocked.as_mut().poll(&mut task_cx),
+                Poll::Ready(Err(CastError::ServerStopped))
+            ));
+        }
+        let state = server.join(&cx).await.expect("drain and stop");
+        assert!(state.started && state.stopped);
+        assert_eq!(state.total, 7);
+        assert_eq!(call.await.expect("accepted call receives a reply"), 7);
+    });
 }
 
 /// On the current-thread runtime the spawning task keeps the only thread, so
