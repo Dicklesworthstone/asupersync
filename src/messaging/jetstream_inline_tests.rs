@@ -11,6 +11,7 @@ use crate::messaging::NatsConfig;
 use crate::test_utils::run_test_with_cx;
 use crate::types::{Budget, RegionId, TaskId};
 use serde_json::json;
+use std::future::Future;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
 
@@ -24,6 +25,893 @@ fn scrub_js_ack_reply_subject(reply: &str) -> String {
         parts[len - 1] = "[PENDING]".to_string();
     }
     parts.join(".")
+}
+
+// The push API owns a real NATS client, so exercise both its direct transport
+// and its existing region-owned supervisor against the same wire peer.
+fn run_push_wire_test<Peer, Action, Fut>(supervised: bool, peer: Peer, action: Action)
+where
+    Peer: FnOnce(&mut std::net::TcpStream) + Send + 'static,
+    Action: FnOnce(Cx, std::net::SocketAddr) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    use std::io::{Read, Write};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind push peer");
+    let addr = listener.local_addr().expect("push peer address");
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept push client");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("push peer read timeout");
+        stream
+            .set_write_timeout(Some(Duration::from_secs(10)))
+            .expect("push peer write timeout");
+        stream
+            .write_all(
+                b"INFO {\"server_id\":\"push-peer\",\"version\":\"2.11.0\",\"proto\":1,\"max_payload\":1048576,\"headers\":true}\r\n",
+            )
+            .expect("push INFO");
+        assert!(read_crlf_line(&mut stream).starts_with(b"CONNECT "));
+        peer(&mut stream);
+        let mut byte = [0; 1];
+        assert_eq!(stream.read(&mut byte).expect("push client closed"), 0);
+    });
+    let runtime = crate::runtime::RuntimeBuilder::new()
+        .worker_threads(1)
+        .build()
+        .expect("build push test runtime");
+    if supervised {
+        runtime.block_on(runtime.handle().spawn(async move {
+            let cx = Cx::current().expect("supervised push task context");
+            action(cx, addr).await;
+        }));
+    } else {
+        runtime.block_on(action(Cx::for_testing(), addr));
+    }
+    server.join().expect("push peer joined");
+    assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+}
+
+async fn push_test_context(cx: &Cx, addr: std::net::SocketAddr) -> JetStreamContext {
+    let client = NatsClient::connect_with_config(
+        cx,
+        NatsConfig {
+            host: addr.ip().to_string(),
+            port: addr.port(),
+            request_timeout: Duration::from_secs(5),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("connect push peer");
+    JetStreamContext::new(client)
+}
+
+fn push_read_subscription(stream: &mut std::net::TcpStream) -> (String, String) {
+    let line = String::from_utf8(read_crlf_line(stream)).expect("push SUB UTF-8");
+    let parts: Vec<_> = line.split_whitespace().collect();
+    assert_eq!(parts.len(), 3, "{line}");
+    assert_eq!(parts[0], "SUB", "{line}");
+    (parts[1].to_string(), parts[2].to_string())
+}
+
+struct PushWireRequest {
+    subject: String,
+    inbox: String,
+    sid: String,
+    payload: Vec<u8>,
+}
+
+fn push_read_request(stream: &mut std::net::TcpStream) -> PushWireRequest {
+    use std::io::Read;
+
+    let (inbox, sid) = push_read_subscription(stream);
+    let line = String::from_utf8(read_crlf_line(stream)).expect("push PUB UTF-8");
+    let parts: Vec<_> = line.split_whitespace().collect();
+    assert_eq!(parts.len(), 4, "{line}");
+    assert_eq!(parts[0], "PUB", "{line}");
+    assert_eq!(parts[2], inbox, "{line}");
+    let size = parse_pub_payload_len(&line);
+    let mut payload = vec![0; size];
+    stream.read_exact(&mut payload).expect("push request payload");
+    let mut crlf = [0; 2];
+    stream.read_exact(&mut crlf).expect("push request terminator");
+    assert_eq!(&crlf, b"\r\n");
+    PushWireRequest {
+        subject: parts[1].to_string(),
+        inbox,
+        sid,
+        payload,
+    }
+}
+
+fn push_send_response(
+    stream: &mut std::net::TcpStream,
+    request: &PushWireRequest,
+    payload: &[u8],
+) {
+    use std::io::Write;
+
+    write!(
+        stream,
+        "MSG {} {} {}\r\n",
+        request.inbox,
+        request.sid,
+        payload.len()
+    )
+    .expect("push response header");
+    stream.write_all(payload).expect("push response payload");
+    stream.write_all(b"\r\n").expect("push response terminator");
+}
+
+fn push_expect_unsubscribe(stream: &mut std::net::TcpStream, sid: &str) {
+    assert_eq!(
+        read_crlf_line(stream),
+        format!("UNSUB {sid}\r\n").as_bytes()
+    );
+}
+
+fn push_expect_publish(stream: &mut std::net::TcpStream, subject: &str, payload: &[u8]) {
+    use std::io::Read;
+
+    let line = String::from_utf8(read_crlf_line(stream)).expect("push publish UTF-8");
+    let (actual_subject, size) = parse_plain_publish(&line);
+    assert_eq!(actual_subject, subject);
+    assert_eq!(size, payload.len());
+    let mut actual = vec![0; size + 2];
+    stream.read_exact(&mut actual).expect("push publish payload");
+    assert_eq!(&actual[..size], payload);
+    assert_eq!(&actual[size..], b"\r\n");
+}
+
+fn push_server_info(deliver_subject: &str, max_ack_pending: usize) -> serde_json::Value {
+    json!({
+        "stream_name": "ORDERS",
+        "name": "processor",
+        "config": {
+            "name": "processor",
+            "durable_name": "processor",
+            "deliver_subject": deliver_subject,
+            "ack_policy": "explicit",
+            "max_ack_pending": max_ack_pending,
+            "flow_control": true,
+            "idle_heartbeat": 5_000_000_000_u64
+        }
+    })
+}
+
+fn push_begin_create(
+    stream: &mut std::net::TcpStream,
+    max_ack_pending: usize,
+) -> (String, String, PushWireRequest) {
+    // A missing delivery SUB, or an API request sent first, fails here.
+    let (subject, sid) = push_read_subscription(stream);
+    let request = push_read_request(stream);
+    assert_eq!(request.subject, "$JS.API.CONSUMER.CREATE.ORDERS.processor");
+    let payload: serde_json::Value =
+        serde_json::from_slice(&request.payload).expect("push CREATE JSON");
+    assert_eq!(payload["stream_name"], "ORDERS");
+    assert_eq!(payload["action"], "create");
+    assert_eq!(payload["config"]["deliver_subject"], subject);
+    assert_eq!(payload["config"]["ack_policy"], "explicit");
+    assert_eq!(payload["config"]["max_ack_pending"], max_ack_pending);
+    assert_eq!(payload["config"]["flow_control"], true);
+    assert_eq!(payload["config"]["idle_heartbeat"], 5_000_000_000_u64);
+    (subject, sid, request)
+}
+
+fn push_send_data(
+    stream: &mut std::net::TcpStream,
+    sid: &str,
+    reply: &str,
+    payload: &[u8],
+) {
+    use std::io::Write;
+
+    write!(
+        stream,
+        "MSG orders.created {sid} {reply} {}\r\n",
+        payload.len()
+    )
+    .expect("push delivery header");
+    stream.write_all(payload).expect("push delivery payload");
+    stream.write_all(b"\r\n").expect("push delivery terminator");
+}
+
+fn push_send_control(
+    stream: &mut std::net::TcpStream,
+    subject: &str,
+    sid: &str,
+    reply: Option<&str>,
+    headers: &str,
+) {
+    use std::io::Write;
+
+    if let Some(reply) = reply {
+        write!(
+            stream,
+            "HMSG {subject} {sid} {reply} {} {}\r\n",
+            headers.len(),
+            headers.len()
+        )
+        .expect("push flow-control header");
+    } else {
+        write!(
+            stream,
+            "HMSG {subject} {sid} {} {}\r\n",
+            headers.len(),
+            headers.len()
+        )
+        .expect("push heartbeat header");
+    }
+    stream.write_all(headers.as_bytes()).expect("push control");
+    stream.write_all(b"\r\n").expect("push control terminator");
+}
+
+const PUSH_ACK_V1: &str = "$JS.ACK.ORDERS.processor.1.1.1.1713790000000000000.1";
+const PUSH_ACK_V2: &str =
+    "$JS.ACK.domain.account.ORDERS.processor.1.42.2.1713790000000000000.0.token";
+
+#[test]
+fn push_delivery_subscribes_before_create_and_handles_control_and_confirmed_ack() {
+    for supervised in [false, true] {
+        run_push_wire_test(
+            supervised,
+            |stream| {
+                let (subject, sid, create) = push_begin_create(stream, 1);
+                push_send_data(stream, &sid, PUSH_ACK_V1, b"first");
+                push_send_response(
+                    stream,
+                    &create,
+                    push_server_info(&subject, 1).to_string().as_bytes(),
+                );
+                push_expect_unsubscribe(stream, &create.sid);
+                push_expect_publish(stream, PUSH_ACK_V1, b"+ACK");
+
+                push_send_control(
+                    stream,
+                    &subject,
+                    &sid,
+                    None,
+                    "NATS/1.0 100 Idle Heartbeat\r\nNats-Last-Consumer: 1\r\n\r\n",
+                );
+                push_send_control(
+                    stream,
+                    &subject,
+                    &sid,
+                    Some("$JS.FC.ORDERS.processor.first"),
+                    "NATS/1.0 100 FlowControl Request\r\n\r\n",
+                );
+                push_expect_publish(stream, "$JS.FC.ORDERS.processor.first", b"");
+                push_send_control(
+                    stream,
+                    &subject,
+                    &sid,
+                    None,
+                    "NATS/1.0 100 Idle Heartbeat\r\nNats-Consumer-Stalled: $JS.FC.ORDERS.processor.stalled\r\n\r\n",
+                );
+                push_expect_publish(stream, "$JS.FC.ORDERS.processor.stalled", b"");
+                push_send_data(stream, &sid, PUSH_ACK_V2, b"second");
+                let confirmation = push_read_request(stream);
+                assert_eq!(confirmation.subject, PUSH_ACK_V2);
+                assert_eq!(confirmation.payload, b"+ACK");
+                push_send_response(stream, &confirmation, b"");
+                push_expect_unsubscribe(stream, &confirmation.sid);
+
+                push_expect_unsubscribe(stream, &sid);
+                // Successful close returns the same usable context. No
+                // consumer DELETE is hidden in the unsubscribe lifecycle.
+                push_expect_publish(stream, "after.push", b"still connected");
+            },
+            |cx, addr| async move {
+                let context = push_test_context(&cx, addr).await;
+                let mut push = context
+                    .into_push_consumer_with_options(
+                        &cx,
+                        "ORDERS",
+                        ConsumerConfig::new("processor").max_ack_pending(1),
+                        PushConsumerOptions::default().inbox_capacity(1),
+                    )
+                    .await
+                    .expect("create owned push consumer");
+                assert_eq!(push.name(), "processor");
+                assert_eq!(push.stream(), "ORDERS");
+                assert!(push.deliver_subject().starts_with("_INBOX."));
+                let first = push.next(&cx).await.expect("first push").expect("data");
+                assert_eq!(first.payload, b"first");
+                assert_eq!(first.sequence, 1);
+                assert_eq!(push.pending_acks(), 1);
+                assert!(matches!(
+                    push.next(&cx).await,
+                    Err(PushConsumerError::PendingAcknowledgements { limit: 1 })
+                ));
+                first.ack(push.client(), &cx).await.expect("ack first");
+                assert_eq!(push.pending_acks(), 0);
+
+                let second = push.next(&cx).await.expect("second push").expect("data");
+                assert_eq!(second.payload, b"second");
+                assert_eq!(second.sequence, 42);
+                assert_eq!(second.delivered, 1);
+                second
+                    .ack_confirmed(push.client(), &cx)
+                    .await
+                    .expect("confirm push ack");
+                assert!(second.is_ack_confirmed());
+                assert_eq!(push.pending_acks(), 0);
+                assert_eq!(push.dropped_messages(), 0);
+                let mut context = push.close(&cx).await.expect("recover context");
+                context
+                    .client()
+                    .publish(&cx, "after.push", b"still connected")
+                    .await
+                    .expect("returned context is usable");
+                context.client().close(&cx).await.expect("close client");
+            },
+        );
+    }
+}
+
+#[test]
+fn push_overflow_is_reported_and_full_ack_credit_does_not_consume_buffered_data() {
+    for supervised in [false, true] {
+        run_push_wire_test(
+            supervised,
+            |stream| {
+                let (subject, sid, create) = push_begin_create(stream, 1);
+                // The local bound is one data slot plus eight control slots.
+                // A peer can exceed max_ack_pending through repeated delivery;
+                // report this loss instead of silently losing the whole burst.
+                for index in 0..11 {
+                    push_send_data(stream, &sid, PUSH_ACK_V1, &[index]);
+                }
+                push_send_response(
+                    stream,
+                    &create,
+                    push_server_info(&subject, 1).to_string().as_bytes(),
+                );
+                push_expect_unsubscribe(stream, &create.sid);
+                push_expect_unsubscribe(stream, &sid);
+            },
+            |cx, addr| async move {
+                let context = push_test_context(&cx, addr).await;
+                let mut push = context
+                    .into_push_consumer_with_options(
+                        &cx,
+                        "ORDERS",
+                        ConsumerConfig::new("processor").max_ack_pending(1),
+                        PushConsumerOptions::default().inbox_capacity(1),
+                    )
+                    .await
+                    .expect("create bounded push consumer");
+                assert_eq!(push.dropped_messages(), 2);
+                assert!(matches!(
+                    push.next(&cx).await,
+                    Err(PushConsumerError::Lagged { dropped: 2 })
+                ));
+                let first = push.next(&cx).await.expect("first buffered").expect("data");
+                assert_eq!(first.payload, [0]);
+                assert!(matches!(
+                    push.next(&cx).await,
+                    Err(PushConsumerError::PendingAcknowledgements { limit: 1 })
+                ));
+                drop(first);
+                assert_eq!(push.pending_acks(), 0);
+                let second = push.next(&cx).await.expect("second buffered").expect("data");
+                assert_eq!(second.payload, [1]);
+                drop(second);
+                let mut context = push.close(&cx).await.expect("unsubscribe bounded owner");
+                context.client().close(&cx).await.expect("close bounded client");
+            },
+        );
+    }
+}
+
+#[test]
+fn push_cancelled_flow_control_receive_retains_the_reply_for_retry() {
+    run_push_wire_test(
+        true,
+        |stream| {
+            let (subject, sid, create) = push_begin_create(stream, 1);
+            // The control is already buffered when create returns. The
+            // single worker cannot execute the first queued publish before
+            // the caller drops its manually polled receive future.
+            push_send_control(
+                stream,
+                &subject,
+                &sid,
+                Some("$JS.FC.ORDERS.processor.retry"),
+                "NATS/1.0 100 FlowControl Request\r\n\r\n",
+            );
+            push_send_response(
+                stream,
+                &create,
+                push_server_info(&subject, 1).to_string().as_bytes(),
+            );
+            push_expect_unsubscribe(stream, &create.sid);
+            push_expect_publish(stream, "$JS.FC.ORDERS.processor.retry", b"");
+            push_send_data(stream, &sid, PUSH_ACK_V1, b"after retry");
+            push_expect_publish(stream, PUSH_ACK_V1, b"+ACK");
+            push_expect_unsubscribe(stream, &sid);
+        },
+        |cx, addr| async move {
+            let mut push = push_test_context(&cx, addr)
+                .await
+                .into_push_consumer_with_options(
+                    &cx,
+                    "ORDERS",
+                    ConsumerConfig::new("processor").max_ack_pending(1),
+                    PushConsumerOptions::default().inbox_capacity(1),
+                )
+                .await
+                .expect("create for flow-control cancellation");
+            {
+                let mut next = std::pin::pin!(push.next(&cx));
+                let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
+                assert!(next.as_mut().poll(&mut task_cx).is_pending());
+            }
+            assert_eq!(
+                push.pending_flow_control.as_deref(),
+                Some("$JS.FC.ORDERS.processor.retry")
+            );
+            let message = push.next(&cx).await.expect("retry next").expect("data");
+            assert_eq!(message.payload, b"after retry");
+            assert!(push.pending_flow_control.is_none());
+            message.ack(push.client(), &cx).await.expect("ack retry delivery");
+            let mut context = push.close(&cx).await.expect("close retry owner");
+            context.client().close(&cx).await.expect("close retry client");
+        },
+    );
+}
+
+#[test]
+fn push_binding_preserves_the_existing_consumer_and_uses_its_delivery_subject() {
+    for supervised in [false, true] {
+        run_push_wire_test(
+            supervised,
+            |stream| {
+                let info = push_read_request(stream);
+                assert_eq!(info.subject, "$JS.API.CONSUMER.INFO.ORDERS.processor");
+                assert!(info.payload.is_empty());
+                let mut response = push_server_info("deliver.retained", 2);
+                response["config"]["flow_control"] = json!(false);
+                response["config"]["idle_heartbeat"] = json!(0);
+                push_send_response(stream, &info, response.to_string().as_bytes());
+                push_expect_unsubscribe(stream, &info.sid);
+                let (subject, sid) = push_read_subscription(stream);
+                assert_eq!(subject, "deliver.retained");
+                push_send_data(stream, &sid, PUSH_ACK_V1, b"retained durable");
+                push_expect_publish(stream, PUSH_ACK_V1, b"+ACK");
+                push_expect_unsubscribe(stream, &sid);
+            },
+            |cx, addr| async move {
+                let mut push = push_test_context(&cx, addr)
+                    .await
+                    .into_bound_push_consumer(&cx, "ORDERS", "processor")
+                    .await
+                    .expect("bind retained durable");
+                assert_eq!(push.deliver_subject(), "deliver.retained");
+                let message = push.next(&cx).await.expect("bound delivery").expect("data");
+                assert_eq!(message.payload, b"retained durable");
+                message.ack(push.client(), &cx).await.expect("ack bound data");
+                let mut context = push.close(&cx).await.expect("unbind durable");
+                context.client().close(&cx).await.expect("close binding client");
+            },
+        );
+    }
+}
+
+#[test]
+fn push_setup_refusal_closes_the_consumed_client_without_deleting_a_durable() {
+    for supervised in [false, true] {
+        for binding in [false, true] {
+            run_push_wire_test(
+                supervised,
+                move |stream| {
+                    if binding {
+                        let request = push_read_request(stream);
+                        assert_eq!(request.subject, "$JS.API.CONSUMER.INFO.ORDERS.processor");
+                        let mut info = push_server_info("deliver.busy", 1);
+                        info["push_bound"] = json!(true);
+                        push_send_response(stream, &request, info.to_string().as_bytes());
+                        push_expect_unsubscribe(stream, &request.sid);
+                    } else {
+                        let (_, _, request) = push_begin_create(stream, 1);
+                        push_send_response(
+                            stream,
+                            &request,
+                            br#"{"error":{"code":400,"description":"consumer already exists"}}"#,
+                        );
+                        push_expect_unsubscribe(stream, &request.sid);
+                    }
+                    // The fixture requires EOF next: no delivery SUB on a
+                    // refused binding and no DELETE in either cleanup path.
+                },
+                move |cx, addr| async move {
+                    let context = push_test_context(&cx, addr).await;
+                    let result = if binding {
+                        context
+                            .into_bound_push_consumer(&cx, "ORDERS", "processor")
+                            .await
+                    } else {
+                        context
+                            .into_push_consumer(
+                                &cx,
+                                "ORDERS",
+                                ConsumerConfig::new("processor").max_ack_pending(1),
+                            )
+                            .await
+                    };
+                    if binding {
+                        assert!(matches!(result, Err(JsError::InvalidConfig(_))));
+                    } else {
+                        assert!(matches!(result, Err(JsError::Api { code: 400, .. })));
+                    }
+                },
+            );
+        }
+    }
+}
+
+#[test]
+fn push_durable_alias_is_canonicalized_and_mismatched_server_identity_is_refused() {
+    run_push_wire_test(
+        false,
+        |stream| {
+            let (subject, _, request) = push_begin_create(stream, 1);
+            let mut info = push_server_info(&subject, 1);
+            info["name"] = json!("wrong_consumer");
+            info["config"]["name"] = json!("wrong_consumer");
+            info["config"]["durable_name"] = json!("wrong_consumer");
+            push_send_response(stream, &request, info.to_string().as_bytes());
+            push_expect_unsubscribe(stream, &request.sid);
+        },
+        |cx, addr| async move {
+            let mut config = ConsumerConfig::ephemeral().max_ack_pending(1);
+            config.durable_name = Some("processor".to_string());
+            let result = push_test_context(&cx, addr)
+                .await
+                .into_push_consumer(&cx, "ORDERS", config)
+                .await;
+            assert!(matches!(result, Err(JsError::ParseError(_))));
+        },
+    );
+}
+
+#[test]
+fn dropping_push_creation_after_the_wire_request_closes_its_client() {
+    for supervised in [false, true] {
+        let (seen_tx, mut seen_rx) = crate::channel::oneshot::channel();
+        run_push_wire_test(
+            supervised,
+            move |stream| {
+                use std::io::Read;
+
+                let (_, _, _) = push_begin_create(stream, 1);
+                seen_tx.send_blocking(()).expect("report CREATE received");
+                // Request cleanup may send its UNSUB before owner destruction.
+                // The server never acknowledges CREATE, so this witnesses
+                // dropping a genuinely parked setup rather than a ready one.
+                let mut remaining = Vec::new();
+                stream.read_to_end(&mut remaining).expect("setup client closed");
+                let remaining = String::from_utf8(remaining).expect("setup cleanup UTF-8");
+                assert!(
+                    remaining.lines().all(|line| line.starts_with("UNSUB ")),
+                    "unexpected command after setup cancellation: {remaining:?}"
+                );
+            },
+            move |cx, addr| async move {
+                let context = push_test_context(&cx, addr).await;
+                let mut create = Box::pin(context.into_push_consumer(
+                    &cx,
+                    "ORDERS",
+                    ConsumerConfig::new("processor").max_ack_pending(1),
+                ));
+                {
+                    let mut seen = std::pin::pin!(seen_rx.recv(&cx));
+                    std::future::poll_fn(|task_cx| {
+                        assert!(create.as_mut().poll(task_cx).is_pending());
+                        seen.as_mut().poll(task_cx)
+                    })
+                    .await
+                    .expect("server observed CREATE");
+                }
+                drop(create);
+            },
+        );
+    }
+}
+
+#[test]
+fn cancelled_push_receive_keeps_the_subscription_and_its_data_for_a_later_owner() {
+    for supervised in [false, true] {
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        run_push_wire_test(
+            supervised,
+            move |stream| {
+                let (subject, sid, create) = push_begin_create(stream, 1);
+                push_send_response(
+                    stream,
+                    &create,
+                    push_server_info(&subject, 1).to_string().as_bytes(),
+                );
+                push_expect_unsubscribe(stream, &create.sid);
+                release_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("release after cancelled receive");
+                push_send_data(stream, &sid, PUSH_ACK_V1, b"still subscribed");
+                push_expect_publish(stream, PUSH_ACK_V1, b"+ACK");
+                push_expect_unsubscribe(stream, &sid);
+            },
+            move |cx, addr| async move {
+                let mut push = push_test_context(&cx, addr)
+                    .await
+                    .into_push_consumer(
+                        &cx,
+                        "ORDERS",
+                        ConsumerConfig::new("processor").max_ack_pending(1),
+                    )
+                    .await
+                    .expect("create cancellation owner");
+                let owner: Cx = Cx::for_testing();
+                let mut receive = Box::pin(push.next(&owner));
+                {
+                    let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
+                    assert!(receive.as_mut().poll(&mut task_cx).is_pending());
+                }
+                owner.cancel_with(crate::types::CancelKind::User, Some("cancel push receive"));
+                assert!(matches!(
+                    receive.await,
+                    Err(PushConsumerError::JetStream(JsError::Nats(NatsError::Cancelled)))
+                ));
+                assert_eq!(push.pending_acks(), 0);
+                release_tx.send(()).expect("allow next delivery");
+                let message = push.next(&cx).await.expect("next owner receives").expect("data");
+                assert_eq!(message.payload, b"still subscribed");
+                message.ack(push.client(), &cx).await.expect("ack after cancellation");
+                let mut context = push.close(&cx).await.expect("close cancelled receive owner");
+                context.client().close(&cx).await.expect("close cancellation client");
+            },
+        );
+    }
+}
+
+#[test]
+fn push_configuration_requires_real_bounded_server_settings() {
+    let options = PushConsumerOptions::default().inbox_capacity(2);
+    assert!(options.validate().is_ok());
+    assert!(options.pending_limit(1).is_ok());
+    for limit in [-1, 0, 3, i64::MAX] {
+        assert!(options.pending_limit(limit).is_err(), "limit {limit}");
+    }
+    for capacity in [0, 65_537, usize::MAX] {
+        assert!(
+            PushConsumerOptions::default()
+                .inbox_capacity(capacity)
+                .validate()
+                .is_err()
+        );
+    }
+    for heartbeat in [Duration::ZERO, Duration::from_millis(99), Duration::MAX] {
+        assert!(
+            PushConsumerOptions::default()
+                .idle_heartbeat(heartbeat)
+                .validate()
+                .is_err()
+        );
+    }
+    assert!(
+        PushConsumerOptions::default()
+            .idle_heartbeat(Duration::from_millis(100))
+            .validate()
+            .is_ok()
+    );
+
+    let parse = |info: &serde_json::Value| {
+        PushConsumerInfo::parse(
+            info.to_string().as_bytes(),
+            "ORDERS",
+            Some("processor"),
+            &options,
+        )
+    };
+    let valid = push_server_info("deliver.processor", 2);
+    assert!(parse(&valid).is_ok());
+    for (field, value) in [
+        ("ack_policy", json!("none")),
+        ("ack_policy", json!("all")),
+        ("max_ack_pending", json!(0)),
+        ("max_ack_pending", json!(-1)),
+        ("max_ack_pending", json!(3)),
+        ("deliver_subject", json!("deliver.*")),
+        ("deliver_group", json!("workers")),
+        ("idle_heartbeat", json!(0)),
+        ("idle_heartbeat", json!(99_000_000_u64)),
+        ("idle_heartbeat", json!(-1)),
+        ("flow_control", json!("true")),
+        ("deliver_group", json!(42)),
+    ] {
+        let mut info = valid.clone();
+        info["config"][field] = value;
+        assert!(parse(&info).is_err(), "{info}");
+    }
+    let mut no_config = valid.clone();
+    no_config.as_object_mut().expect("info object").remove("config");
+    assert!(parse(&no_config).is_err());
+    let mut no_limit = valid.clone();
+    no_limit["config"].as_object_mut().expect("config object").remove("max_ack_pending");
+    assert!(parse(&no_limit).is_err());
+    let mut foreign_stream = valid;
+    foreign_stream["stream_name"] = json!("OTHER");
+    assert!(parse(&foreign_stream).is_err());
+}
+
+#[test]
+fn push_controls_distinguish_empty_data_heartbeats_stalls_and_protocol_errors() {
+    let message = |headers: &str, reply: Option<&str>| Message {
+        subject: "deliver.processor".to_string(),
+        sid: 1,
+        headers: Some(headers.as_bytes().to_vec()),
+        payload: Vec::new(),
+        reply_to: reply.map(str::to_string),
+    };
+    assert!(matches!(
+        push_control(&message("NATS/1.0 100 Idle Heartbeat\r\n\r\n", None)),
+        Ok(Some(PushControl::Heartbeat))
+    ));
+    assert!(matches!(
+        push_control(&message(
+            "NATS/1.0\r\nStatus: 100\r\nDescription: Idle Heartbeat\r\nNats-Consumer-Stalled: $JS.FC.ORDERS.processor.retry\r\n\r\n",
+            None
+        )),
+        Ok(Some(PushControl::Reply(reply))) if reply == "$JS.FC.ORDERS.processor.retry"
+    ));
+    assert!(matches!(
+        push_control(&message(
+            "NATS/1.0 100 FlowControl Request\r\n\r\n",
+            Some("$JS.FC.ORDERS.processor.flow")
+        )),
+        Ok(Some(PushControl::Reply(reply))) if reply == "$JS.FC.ORDERS.processor.flow"
+    ));
+    assert!(matches!(
+        push_control(&message(
+            "NATS/1.0 100 Idle Heartbeat\r\n\r\n",
+            Some(PUSH_ACK_V1)
+        )),
+        Ok(None),
+        "an empty stored user message with Status headers remains data"
+    ));
+    assert!(matches!(
+        push_control(&message("NATS/1.0 409 Consumer Deleted\r\n\r\n", None)),
+        Err(JsError::Nats(NatsError::Server(_)))
+    ));
+    for invalid in [
+        message("NATS/1.0 100 FlowControl Request\r\n\r\n", None),
+        message("NATS/1.0 100 Idle Heartbeat\r\n\r\n", Some("unexpected.reply")),
+        message("NATS/1.0 100 Unknown\r\n\r\n", None),
+        message(
+            "NATS/1.0 100 FlowControl Request\r\n\r\n",
+            Some("invalid.*"),
+        ),
+    ] {
+        assert!(matches!(push_control(&invalid), Err(JsError::ParseError(_))));
+    }
+}
+
+#[test]
+fn push_consumer_info_uses_top_level_identity_and_rejects_ambiguous_fields() {
+    let options = PushConsumerOptions::default();
+    let parse = |info: &serde_json::Value| {
+        PushConsumerInfo::parse(
+            info.to_string().as_bytes(),
+            "ORDERS",
+            Some("processor"),
+            &options,
+        )
+    };
+    let valid = push_server_info("deliver.processor", 2);
+    // serde_json writes config before the outer name. Its nested name cannot
+    // vouch for a different or absent outer consumer identity.
+    let mut foreign_name = valid.clone();
+    foreign_name["name"] = json!("foreign");
+    assert!(matches!(parse(&foreign_name), Err(JsError::ParseError(_))));
+    let mut missing_name = valid.clone();
+    missing_name.as_object_mut().expect("info object").remove("name");
+    assert!(matches!(parse(&missing_name), Err(JsError::ParseError(_))));
+
+    let mut nested_stream = valid.clone();
+    nested_stream["config"]["metadata"] = json!({"stream_name": "ORDERS"});
+    nested_stream["stream_name"] = json!("OTHER");
+    assert!(matches!(parse(&nested_stream), Err(JsError::ParseError(_))));
+    nested_stream.as_object_mut().expect("info object").remove("stream_name");
+    assert!(matches!(parse(&nested_stream), Err(JsError::ParseError(_))));
+
+    let mut nested_policy = valid;
+    nested_policy["config"].as_object_mut().expect("config").remove("ack_policy");
+    nested_policy["config"]["metadata"] = json!({"ack_policy": "explicit"});
+    assert!(matches!(parse(&nested_policy), Err(JsError::InvalidConfig(_))));
+    assert!(matches!(
+        push_json_bool(r#"{"push_bound":true,"push_bound":false}"#, "push_bound"),
+        Err(JsError::ParseError(_))
+    ));
+    assert_eq!(
+        push_json_bool(r#"{"metadata":{"push_bound":true}}"#, "push_bound").unwrap(),
+        None,
+        "nested metadata cannot create an active push binding"
+    );
+}
+
+#[test]
+fn malformed_or_foreign_push_metadata_never_releases_another_messages_credit() {
+    for supervised in [false, true] {
+        run_push_wire_test(
+            supervised,
+            |stream| {
+                let (subject, sid, create) = push_begin_create(stream, 2);
+                push_send_data(stream, &sid, PUSH_ACK_V1, b"holds credit");
+                push_send_data(
+                    stream,
+                    &sid,
+                    "$JS.ACK.OTHER.processor.1.2.2.1713790000000000000.0",
+                    b"foreign consumer",
+                );
+                push_send_data(
+                    stream,
+                    &sid,
+                    "$JS.ACK.ORDERS.processor.1.2.invalid.1713790000000000000.0",
+                    b"malformed consumer sequence",
+                );
+                push_send_data(
+                    stream,
+                    &sid,
+                    "$JS.ACK.domain.account.ORDERS.processor.1.2.2.1713790000000000000.0.*",
+                    b"nonliteral ACK subject",
+                );
+                push_send_data(stream, &sid, PUSH_ACK_V2, b"second valid");
+                push_send_response(
+                    stream,
+                    &create,
+                    push_server_info(&subject, 2).to_string().as_bytes(),
+                );
+                push_expect_unsubscribe(stream, &create.sid);
+                push_expect_publish(stream, PUSH_ACK_V1, b"+ACK");
+                push_expect_publish(stream, PUSH_ACK_V2, b"-NAK");
+                push_expect_unsubscribe(stream, &sid);
+            },
+            |cx, addr| async move {
+                let mut push = push_test_context(&cx, addr)
+                    .await
+                    .into_push_consumer_with_options(
+                        &cx,
+                        "ORDERS",
+                        ConsumerConfig::new("processor").max_ack_pending(2),
+                        PushConsumerOptions::default().inbox_capacity(2),
+                    )
+                    .await
+                    .expect("create metadata validation owner");
+                let first = push.next(&cx).await.expect("first valid").expect("data");
+                assert_eq!(push.pending_acks(), 1);
+                for _ in 0..3 {
+                    assert!(matches!(
+                        push.next(&cx).await,
+                        Err(PushConsumerError::JetStream(JsError::ParseError(_)))
+                    ));
+                    assert_eq!(push.pending_acks(), 1, "failed admission must not release credit");
+                }
+                let second = push.next(&cx).await.expect("second valid").expect("data");
+                assert_eq!(second.payload, b"second valid");
+                assert_eq!(push.pending_acks(), 2);
+                first.ack(push.client(), &cx).await.expect("ack first valid");
+                assert_eq!(push.pending_acks(), 1);
+                second.nack(push.client(), &cx).await.expect("nack second valid");
+                assert_eq!(push.pending_acks(), 0);
+                drop((first, second));
+                assert_eq!(push.pending_acks(), 0);
+                let mut context = push.close(&cx).await.expect("close metadata owner");
+                context.client().close(&cx).await.expect("close metadata client");
+            },
+        );
+    }
 }
 
 fn jetstream_ack_snapshot(

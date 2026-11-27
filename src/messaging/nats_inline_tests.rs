@@ -1395,6 +1395,153 @@ fn nats_queue_subscription_capacity_preserves_a_full_wire_burst() {
     server.join().expect("join burst server");
 }
 
+#[cfg(unix)]
+#[test]
+fn direct_subscription_receive_finishes_backpressured_pongs_before_returning_data() {
+    const PINGS: usize = 8192;
+    const FILL_LIMIT: usize = 256 * 1024;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind PONG backpressure peer");
+    SockRef::from(&listener)
+        .set_recv_buffer_size(4096)
+        .expect("bound peer receive window before connect");
+    let addr = listener.local_addr().expect("PONG backpressure address");
+    let (release_tx, release_rx) = std_mpsc::channel();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept PONG backpressure client");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("bound PONG peer reads");
+        stream
+            .set_write_timeout(Some(Duration::from_secs(10)))
+            .expect("bound PONG peer writes");
+        stream
+            .write_all(b"INFO {\"server_id\":\"pong-pressure\",\"max_payload\":1048576}\r\n")
+            .expect("send PONG pressure INFO");
+        let mut reader = BufReader::new(stream);
+        assert!(read_protocol_line(&mut reader).starts_with("CONNECT "));
+        let subscribe = read_protocol_line(&mut reader);
+        let parts: Vec<_> = subscribe.split_whitespace().collect();
+        assert_eq!(parts.len(), 3, "{subscribe}");
+        assert_eq!(parts[0], "SUB");
+        assert_eq!(parts[1], "push.pressure");
+        let sid = parts[2];
+        let mut inbound = format!("MSG push.pressure {sid} 1\r\nx\r\n").into_bytes();
+        for _ in 0..PINGS {
+            inbound.extend_from_slice(b"PING\r\n");
+        }
+        reader.get_mut().write_all(&inbound).expect("send data then PINGs");
+
+        // Do not drain any client bytes before two actual Pending polls.
+        // Socket pressure is in-memory fixture data, distinct from the
+        // following protocol PONGs whose exact bytes are checked.
+        let pressure_bytes = release_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("release only after backpressured PONG witness");
+        assert!(pressure_bytes <= FILL_LIMIT);
+        let mut pressure = vec![0; pressure_bytes];
+        reader.read_exact(&mut pressure).expect("drain pressure bytes");
+        assert!(pressure.iter().all(|byte| *byte == b'x'));
+        let mut pongs = vec![0; PINGS * 6];
+        reader.read_exact(&mut pongs).expect("all queued PONGs completed");
+        assert!(pongs.chunks_exact(6).all(|pong| pong == b"PONG\r\n"));
+        assert_eq!(read_protocol_line(&mut reader), format!("UNSUB {sid}\r\n"));
+        let mut byte = [0; 1];
+        assert_eq!(reader.read(&mut byte).expect("PONG client close"), 0);
+    });
+
+    run_test_with_cx(|cx| async move {
+        let mut client = NatsClient::connect_with_config(
+            &cx,
+            NatsConfig {
+                host: addr.ip().to_string(),
+                port: addr.port(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("connect direct PONG client");
+        let mut subscription = client
+            .subscribe_with_capacity(&cx, "push.pressure", 1)
+            .await
+            .expect("subscribe direct PONG inbox");
+        let sid = subscription.sid();
+        let dispatch = client
+            .state
+            .subscriptions
+            .lock()
+            .get(&sid)
+            .expect("registered PONG subscription")
+            .sender
+            .clone();
+        let NatsClientMode::Direct(connection) = &mut client.mode else {
+            panic!("fixture must use the direct driver");
+        };
+        let expected = format!("MSG push.pressure {sid} 1\r\nx\r\n").len() + PINGS * 6;
+        while connection.read_buf.available().len() < expected {
+            connection.read_more(&cx).await.expect("buffer real peer frames");
+        }
+        assert_eq!(connection.read_buf.available().len(), expected);
+        let NatsStream::Plain(socket) = &connection.stream else {
+            panic!("fixture must use a plain TCP stream");
+        };
+        SockRef::from(socket)
+            .set_send_buffer_size(4096)
+            .expect("bound PONG sender buffer");
+        let pressure = [b'x'; 4096];
+        let mut written = 0usize;
+        let mut blocked = false;
+        while written < FILL_LIMIT {
+            match socket.try_write(&pressure[..pressure.len().min(FILL_LIMIT - written)]) {
+                Ok(0) => panic!("pressure write unexpectedly closed"),
+                Ok(count) => written += count,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    blocked = true;
+                    break;
+                }
+                Err(error) => panic!("pressure write failed: {error}"),
+            }
+        }
+        assert!(blocked, "socket must actually reach WouldBlock within the bound");
+
+        let mut receive = Box::pin(client.next_subscription_event(&cx, &mut subscription));
+        {
+            let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
+            assert!(receive.as_mut().poll(&mut task_cx).is_pending());
+            assert_eq!(dispatch.debug_counts().0, 1, "data is already dispatched");
+            // The previous receive/process race returned this queued data on
+            // its second poll and abandoned a partially written PONG.
+            assert!(
+                receive.as_mut().poll(&mut task_cx).is_pending(),
+                "data must wait for the in-progress protocol write"
+            );
+            assert_eq!(dispatch.debug_counts().0, 1, "data remains unconsumed");
+        }
+        release_tx.send(written).expect("let peer drain the real socket");
+        let event = receive.await.expect("finish PONGs before delivering data");
+        let Some(SubscriptionEvent::Message(message)) = event else {
+            panic!("expected the buffered data event");
+        };
+        assert_eq!(message.payload, b"x");
+        let NatsClientMode::Direct(connection) = &client.mode else {
+            unreachable!("direct client cannot change mode");
+        };
+        assert!(connection.connected, "PONG completion leaves transport reusable");
+        client.unsubscribe(&cx, sid).await.expect("unsubscribe after PONGs");
+        drop(dispatch);
+        assert!(
+            client
+                .next_subscription_event(&cx, &mut subscription)
+                .await
+                .expect("closed inbox")
+                .is_none(),
+            "a closed and drained direct inbox must not wait for more socket bytes"
+        );
+        client.close(&cx).await.expect("close PONG client");
+    });
+    server.join().expect("PONG pressure peer joined");
+}
+
 fn subscription_event_fixture(capacity: usize) -> (NatsConnection, Subscription) {
     let state = Arc::new(SharedState::new());
     let loss = Arc::new(SubscriptionLoss::default());

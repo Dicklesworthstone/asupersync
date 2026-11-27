@@ -4535,6 +4535,34 @@ impl NatsClient {
         }
     }
 
+    /// Receive through the transport owner that belongs to this client.
+    ///
+    /// A supervised client already has an independent reader. A direct client
+    /// must finish each process call before delivering its queued data: racing
+    /// the subscription against process could cancel a partially written PONG
+    /// after that same process call had dispatched a message.
+    pub(crate) async fn next_subscription_event(
+        &mut self,
+        cx: &Cx,
+        subscription: &mut Subscription,
+    ) -> Result<Option<SubscriptionEvent>, NatsError> {
+        match &mut self.mode {
+            NatsClientMode::Supervised(_) => subscription.next_event(cx).await,
+            NatsClientMode::Direct(connection) => loop {
+                // Poll once to distinguish an empty live inbox from a closed,
+                // drained one, and to preserve loss-before-data ordering.
+                let event = {
+                    let mut next = std::pin::pin!(subscription.next_event(cx));
+                    std::future::poll_fn(|task_cx| Poll::Ready(next.as_mut().poll(task_cx))).await
+                };
+                if let Poll::Ready(event) = event {
+                    return event;
+                }
+                connection.process(cx).await?;
+            },
+        }
+    }
+
     /// Wait until the supervisor has processed at least one incoming frame.
     ///
     /// The method remains a compatibility surface for callers that explicitly

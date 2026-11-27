@@ -151,7 +151,8 @@ pub use federation::{
 };
 pub use jetstream::{
     AckPolicy, Consumer, ConsumerConfig, DeliverPolicy, DiscardPolicy, JetStreamContext, JsError,
-    JsMessage, PubAck, RetentionPolicy, StorageType, StreamConfig, StreamInfo, StreamState,
+    JsMessage, PubAck, PushConsumer, PushConsumerError, PushConsumerOptions, RetentionPolicy,
+    StorageType, StreamConfig, StreamInfo, StreamState,
 };
 pub use kafka::{
     Acks, Compression, KafkaDelivery, KafkaError, KafkaProducer, ProducerConfig, RecordMetadata,

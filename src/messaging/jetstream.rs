@@ -34,7 +34,7 @@
 //! ```
 
 use super::nats::{
-    Message, NatsClient, NatsError, validate_nats_publish_subject,
+    Message, NatsClient, NatsError, Subscription, SubscriptionEvent, validate_nats_publish_subject,
     validate_nats_subscription_pattern,
 };
 use crate::cx::Cx;
@@ -1688,6 +1688,169 @@ impl JetStreamContext {
         })
     }
 
+    /// Create a push consumer and transfer this context to its delivery owner.
+    ///
+    /// This consumes the context, including on validation, setup failure, or
+    /// cancellation: dropping the setup future closes its client. One
+    /// [`PushConsumer`] owns this context/connection. Call [`PushConsumer::close`]
+    /// to unsubscribe and recover it.
+    ///
+    /// Delivery is subscribed before the CREATE request, so initial messages
+    /// cannot outrun local interest. A missing `deliver_subject` gets a fresh
+    /// inbox. An explicit subject must be dedicated to this consumer.
+    /// Explicit acknowledgements and a positive, bounded `max_ack_pending`
+    /// are required. The request uses the server's `create` action; bind a
+    /// retained durable with [`Self::into_bound_push_consumer`] instead.
+    ///
+    /// Neither setup cleanup nor owner shutdown sends a consumer DELETE.
+    /// A create accepted by the server before a cancelled response can leave
+    /// a durable behind; recover it by name. Ephemerals follow server policy.
+    pub async fn into_push_consumer(
+        self,
+        cx: &Cx,
+        stream: &str,
+        config: ConsumerConfig,
+    ) -> Result<PushConsumer, JsError> {
+        self.into_push_consumer_with_options(cx, stream, config, PushConsumerOptions::default())
+            .await
+    }
+
+    /// Create an owned push consumer with explicit buffering and heartbeat.
+    ///
+    /// Has the consuming lifecycle of [`Self::into_push_consumer`]. The server's
+    /// response must confirm push delivery, explicit acknowledgements, finite
+    /// pending credit, and the requested flow-control/heartbeat settings.
+    pub async fn into_push_consumer_with_options(
+        mut self,
+        cx: &Cx,
+        stream: &str,
+        mut config: ConsumerConfig,
+        options: PushConsumerOptions,
+    ) -> Result<PushConsumer, JsError> {
+        push_checkpoint(cx)?;
+        ConsumerConfig::validate_stream_name(stream)?;
+        options.validate()?;
+        if config.deliver_subject.is_none() {
+            config.deliver_subject = Some(format!("_INBOX.{}", random_id(cx)));
+        }
+        config.validate()?;
+        if config.ack_policy != AckPolicy::Explicit {
+            return Err(JsError::InvalidConfig(
+                "owned push consumers require explicit acknowledgement".to_string(),
+            ));
+        }
+        options.pending_limit(config.max_ack_pending)?;
+        let deliver_subject = config
+            .deliver_subject
+            .as_deref()
+            .expect("push delivery subject initialized");
+        let subscription = self
+            .client
+            .subscribe_with_capacity(cx, deliver_subject, options.subscription_capacity())
+            .await?;
+
+        let subject = match config.name.as_deref() {
+            Some(name) => format!("{}.CONSUMER.CREATE.{stream}.{name}", self.prefix),
+            None => format!("{}.CONSUMER.CREATE.{stream}", self.prefix),
+        };
+        let mut config_json = config.to_json();
+        let _ = config_json.pop();
+        write!(
+            &mut config_json,
+            ",\"flow_control\":true,\"idle_heartbeat\":{}}}",
+            options.idle_heartbeat.as_nanos()
+        )
+        .expect("write to String");
+        let payload = format!(
+            "{{\"stream_name\":\"{}\",\"config\":{config_json},\"action\":\"create\"}}",
+            json_escape(stream)
+        );
+        let response = self.client.request(cx, &subject, payload.as_bytes()).await?;
+        let info = PushConsumerInfo::parse(
+            &response.payload,
+            stream,
+            config.name.as_deref(),
+            &options,
+        )?;
+        if info.deliver_subject != deliver_subject
+            || !info.flow_control
+            || u128::from(info.idle_heartbeat) != options.idle_heartbeat.as_nanos()
+        {
+            return Err(JsError::InvalidConfig(
+                "server did not confirm requested push delivery and flow control".to_string(),
+            ));
+        }
+        let consumer = info.into_consumer(stream, self.prefix.clone());
+        Ok(PushConsumer {
+            context: self,
+            subscription,
+            consumer,
+            pending_flow_control: None,
+        })
+    }
+
+    /// Bind an existing, unbound, non-queue push consumer without changing it.
+    ///
+    /// The broker's delivery subject, explicit ack policy, and finite pending
+    /// limit are validated before subscribing. A reported active push binding
+    /// is refused. This check is not an atomic broker lease: callers must
+    /// arrange exclusive use of the consumer and its delivery subject.
+    ///
+    /// This consumes and closes the client on failure or cancellation, just as
+    /// [`Self::into_push_consumer`] does. Closing the resulting owner only
+    /// unsubscribes; the existing consumer is never changed or deleted.
+    pub async fn into_bound_push_consumer(
+        self,
+        cx: &Cx,
+        stream: &str,
+        consumer: &str,
+    ) -> Result<PushConsumer, JsError> {
+        self.into_bound_push_consumer_with_options(
+            cx,
+            stream,
+            consumer,
+            PushConsumerOptions::default(),
+        )
+        .await
+    }
+
+    /// Bind an existing push consumer with an explicit local buffer bound.
+    ///
+    /// The heartbeat option is not applied to the existing broker consumer.
+    pub async fn into_bound_push_consumer_with_options(
+        mut self,
+        cx: &Cx,
+        stream: &str,
+        consumer: &str,
+        options: PushConsumerOptions,
+    ) -> Result<PushConsumer, JsError> {
+        push_checkpoint(cx)?;
+        ConsumerConfig::validate_stream_name(stream)?;
+        ConsumerConfig::validate_consumer_name("name", Some(consumer))?;
+        options.validate()?;
+        let subject = format!("{}.CONSUMER.INFO.{stream}.{consumer}", self.prefix);
+        let response = self.client.request(cx, &subject, b"").await?;
+        let info = PushConsumerInfo::parse(&response.payload, stream, Some(consumer), &options)?;
+        let json = std::str::from_utf8(&response.payload)
+            .map_err(|_| JsError::ParseError("non-UTF-8 push consumer info".to_string()))?;
+        if push_json_bool(json, "push_bound")?.unwrap_or(false) {
+            return Err(JsError::InvalidConfig(
+                "push consumer already has a delivery subscription".to_string(),
+            ));
+        }
+        let subscription = self
+            .client
+            .subscribe_with_capacity(cx, &info.deliver_subject, options.subscription_capacity())
+            .await?;
+        let consumer = info.into_consumer(stream, self.prefix.clone());
+        Ok(PushConsumer {
+            context: self,
+            subscription,
+            consumer,
+            pending_flow_control: None,
+        })
+    }
+
     /// Get an existing consumer.
     pub async fn get_consumer(
         &mut self,
@@ -1812,6 +1975,576 @@ impl JetStreamContext {
         }
 
         JsError::Api { code, description }
+    }
+}
+
+/// Local bounds and server heartbeat for an owned push consumer.
+///
+/// The default buffers 1024 delivery frames plus eight control frames and
+/// requests flow control with a five-second heartbeat. Message size is bounded
+/// separately by the underlying NATS connection's payload limits.
+#[derive(Debug, Clone)]
+pub struct PushConsumerOptions {
+    inbox_capacity: usize,
+    idle_heartbeat: Duration,
+}
+
+impl Default for PushConsumerOptions {
+    fn default() -> Self {
+        Self {
+            inbox_capacity: 1024,
+            idle_heartbeat: Duration::from_secs(5),
+        }
+    }
+}
+
+impl PushConsumerOptions {
+    /// Maximum buffered delivery frames, from 1 through 65536.
+    ///
+    /// The consumer's positive `max_ack_pending` must fit this bound. Eight
+    /// additional slots absorb control frames; overflow is reported by
+    /// [`PushConsumerError::Lagged`], including overflow caused by redeliveries.
+    #[must_use]
+    pub fn inbox_capacity(mut self, capacity: usize) -> Self {
+        self.inbox_capacity = capacity;
+        self
+    }
+
+    /// Heartbeat requested when creating a consumer; at least 100 ms.
+    ///
+    /// Flow control is always enabled on creation and requires heartbeats to
+    /// recover a lost flow-control request. Binding an existing consumer
+    /// preserves its server settings instead of applying this interval.
+    #[must_use]
+    pub fn idle_heartbeat(mut self, interval: Duration) -> Self {
+        self.idle_heartbeat = interval;
+        self
+    }
+
+    fn validate(&self) -> Result<(), JsError> {
+        if !(1..=65_536).contains(&self.inbox_capacity) {
+            return Err(JsError::InvalidConfig(
+                "push inbox_capacity must be between 1 and 65536".to_string(),
+            ));
+        }
+        if self.idle_heartbeat < Duration::from_millis(100)
+            || self.idle_heartbeat.as_nanos() > i64::MAX as u128
+        {
+            return Err(JsError::InvalidConfig(
+                "push idle_heartbeat must be at least 100 ms and fit i64 nanoseconds".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn pending_limit(&self, max_ack_pending: i64) -> Result<usize, JsError> {
+        let limit = usize::try_from(max_ack_pending).ok();
+        match limit {
+            Some(limit) if limit > 0 && limit <= self.inbox_capacity => Ok(limit),
+            _ => Err(JsError::InvalidConfig(
+                "push max_ack_pending must be positive and fit inbox_capacity".to_string(),
+            )),
+        }
+    }
+
+    fn subscription_capacity(&self) -> usize {
+        self.inbox_capacity + PULL_INBOX_STATUS_SLACK
+    }
+}
+
+/// A push receive error, including local delivery loss and exhausted credit.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum PushConsumerError {
+    /// A transport, server, or protocol error.
+    JetStream(JsError),
+    /// Frames discarded by the bounded subscription since its last loss report.
+    ///
+    /// These are observed local losses, not inferred gaps in stream sequences.
+    /// Unacknowledged data remains subject to the broker's redelivery policy.
+    Lagged {
+        /// Number of newly observed discarded frames, including control frames.
+        dropped: u64,
+    },
+    /// All local acknowledgement slots are held by delivered messages.
+    ///
+    /// Acknowledge, negatively acknowledge, terminate, or drop a previously
+    /// returned message before receiving again. No queued message was consumed.
+    PendingAcknowledgements {
+        /// Maximum number of outstanding messages.
+        limit: usize,
+    },
+}
+
+impl fmt::Display for PushConsumerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::JetStream(error) => write!(f, "{error}"),
+            Self::Lagged { dropped } => {
+                write!(f, "JetStream push subscription discarded {dropped} frames")
+            }
+            Self::PendingAcknowledgements { limit } => {
+                write!(f, "JetStream push consumer has {limit} outstanding messages")
+            }
+        }
+    }
+}
+
+impl std::error::Error for PushConsumerError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::JetStream(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<JsError> for PushConsumerError {
+    fn from(error: JsError) -> Self {
+        Self::JetStream(error)
+    }
+}
+
+impl From<NatsError> for PushConsumerError {
+    fn from(error: NatsError) -> Self {
+        Self::JetStream(JsError::Nats(error))
+    }
+}
+
+/// One push subscription and the JetStream context that drives it.
+///
+/// Construct with [`JetStreamContext::into_push_consumer`] or bind an existing
+/// consumer with [`JetStreamContext::into_bound_push_consumer`]. This owner uses
+/// one context/connection; it does not spawn a second transport pump. It drives
+/// direct clients while receiving and reuses an existing supervised driver.
+///
+/// Dropping this owner closes its NATS client. [`Self::close`] unsubscribes and
+/// returns the context on success. Neither operation deletes the broker
+/// consumer: durables can be bound again, and ephemerals follow the broker's
+/// inactivity policy. Use the returned context to delete a consumer explicitly.
+#[derive(Debug)]
+pub struct PushConsumer {
+    context: JetStreamContext,
+    subscription: Subscription,
+    consumer: Consumer,
+    // Installed before an asynchronous publish. Dropping next() cannot forget
+    // a flow-control request that has already left the subscription FIFO.
+    pending_flow_control: Option<String>,
+}
+
+impl PushConsumer {
+    /// Server-assigned consumer name.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        self.consumer.name()
+    }
+
+    /// Stream supplying this consumer.
+    #[must_use]
+    pub fn stream(&self) -> &str {
+        self.consumer.stream()
+    }
+
+    /// Subject subscribed before consumer creation, or discovered when binding.
+    #[must_use]
+    pub fn deliver_subject(&self) -> &str {
+        self.subscription.subject()
+    }
+
+    /// Number of returned messages still holding local acknowledgement credit.
+    #[must_use]
+    pub fn pending_acks(&self) -> usize {
+        self.consumer.pending_acks()
+    }
+
+    /// Cumulative local delivery/control-frame overflow.
+    #[must_use]
+    pub fn dropped_messages(&self) -> u64 {
+        self.subscription.dropped_messages()
+    }
+
+    /// Client for [`JsMessage::ack`], [`JsMessage::ack_confirmed`], and other
+    /// message acknowledgement operations.
+    ///
+    /// Acknowledgements keep the existing message's cancellation and
+    /// exactly-once local credit accounting. Closing this client also ends the
+    /// push subscription.
+    pub fn client(&mut self) -> &mut NatsClient {
+        &mut self.context.client
+    }
+
+    /// Receive the next data message, handling heartbeats and flow control.
+    ///
+    /// Controls are consumed in FIFO order, so a flow-control response is sent
+    /// only after preceding buffered data has been returned to the caller.
+    /// A pending response survives cancellation of this future and is retried
+    /// on the next call if the transport remains usable. Direct transport
+    /// cancellation during a partial write still fails closed, as in NATS.
+    ///
+    /// Dropping a pending receive does not consume a data message. Local
+    /// overflow is reported before queued data, and exhausted acknowledgement
+    /// credit returns immediately without draining another delivery. `None`
+    /// means the subscription has closed and its buffered events are drained.
+    pub async fn next(&mut self, cx: &Cx) -> Result<Option<JsMessage>, PushConsumerError> {
+        push_checkpoint(cx)?;
+        let mut control_streak = 0usize;
+        loop {
+            if let Some(reply) = self.pending_flow_control.as_deref() {
+                self.context.client.publish(cx, reply, b"").await?;
+                self.pending_flow_control = None;
+            }
+            if !self.consumer.can_accept_message() {
+                return Err(PushConsumerError::PendingAcknowledgements {
+                    limit: self.consumer.max_ack_pending,
+                });
+            }
+
+            let event = self
+                .context
+                .client
+                .next_subscription_event(cx, &mut self.subscription)
+                .await?;
+            match event {
+                Some(SubscriptionEvent::Lagged { dropped }) => {
+                    return Err(PushConsumerError::Lagged { dropped });
+                }
+                Some(SubscriptionEvent::Message(message)) => {
+                    if let Some(control) = push_control(&message)? {
+                        if let PushControl::Reply(reply) = control {
+                            self.pending_flow_control = Some(reply);
+                        }
+                    } else {
+                        return self.admit_message(message).map(Some).map_err(Into::into);
+                    }
+                }
+                None => return Ok(None),
+            }
+
+            control_streak += 1;
+            if control_streak == 32 {
+                // Bound work per poll even when the broker floods heartbeats.
+                crate::runtime::yield_now().await;
+                control_streak = 0;
+                push_checkpoint(cx)?;
+            }
+        }
+    }
+
+    fn admit_message(&self, message: Message) -> Result<JsMessage, JsError> {
+        let reply = message.reply_to.as_deref().unwrap_or_default();
+        validate_nats_publish_subject(reply, "push ACK reply")
+            .map_err(|error| JsError::ParseError(error.to_string()))?;
+        let parts: Vec<_> = reply.split('.').collect();
+        // These are the server's v1 and v2 ACK formats. Stream/consumer names
+        // cannot contain dots. Reject deliveries for another consumer sharing
+        // the subject, instead of acknowledging them under this owner's credit.
+        let counters = if parts.starts_with(&["$JS", "ACK"]) && parts.len() == 9 {
+            (parts[2] == self.stream() && parts[3] == self.name()).then_some(&parts[4..9])
+        } else if parts.starts_with(&["$JS", "ACK"]) && parts.len() >= 12 {
+            (parts[4] == self.stream() && parts[5] == self.name()).then_some(&parts[6..11])
+        } else {
+            None
+        };
+        let Some(counters) = counters else {
+            return Err(JsError::ParseError(
+                "push delivery has missing, malformed, or foreign ACK metadata".to_string(),
+            ));
+        };
+        if counters[0].parse::<u32>().is_err()
+            || counters[1].parse::<u64>().is_err()
+            || counters[2].parse::<u64>().is_err()
+            || counters[3].parse::<i64>().is_err()
+            || counters[4].parse::<u64>().is_err()
+        {
+            return Err(JsError::ParseError("invalid push ACK counters".to_string()));
+        }
+        let message = Consumer::parse_js_message(message, None)
+            .ok_or_else(|| JsError::ParseError("invalid push ACK counters".to_string()))?;
+        // Attach credit only after admission. A rejected or malformed message
+        // must never release a slot owned by another returned message.
+        if !self.consumer.increment_pending() {
+            return Err(JsError::InvalidConfig(
+                "push acknowledgement credit changed during exclusive receive".to_string(),
+            ));
+        }
+        let mut message = message;
+        message.pending_acks = Some(Arc::clone(&self.consumer.pending_acks));
+        Ok(message)
+    }
+
+    /// Unsubscribe and recover the context, preserving the server consumer.
+    ///
+    /// Queued deliveries are discarded locally without acknowledgement.
+    /// Outstanding `JsMessage` values can still be acknowledged through the
+    /// returned context. On failure or cancellation this consuming operation
+    /// closes the client; a partially written unsubscribe cannot be reused.
+    pub async fn close(mut self, cx: &Cx) -> Result<JetStreamContext, JsError> {
+        self.context
+            .client
+            .unsubscribe(cx, self.subscription.sid())
+            .await?;
+        Ok(self.context)
+    }
+}
+
+#[derive(Debug)]
+struct PushConsumerInfo {
+    name: String,
+    deliver_subject: String,
+    max_ack_pending: usize,
+    flow_control: bool,
+    idle_heartbeat: u64,
+}
+
+impl PushConsumerInfo {
+    fn parse(
+        payload: &[u8],
+        stream: &str,
+        expected_name: Option<&str>,
+        options: &PushConsumerOptions,
+    ) -> Result<Self, JsError> {
+        let json = std::str::from_utf8(payload)
+            .map_err(|_| JsError::ParseError("non-UTF-8 push consumer info".to_string()))?;
+        if has_json_api_error(json) {
+            return Err(JetStreamContext::parse_api_error(json));
+        }
+        let config = push_json_value(json, "config")?
+            .and_then(json_object_prefix)
+            .ok_or_else(|| JsError::ParseError("missing push consumer config".to_string()))?;
+        let name = push_json_string(json, "name")?
+            .ok_or_else(|| JsError::ParseError("missing push consumer name".to_string()))?;
+        ConsumerConfig::validate_consumer_name("name", Some(&name))?;
+        if expected_name.is_some_and(|expected| expected != name)
+            || push_json_string(json, "stream_name")?.as_deref() != Some(stream)
+        {
+            return Err(JsError::ParseError(
+                "push consumer info has a different stream or consumer identity".to_string(),
+            ));
+        }
+        if push_json_string(config, "ack_policy")?.as_deref() != Some("explicit") {
+            return Err(JsError::InvalidConfig(
+                "owned push consumers require explicit acknowledgement".to_string(),
+            ));
+        }
+        if push_json_string(config, "deliver_group")?.is_some_and(|group| !group.is_empty())
+        {
+            return Err(JsError::InvalidConfig(
+                "owned push consumers do not support queue delivery groups".to_string(),
+            ));
+        }
+        let deliver_subject = push_json_string(config, "deliver_subject")?
+            .ok_or_else(|| JsError::InvalidConfig("consumer is not a push consumer".to_string()))?;
+        validate_nats_publish_subject(&deliver_subject, "deliver_subject")
+            .map_err(|error| JsError::InvalidConfig(error.to_string()))?;
+        let max_ack_pending = options.pending_limit(
+            push_json_i64(config, "max_ack_pending")?
+                .ok_or_else(|| JsError::ParseError("missing push max_ack_pending".to_string()))?,
+        )?;
+        let flow_control = push_json_bool(config, "flow_control")?.unwrap_or(false);
+        let idle_heartbeat = u64::try_from(
+            push_json_i64(config, "idle_heartbeat")?.unwrap_or(0),
+        )
+        .map_err(|_| JsError::ParseError("invalid push idle_heartbeat".to_string()))?;
+        if (flow_control && idle_heartbeat == 0)
+            || (idle_heartbeat > 0 && idle_heartbeat < 100_000_000)
+        {
+            return Err(JsError::InvalidConfig(
+                "push flow control requires a valid heartbeat".to_string(),
+            ));
+        }
+        Ok(Self {
+            name,
+            deliver_subject,
+            max_ack_pending,
+            flow_control,
+            idle_heartbeat,
+        })
+    }
+
+    fn into_consumer(self, stream: &str, prefix: String) -> Consumer {
+        Consumer {
+            stream: stream.to_string(),
+            name: self.name,
+            prefix,
+            pending_acks: Arc::new(AtomicUsize::new(0)),
+            max_ack_pending: self.max_ack_pending,
+            pull_rate_limiter: PullRateLimiter::new(),
+        }
+    }
+}
+
+// Consumer-info identity and config fields must come from their containing
+// object, not from nested metadata. Legacy parsers retain their existing
+// recursive lookup; this stricter accessor is local to the new push API.
+fn push_json_value<'a>(json: &'a str, key: &str) -> Result<Option<&'a str>, JsError> {
+    let malformed = || JsError::ParseError("invalid push consumer info object".to_string());
+    let json = json.trim();
+    if !json.starts_with('{') {
+        return Err(malformed());
+    }
+    let bytes = json.as_bytes();
+    let mut depth = 0usize;
+    let mut offset = 0usize;
+    let mut value = None;
+    while offset < bytes.len() {
+        match bytes[offset] {
+            b'"' => {
+                let (matches, after) =
+                    scan_json_string_literal(json, offset, key).ok_or_else(malformed)?;
+                if depth == 1
+                    && matches
+                    && let Some(rest) = json[after..].trim_start().strip_prefix(':')
+                {
+                    if value.is_some() {
+                        return Err(JsError::ParseError(format!(
+                            "duplicate push consumer info field: {key}"
+                        )));
+                    }
+                    value = Some(rest.trim_start());
+                }
+                offset = after;
+            }
+            b'{' | b'[' => {
+                depth = depth.checked_add(1).ok_or_else(malformed)?;
+                offset += 1;
+            }
+            b'}' | b']' => {
+                depth = depth.checked_sub(1).ok_or_else(malformed)?;
+                offset += 1;
+                if depth == 0 {
+                    return if offset == bytes.len() {
+                        Ok(value)
+                    } else {
+                        Err(malformed())
+                    };
+                }
+            }
+            _ => offset += 1,
+        }
+    }
+    Err(malformed())
+}
+
+fn push_json_string(json: &str, key: &str) -> Result<Option<String>, JsError> {
+    push_json_value(json, key)?
+        .map(|value| {
+            parse_json_string_literal(value)
+                .map(|(value, _)| value)
+                .ok_or_else(|| JsError::ParseError(format!("invalid push string: {key}")))
+        })
+        .transpose()
+}
+
+fn push_json_i64(json: &str, key: &str) -> Result<Option<i64>, JsError> {
+    push_json_value(json, key)?
+        .map(|value| {
+            value
+                .split([',', '}', ']'])
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .parse()
+                .map_err(|_| JsError::ParseError(format!("invalid push integer: {key}")))
+        })
+        .transpose()
+}
+
+fn push_json_bool(json: &str, key: &str) -> Result<Option<bool>, JsError> {
+    push_json_value(json, key)?
+        .map(|value| {
+            match value
+                .split([',', '}', ']'])
+                .next()
+                .unwrap_or_default()
+                .trim()
+            {
+                "true" => Ok(true),
+                "false" => Ok(false),
+                _ => Err(JsError::ParseError(format!("invalid push boolean: {key}"))),
+            }
+        })
+        .transpose()
+}
+
+enum PushControl {
+    Heartbeat,
+    Reply(String),
+}
+
+fn push_checkpoint(cx: &Cx) -> Result<(), JsError> {
+    // Match the NATS driver's explicit-owner checkpoint without holding the
+    // temporary context across I/O or another asynchronous suspension.
+    let _owner = (!cx.has_timer()).then(|| Cx::set_current(Some(cx.clone())));
+    cx.checkpoint().map_err(|_| JsError::Nats(NatsError::Cancelled))
+}
+
+fn push_control(message: &Message) -> Result<Option<PushControl>, JsError> {
+    // A stored zero-byte user message may itself carry Status headers. Its
+    // JetStream ACK reply identifies it as data, not a transport control.
+    if !message.payload.is_empty()
+        || message
+            .reply_to
+            .as_deref()
+            .is_some_and(|reply| reply.starts_with("$JS.ACK."))
+    {
+        return Ok(None);
+    }
+    if let Some((_, error)) = super::nats::status_reply(message) {
+        return Err(error.into());
+    }
+    let Some(headers) = message.headers.as_deref() else {
+        return Ok(None);
+    };
+    let text = std::str::from_utf8(headers)
+        .map_err(|_| JsError::ParseError("non-UTF-8 push control headers".to_string()))?;
+    let mut lines = text.split("\r\n");
+    let first = lines.next().unwrap_or_default();
+    let mut status = None;
+    let mut description = None;
+    if let Some(tail) = first.strip_prefix("NATS/1.0 ") {
+        let mut parts = tail.trim().splitn(2, char::is_whitespace);
+        status = parts.next().and_then(|value| value.parse::<u16>().ok());
+        description = parts.next().map(str::trim);
+    } else if first != "NATS/1.0" {
+        return Err(JsError::ParseError("invalid push control headers".to_string()));
+    }
+    let mut stalled = None;
+    for line in lines.take_while(|line| !line.is_empty()) {
+        if let Some((name, value)) = line.split_once(':') {
+            let value = value.trim();
+            if name.eq_ignore_ascii_case("Status") {
+                status = value.parse::<u16>().ok();
+            } else if name.eq_ignore_ascii_case("Description") {
+                description = Some(value);
+            } else if name.eq_ignore_ascii_case("Nats-Consumer-Stalled") {
+                stalled = Some(value);
+            }
+        }
+    }
+    if status != Some(100) {
+        return Ok(None);
+    }
+    let description = description.unwrap_or_default();
+    let reply = if description.eq_ignore_ascii_case("Idle Heartbeat") {
+        if message.reply_to.is_some() {
+            return Err(JsError::ParseError(
+                "push heartbeat unexpectedly has a reply subject".to_string(),
+            ));
+        }
+        stalled
+    } else if description.eq_ignore_ascii_case("FlowControl Request") {
+        Some(message.reply_to.as_deref().ok_or_else(|| {
+            JsError::ParseError("push flow control is missing its reply subject".to_string())
+        })?)
+    } else {
+        return Err(JsError::ParseError("unknown push status 100 control".to_string()));
+    };
+    if let Some(reply) = reply {
+        validate_nats_publish_subject(reply, "flow-control reply")
+            .map_err(|error| JsError::ParseError(error.to_string()))?;
+        Ok(Some(PushControl::Reply(reply.to_string())))
+    } else {
+        Ok(Some(PushControl::Heartbeat))
     }
 }
 
@@ -3528,7 +4261,10 @@ fn scan_json_string_literal(json: &str, quote_start: usize, key: &str) -> Option
 }
 
 fn extract_json_object<'a>(json: &'a str, key: &str) -> Option<&'a str> {
-    let rest = json_value_after_key(json, key)?;
+    json_object_prefix(json_value_after_key(json, key)?)
+}
+
+fn json_object_prefix(rest: &str) -> Option<&str> {
     if !rest.starts_with('{') {
         return None;
     }
