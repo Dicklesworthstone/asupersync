@@ -855,6 +855,38 @@ fn runtime_with_blocked_worker() -> asupersync::runtime::Runtime {
 }
 
 #[test]
+fn root_drain_times_out_waiting_for_current_thread_worker_and_can_retry() {
+    use asupersync::runtime::RootDrainOutcome;
+
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build runtime");
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    runtime.handle().spawn(async move {
+        started_tx.send(()).expect("signal task start");
+        release_rx.recv().expect("release the background poll");
+    });
+    started_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("background worker is inside poll");
+
+    // Keep the background poll blocked until the borrowed drain has returned.
+    // A forgotten handover request would later park the worker on an offer
+    // no caller will claim, preventing the retry from draining the root.
+    let owner = runtime.clone();
+    let result = bounded(Duration::from_secs(5), move || {
+        owner.drain_root_region(Duration::from_millis(50))
+    });
+    release_tx.send(()).expect("allow worker to resume");
+    assert_eq!(result, Some(RootDrainOutcome::TimedOut));
+    assert_eq!(
+        runtime.drain_root_region(Duration::from_secs(5)),
+        RootDrainOutcome::Quiescent
+    );
+}
+
+#[test]
 fn shutdown_timeout_returns_false_within_bound_for_blocked_worker() {
     let outcome = bounded(Duration::from_secs(10), || {
         let runtime = runtime_with_blocked_worker();

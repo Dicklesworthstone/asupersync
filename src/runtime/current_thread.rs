@@ -371,7 +371,11 @@ impl CurrentThreadDriver {
     /// thread, or returns `None` when it cannot be borrowed (the background
     /// thread itself, a concurrent borrower, a refused handover, or
     /// shutdown).
-    fn acquire(&self, scheduler: &ThreeLaneScheduler) -> Option<Box<ThreeLaneWorker>> {
+    fn acquire(
+        &self,
+        scheduler: &ThreeLaneScheduler,
+        wait_bound: Option<(Instant, Duration)>,
+    ) -> Option<Box<ThreeLaneWorker>> {
         if self.on_background_thread() {
             return None;
         }
@@ -413,10 +417,25 @@ impl CurrentThreadDriver {
                     return None;
                 }
             }
-            slot = self
-                .changed
-                .wait(slot)
-                .unwrap_or_else(PoisonError::into_inner);
+            slot = if let Some((started, bound)) = wait_bound {
+                let remaining = bound.saturating_sub(started.elapsed());
+                if remaining.is_zero() {
+                    // Only our own Requested slot reaches this wait. Withdraw
+                    // it under the mutex, before the background worker can
+                    // publish an offer and park waiting for a borrower.
+                    *slot = WorkerSlot::Background;
+                    self.handover_requested.store(false, Ordering::Release);
+                    return None;
+                }
+                self.changed
+                    .wait_timeout(slot, remaining)
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .0
+            } else {
+                self.changed
+                    .wait(slot)
+                    .unwrap_or_else(PoisonError::into_inner)
+            };
         }
     }
 
@@ -482,7 +501,7 @@ impl CurrentThreadDriver {
             // A task of this runtime is being polled: its worker is busy.
             return None;
         }
-        let worker = self.acquire(scheduler)?;
+        let worker = self.acquire(scheduler, None)?;
         Some(WorkerLoan {
             driver: self,
             worker: Some(worker),
@@ -539,7 +558,7 @@ impl CurrentThreadDriver {
         if self.worker_active_on_this_thread() {
             return None;
         }
-        let worker = self.acquire(scheduler)?;
+        let worker = self.acquire(scheduler, Some((started, bound)))?;
         let mut loan = WorkerLoan {
             driver: self,
             worker: Some(worker),
