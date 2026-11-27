@@ -979,3 +979,146 @@ fn scoped_stream_map_real_channel_waits_for_descendant_cleanup() {
 fn scoped_stream_map_native_channel_waits_for_descendant_cleanup() {
     native(stream_subtree_journey);
 }
+
+async fn cancelled_input_retirement_journey(cx: Cx) {
+    use crate::stream::{ReceiverStream, StreamExt};
+
+    struct Input {
+        index: usize,
+        cleanup: Option<oneshot::Receiver<()>>,
+        drops: Arc<[AtomicUsize; 2]>,
+    }
+
+    impl Drop for Input {
+        fn drop(&mut self) {
+            self.drops[self.index].fetch_add(1, Ordering::SeqCst);
+            assert_ne!(self.index, 1, "unadmitted stream item retirement");
+        }
+    }
+
+    let seen = Arc::new(Progress::default());
+    let observe = Arc::clone(&seen);
+    let drops = Arc::new([AtomicUsize::new(0), AtomicUsize::new(0)]);
+    let mapped = Arc::new(AtomicUsize::new(0));
+    let mapper_calls = Arc::clone(&mapped);
+    let (sender, _receiver) = mpsc::channel(1);
+    let send = sender.clone();
+    let (release, cleanup) = oneshot::channel();
+    let (inputs, source) = mpsc::channel(1);
+    assert!(
+        inputs
+            .try_send(Input {
+                index: 0,
+                cleanup: Some(cleanup),
+                drops: Arc::clone(&drops),
+            })
+            .is_ok()
+    );
+    let mut operation = cx
+        .spawn(move |owner| async move {
+            let source_owner = owner.clone();
+            let source = ReceiverStream::new(owner.clone(), source).inspect(move |item| {
+                if item.index == 1 {
+                    source_owner.cancel_with(
+                        CancelKind::User,
+                        Some("source cancelled while yielding an item"),
+                    );
+                }
+            });
+            execute_map_reduce_stream_scoped(
+                &owner,
+                limits(2, 2),
+                source,
+                move |mapper, mut item| {
+                    mapper_calls.fetch_add(1, Ordering::SeqCst);
+                    let seen = Arc::clone(&observe);
+                    let sender = send.clone();
+                    async move {
+                        assert_eq!(item.index, 0, "cancelled item must not enter a mapper");
+                        let nested = mapper
+                            .open_child_region(ChildRegionSpec::inherit())
+                            .await
+                            .unwrap();
+                        let cleanup = item.cleanup.take().unwrap();
+                        let mut descendant = nested
+                            .cx()
+                            .spawn(move |child| {
+                                held_descendant(child, sender, seen, cleanup, false)
+                            })
+                            .unwrap();
+                        // This join needs the operation's whole-subtree
+                        // cancellation before its asynchronous cleanup can end.
+                        let reason = descendant.join(&mapper).await.unwrap();
+                        drop(nested);
+                        Outcome::<usize, ()>::Cancelled(reason)
+                    }
+                },
+                |left, right| left + right,
+            )
+            .await
+            .unwrap()
+        })
+        .unwrap();
+    seen.wait(|state| state.parked.load(Ordering::Acquire))
+        .await;
+    assert!(
+        inputs
+            .try_send(Input {
+                index: 1,
+                cleanup: None,
+                drops: Arc::clone(&drops),
+            })
+            .is_ok()
+    );
+    drop(inputs);
+    seen.wait(|state| state.cleaning.load(Ordering::Acquire))
+        .await;
+    let returned_before_cleanup = operation.is_finished();
+    let cleanup_held_credit = sender.try_reserve().is_err();
+    // Release the real cleanup gate before asserting, so even a regression
+    // cannot strand the descendant while the test reports its failure.
+    release.send_blocking(()).unwrap();
+    let result = operation.join(&cx).await;
+    assert!(
+        !returned_before_cleanup,
+        "input retirement must not unwind past the operation's awaited cleanup"
+    );
+    assert!(cleanup_held_credit, "the descendant really awaited cleanup");
+    let report = result.expect("input destructor panic belongs in the execution report");
+    assert!(report.execution.outcome.is_panicked());
+    assert_eq!(report.execution.failure_index, Some(1));
+    assert_eq!(
+        report.execution.stopped_by,
+        Some((1, MapReduceStopCause::Cancelled))
+    );
+    assert_eq!(
+        (
+            report.execution.admitted,
+            report.execution.completed,
+            report.execution.reduced,
+        ),
+        (1, 1, 0)
+    );
+    let close = report.close.expect("actual operation close receipt");
+    assert!(close.cleanup_outcome.is_none());
+    assert!(close.descendant_panic.is_none());
+    assert!(report.owner_cancellation.is_some());
+    assert_eq!(mapped.load(Ordering::SeqCst), 1);
+    assert!(drops.iter().all(|count| count.load(Ordering::SeqCst) == 1));
+    assert!(seen.finished.load(Ordering::Acquire));
+    assert!(seen.retired.load(Ordering::Acquire));
+    drop(sender.try_reserve().expect("subtree cleanup returned its credit"));
+    assert!(!cx.is_cancel_requested());
+}
+
+#[test]
+fn scoped_stream_map_cancelled_input_retirement_panic_drains_subtree() {
+    let ((), report) = run_async_under_lab(0x32_3101, cancelled_input_retirement_journey);
+    assert!(report.quiescent && report.invariant_violations.is_empty());
+}
+
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn scoped_stream_map_native_cancelled_input_retirement_panic_drains_subtree() {
+    native(cancelled_input_retirement_journey);
+}
