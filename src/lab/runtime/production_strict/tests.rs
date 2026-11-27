@@ -214,7 +214,11 @@ fn checked_outcomes_agree_across_stepped_and_one_shot_replay() {
         assert_eq!(receipt.termination, termination);
         assert_eq!(lab.lab_test_passed(), expected == Severity::Ok);
         assert_eq!(receipt.passed(), expected == Severity::Ok);
-        let counts = if expected == Severity::Ok { [1, 1] } else { [0, 1] };
+        let counts = if expected == Severity::Ok {
+            [1, 1]
+        } else {
+            [0, 1]
+        };
         // Keep sibling effects paused even if a caller manually drives a step.
         stepped.runtime.step_for_test();
         one_shot.runtime.step_for_test();
@@ -223,6 +227,99 @@ fn checked_outcomes_agree_across_stepped_and_one_shot_replay() {
         stepped.drain();
         one_shot.drain();
     }
+}
+
+#[test]
+fn checked_poll_completion_refuses_early_and_late_completion_before_sibling_effects() {
+    let region = RegionId::from_arena(ArenaIndex::new(31, 2));
+    let outcomes = [0, 1]
+        .map(|ordinal| (CompactTaskId::from(source_task(ordinal)).0, Severity::Ok))
+        .into_iter()
+        .collect();
+    for (required_polls, order, expected_ready) in
+        [(1, &[0, 1, 0][..], false), (2, &[0, 1][..], true)]
+    {
+        let mut events = source_events(2, &[]);
+        for (index, &ordinal) in order.iter().enumerate() {
+            events.push(TraceEvent::poll(
+                u64::try_from(events.len()).unwrap(),
+                Time::ZERO,
+                source_task(ordinal),
+                region,
+            ));
+            if order[index + 1..].contains(&ordinal) {
+                events.push(TraceEvent::yield_task(
+                    u64::try_from(events.len()).unwrap(),
+                    Time::ZERO,
+                    source_task(ordinal),
+                    region,
+                ));
+            }
+        }
+        for ordinal in 0..2 {
+            events.push(TraceEvent::complete(
+                u64::try_from(events.len()).unwrap(),
+                Time::ZERO,
+                source_task(ordinal),
+                region,
+            ));
+        }
+        let schedule = ProductionSchedule::from_runtime_trace(&events)
+            .unwrap()
+            .with_completion_outcomes(&outcomes);
+        let expected = StrictProductionReplayTermination::PollCompletionMismatch {
+            ordinal: 0,
+            dispatch_index: 0,
+            expected_ready,
+        };
+        for stepped in [true, false] {
+            let mut fx = fixture(&[required_polls, 1]);
+            if stepped {
+                fx.runtime
+                    .replay_production_schedule(&schedule, ProductionReplayOptions::default())
+                    .unwrap();
+                fx.runtime.run_until_quiescent();
+                assert_eq!(
+                    fx.runtime.production_replay_boundary().unwrap().termination,
+                    Some(expected)
+                );
+            } else {
+                let report = fx
+                    .runtime
+                    .run_production_schedule_strict(&schedule, limits())
+                    .unwrap();
+                assert_eq!(report.termination, expected);
+                assert!(!report.passed());
+                assert_eq!(report.replay.steps_matched, 1);
+            }
+            fx.runtime.step_for_test();
+            assert_eq!(fx.counts(), [1, 0]);
+            fx.drain();
+        }
+    }
+}
+
+#[test]
+fn checked_poll_refuses_retirement_after_a_yield_without_a_finishing_poll() {
+    let region = RegionId::from_arena(ArenaIndex::new(31, 2));
+    let task = source_task(0);
+    let mut events = source_events(1, &[0]);
+    events.push(TraceEvent::yield_task(2, Time::ZERO, task, region));
+    events.push(TraceEvent::complete(3, Time::ZERO, task, region));
+    let outcomes = [(CompactTaskId::from(task).0, Severity::Ok)]
+        .into_iter()
+        .collect();
+    let schedule = ProductionSchedule::from_runtime_trace(&events)
+        .unwrap()
+        .with_completion_outcomes(&outcomes);
+    let mut fx = fixture(&[1]);
+    assert!(matches!(
+        fx.runtime
+            .run_production_schedule_strict(&schedule, limits()),
+        Err(StrictProductionReplayError::InvalidProjection { .. })
+    ));
+    assert_eq!(fx.counts(), [0]);
+    fx.drain();
 }
 
 #[test]
@@ -243,7 +340,10 @@ fn replay_outcomes_survive_diagnostic_trace_eviction() {
         .runtime
         .run_production_schedule_strict(&schedule, limits())
         .unwrap();
-    assert_eq!(report.termination, StrictProductionReplayTermination::Matched);
+    assert_eq!(
+        report.termination,
+        StrictProductionReplayTermination::Matched
+    );
     assert_eq!(fx.counts(), [1, 1]);
     assert!(report.lab.trace_len <= 1);
     fx.drain();

@@ -98,16 +98,23 @@ quiescence or the absence of pending admissions: another task may not have
 entered the recorded task set yet. Establish that boundary in the source
 workload before treating the capture as its complete execution.
 
-The capture also keeps each task's terminal outcome (Ok, Err, Cancelled or
-Panicked) beside its Complete event: `ScheduleCaptureSnapshot::terminal_outcomes()`
-lists them and `production_schedule()` carries them into the projected
-completions. `LabRuntime::run_production_schedule_strict` then compares each
-recorded task's outcome with the Lab's, and a reconstruction in which a task
-ends differently is reported as `OutcomeMismatch`, not `Matched`. The values
-tasks return are not compared; check them in the harness. A task whose future
-panicked is recorded Panicked whichever API spawned it: `RuntimeHandle::spawn`
-also re-raises the payload on its `JoinHandle`, and a state task such as a Lab
-reconstruction records Panicked too.
+Each checked capture records whether each native poll yielded or completed.
+Strict replay binds those observations to the task that was polled, including
+when other workers polled between dispatch and completion. If the reconstructed
+future returns Ready too early or stays Pending on its recorded final poll, the
+Lab stops before the next dispatch. Its `PollCompletionMismatch` identifies the
+task's spawn ordinal, the zero-based dispatch index and the expected readiness.
+A checked source with an unpaired poll result fails admission before any Lab
+task runs.
+
+The capture also stores each task's terminal severity (Ok, Err, Cancelled or
+Panicked). `ScheduleCaptureSnapshot::terminal_outcomes()` lists them and
+`production_schedule()` carries them into the projected completions. A strict
+replay stops with `OutcomeMismatch` when a task finishes with a different
+severity. Both checks apply to stepped and one-shot replay. The harness can
+compare application return values. A native task whose future panics records
+Panicked, including when `RuntimeHandle::spawn` re-raises the panic payload
+on its `JoinHandle`. The same severity is recorded for a panicking Lab task.
 
 Raw projection: a task that acts before its `Spawn` means the ring buffer
 truncated the trace (or it was filtered). `ProductionSchedule::from_runtime_trace`

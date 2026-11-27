@@ -1313,6 +1313,48 @@ fn native_ring_capture_replays_poll_order_and_channel_values() {
     }
 }
 
+/// A captured ring participant parked on its first poll. Reconstructing the
+/// tasks as immediately ready must stop before any sibling runs its body,
+/// even though all recorded and reconstructed terminal outcomes are Ok.
+#[test]
+fn checked_native_ring_detects_early_completion_before_a_sibling_poll() {
+    let (snapshot, _) = capture_ring(2, false);
+    let schedule = snapshot.production_schedule().unwrap();
+    let first = schedule.steps().next().unwrap().0;
+    let mut lab = LabRuntime::new(LabConfig::new(95).max_steps(128));
+    let region = lab.state.create_root_region(Budget::INFINITE);
+    let mut handles = Vec::new();
+    for _ in 0..RING_STAGES {
+        let (task, handle) = lab
+            .state
+            .create_task(region, Budget::INFINITE, async {})
+            .unwrap();
+        lab.scheduler.lock().schedule(task, 0);
+        handles.push(handle);
+    }
+    let report = lab
+        .run_production_schedule_strict(
+            &schedule,
+            StrictProductionReplayLimits::new(4_096, 8, 1_024, 4_096, 8),
+        )
+        .unwrap();
+    assert_eq!(
+        report.termination,
+        StrictProductionReplayTermination::PollCompletionMismatch {
+            ordinal: first,
+            dispatch_index: 0,
+            expected_ready: false,
+        }
+    );
+    assert_eq!(report.replay.steps_matched, 1);
+    for (ordinal, handle) in handles.iter().enumerate() {
+        assert_eq!(handle.is_finished(), ordinal == first);
+    }
+    let _ = lab.discard_production_replay();
+    lab.run_until_quiescent();
+    assert!(lab.is_quiescent());
+}
+
 /// br-asupersync-bi2462.8: copies of a real capture, each with one defect,
 /// are refused before the Lab runs work the capture did not record. Only
 /// the lost-interior-poll copy runs any recorded polls, and it stops at the

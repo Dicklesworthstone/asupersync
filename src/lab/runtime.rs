@@ -5338,6 +5338,12 @@ impl LabRuntime {
             replay.termination = Some(termination);
         }
 
+        if let Some(ordinal) = replay_ordinal
+            && let Some(replay) = self.production_replay.as_mut()
+        {
+            replay.observe_poll_result(ordinal, result.is_ready());
+        }
+
         // A checkpoint can win the race with the runtime-owned handle command.
         // Replay the logical RequestCancel -> acknowledgement ordering into the
         // oracle even though both TaskRecord mutations are already complete.

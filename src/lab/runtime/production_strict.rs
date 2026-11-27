@@ -130,6 +130,17 @@ pub enum StrictProductionReplayTermination {
         /// Typed difference, without exposing captured task data in diagnostics.
         reason: CancellationReplayDivergence,
     },
+    /// The task returned Ready before its final captured poll, or remained
+    /// Pending on that poll. Further dispatch stays paused. Only checked
+    /// schedules with complete terminal outcomes authorize this comparison.
+    PollCompletionMismatch {
+        /// Spawn ordinal of the task polled.
+        ordinal: usize,
+        /// Zero-based index in the source dispatch sequence.
+        dispatch_index: usize,
+        /// True when the capture expected this poll to complete the task.
+        expected_ready: bool,
+    },
     /// A task's terminal outcome differs
     /// from the outcome captured for it (br-asupersync-bi2462.8). Reported
     /// only for a schedule that [`ProductionSchedule::carries_outcomes`].
@@ -259,6 +270,8 @@ pub(super) struct ReplayTaskOutcome {
     ordinal: usize,
     expected: Severity,
     observed: Option<Severity>,
+    // Number of consumed dispatches when this task should return Ready.
+    final_dispatch: usize,
 }
 
 impl ReplayTaskOutcome {
@@ -274,6 +287,22 @@ impl ReplayTaskOutcome {
 }
 
 impl ProductionReplayState {
+    pub(super) fn observe_poll_result(&mut self, ordinal: usize, ready: bool) {
+        if let Some(outcomes) = &self.expected_outcomes {
+            let expected_ready = outcomes[ordinal].final_dispatch == self.next;
+            if ready != expected_ready {
+                self.termination.get_or_insert(
+                    StrictProductionReplayTermination::PollCompletionMismatch {
+                        ordinal,
+                        dispatch_index: self.next - 1,
+                        expected_ready,
+                    },
+                );
+                self.report.stopped = true;
+            }
+        }
+    }
+
     pub(super) fn observe_completion(&mut self, ordinal: usize, observed: Option<Severity>) {
         if let Some(outcomes) = self.expected_outcomes.as_mut() {
             let outcome = &mut outcomes[ordinal];
@@ -405,7 +434,9 @@ impl LabRuntime {
     /// outcomes, every recorded task must also end with the same outcome in
     /// the Lab. A mismatch pauses dispatch at that poll's completion and
     /// yields [`StrictProductionReplayTermination::OutcomeMismatch`]. The
-    /// comparison remains available after diagnostic trace eviction. An incomplete
+    /// comparison remains available after diagnostic trace eviction. A task returning
+    /// Ready early or Pending on its final captured poll pauses dispatch with
+    /// [`StrictProductionReplayTermination::PollCompletionMismatch`]. An incomplete
     /// receipt is not a successful replay, even if some or all recorded
     /// choices matched. A cancellation annex additionally authorizes requests
     /// at its recorded dispatch boundaries and requires the matching actual
@@ -714,6 +745,7 @@ pub(super) fn prepare_source(
                     ordinal: lookup[index].1,
                     expected: severity,
                     observed: None,
+                    final_dispatch: 0,
                 });
             }
         }
@@ -728,6 +760,7 @@ pub(super) fn prepare_source(
                 reason: "captured completions do not cover each spawn exactly once",
             });
         }
+        bind_poll_boundaries(events, &lookup, &steps, &mut expected)?;
         Some(expected)
     } else {
         None
@@ -756,6 +789,50 @@ pub(super) fn prepare_source(
             ..ReplayReport::default()
         },
     })
+}
+
+// Native workers record Yield before republishing a Pending future. A Complete
+// can follow intervening polls on other workers, so bind each settlement to
+// the open poll for that particular task. Refuse a gap or an external retirement
+// after Yield before executing the reconstructed workload.
+fn bind_poll_boundaries(
+    events: &[ReplayEvent],
+    lookup: &[(u64, usize)],
+    steps: &[(usize, u64)],
+    outcomes: &mut [ReplayTaskOutcome],
+) -> Result<(), StrictProductionReplayError> {
+    let invalid = StrictProductionReplayError::InvalidProjection {
+        reason: "checked poll lacks a unique Yield or Complete observation",
+    };
+    let mut open = reserve("outstanding task polls", outcomes.len())?;
+    open.resize(outcomes.len(), None);
+    let mut dispatches = 0;
+    for event in events {
+        match event {
+            ReplayEvent::TaskScheduled { .. } => {
+                // The same source's TaskScheduled events populated steps above.
+                let ordinal = steps[dispatches].0;
+                dispatches += 1;
+                if outcomes[ordinal].final_dispatch != 0
+                    || open[ordinal].replace(dispatches).is_some()
+                {
+                    return Err(invalid);
+                }
+            }
+            ReplayEvent::TaskYielded { task } | ReplayEvent::TaskCompleted { task, .. } => {
+                let index = lookup
+                    .binary_search_by_key(&task.0, |entry| entry.0)
+                    .map_err(|_| invalid.clone())?;
+                let ordinal = lookup[index].1;
+                let poll = open[ordinal].take().ok_or_else(|| invalid.clone())?;
+                if matches!(event, ReplayEvent::TaskCompleted { .. }) {
+                    outcomes[ordinal].final_dispatch = poll;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn prepare_cancellation(
