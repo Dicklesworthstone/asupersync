@@ -275,9 +275,8 @@ fn native_parked_wakes_replay_with_identical_terminal_values() {
 
 /// br-asupersync-bi2462.8: the capture keeps each task's terminal outcome, and
 /// a strict replay in which a task ends differently is refused. Natively both
-/// tasks return their input. In the Lab reconstruction the second task panics
-/// on it, which a state task records as Panicked. Task order, spawn count and
-/// quiescence all still match, so only the outcome comparison can catch it.
+/// tasks return their input. The Lab task that finishes first panics instead;
+/// its sibling's later completion must stay parked until explicit cleanup.
 #[test]
 fn native_capture_outcomes_refuse_terminal_outcome_drift() {
     let runtime = RuntimeBuilder::new()
@@ -329,16 +328,18 @@ fn native_capture_outcomes_refuse_terminal_outcome_drift() {
         .collect();
     assert_eq!(by_ordinal, [Some(Severity::Ok), Some(Severity::Ok)]);
 
+    let last_ordinal = schedule.steps().last().unwrap().0;
+    let divergent = 1 - last_ordinal;
     let mut lab = LabRuntime::new(LabConfig::new(95).max_steps(128));
     let region = lab.state.create_root_region(Budget::INFINITE);
     let mut lab_joins = Vec::new();
-    for value in values {
+    for (ordinal, value) in values.into_iter().enumerate() {
         let (sender, receiver) = oneshot::channel();
         let (task, join) = lab
             .state
             .create_task(region, Budget::INFINITE, async move {
                 let received = receive_input(receiver, None, Some((sender, value))).await;
-                assert_ne!(received, 29, "the reconstructed task fails on its input");
+                assert_ne!(ordinal, divergent, "the reconstructed task panicked");
                 received
             })
             .unwrap();
@@ -360,16 +361,20 @@ fn native_capture_outcomes_refuse_terminal_outcome_drift() {
             "replay": format!("{report:?}"),
         })
     );
-    assert_eq!(report.replay.steps_matched, report.replay.steps_total);
+    assert!(report.replay.steps_matched < report.replay.steps_total);
     assert_eq!(
         report.termination,
         StrictProductionReplayTermination::OutcomeMismatch {
-            ordinal: 1,
+            ordinal: divergent,
             expected: Severity::Ok,
             observed: Some(Severity::Panicked),
         }
     );
     assert!(!report.passed());
+    assert!(lab_joins[divergent].is_finished());
+    assert!(!lab_joins[last_ordinal].is_finished());
+    let _ = lab.discard_production_replay();
+    lab.run_until_quiescent();
     assert!(
         lab_joins
             .iter()

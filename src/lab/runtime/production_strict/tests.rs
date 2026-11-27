@@ -214,11 +214,39 @@ fn checked_outcomes_agree_across_stepped_and_one_shot_replay() {
         assert_eq!(receipt.termination, termination);
         assert_eq!(lab.lab_test_passed(), expected == Severity::Ok);
         assert_eq!(receipt.passed(), expected == Severity::Ok);
-        assert_eq!(stepped.counts(), [1, 1]);
-        assert_eq!(one_shot.counts(), [1, 1]);
+        let counts = if expected == Severity::Ok { [1, 1] } else { [0, 1] };
+        // Keep sibling effects paused even if a caller manually drives a step.
+        stepped.runtime.step_for_test();
+        one_shot.runtime.step_for_test();
+        assert_eq!(stepped.counts(), counts);
+        assert_eq!(one_shot.counts(), counts);
         stepped.drain();
         one_shot.drain();
     }
+}
+
+#[test]
+fn replay_outcomes_survive_diagnostic_trace_eviction() {
+    let region = RegionId::from_arena(ArenaIndex::new(31, 2));
+    let mut events = source_events(2, &[0, 1]);
+    events.push(TraceEvent::complete(4, Time::ZERO, source_task(0), region));
+    events.push(TraceEvent::complete(5, Time::ZERO, source_task(1), region));
+    let outcomes = [0, 1]
+        .map(|ordinal| (CompactTaskId::from(source_task(ordinal)).0, Severity::Ok))
+        .into_iter()
+        .collect();
+    let schedule = ProductionSchedule::from_runtime_trace(&events)
+        .unwrap()
+        .with_completion_outcomes(&outcomes);
+    let mut fx = Fixture::new(&[1, 1], LabConfig::new(71).trace_capacity(1));
+    let report = fx
+        .runtime
+        .run_production_schedule_strict(&schedule, limits())
+        .unwrap();
+    assert_eq!(report.termination, StrictProductionReplayTermination::Matched);
+    assert_eq!(fx.counts(), [1, 1]);
+    assert!(report.lab.trace_len <= 1);
+    fx.drain();
 }
 
 #[test]

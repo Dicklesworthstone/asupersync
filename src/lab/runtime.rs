@@ -1278,7 +1278,7 @@ struct ProductionReplayState {
     termination: Option<StrictProductionReplayTermination>,
     source_error: Option<StrictProductionReplayError>,
     selected: Option<usize>,
-    expected_outcomes: Option<Vec<(usize, crate::types::Severity)>>,
+    expected_outcomes: Option<Vec<production_strict::ReplayTaskOutcome>>,
     cancellation: Option<production_strict::CancellationReplay>,
 }
 
@@ -5244,9 +5244,13 @@ impl LabRuntime {
             self.notify_cancellation_oracle_task_poll(task_id);
         }
 
+        let replay_ordinal = self
+            .production_replay
+            .as_mut()
+            .and_then(|replay| replay.selected.take());
         let result = if let Some(stored) = self.state.get_stored_future(task_id) {
             if let Some(replay) = self.production_replay.as_mut()
-                && let Some(ordinal) = replay.selected.take()
+                && let Some(ordinal) = replay_ordinal
             {
                 if let Some(cancellation) = replay.cancellation.as_mut() {
                     cancellation.record_poll(ordinal);
@@ -5269,7 +5273,7 @@ impl LabRuntime {
             result
         } else {
             if let Some(replay) = self.production_replay.as_mut()
-                && let Some(ordinal) = replay.selected.take()
+                && let Some(ordinal) = replay_ordinal
             {
                 let _ = replay.diverge(
                     self.steps,
@@ -5450,15 +5454,19 @@ impl LabRuntime {
                 // create_task wraps user futures to always return Outcome::Ok(())
                 // — the real severity comes from the cancel protocol state machine.
                 self.observe_cancel_correctness(task_id);
-                let final_severity =
-                    self.state
-                        .task(task_id)
-                        .map_or(crate::types::Severity::Ok, |record| match &record.state {
-                            TaskState::Completed(outcome) => outcome.severity(),
-                            _ => crate::types::Severity::Ok,
-                        });
-                self.replay_recorder
-                    .record_task_completed(task_id, final_severity);
+                let terminal_outcome = self.state.task(task_id).and_then(|record| match &record.state {
+                    TaskState::Completed(outcome) => Some(outcome.severity()),
+                    _ => None,
+                });
+                if let Some(ordinal) = replay_ordinal
+                    && let Some(replay) = self.production_replay.as_mut()
+                {
+                    replay.observe_completion(ordinal, terminal_outcome);
+                }
+                self.replay_recorder.record_task_completed(
+                    task_id,
+                    terminal_outcome.unwrap_or(crate::types::Severity::Ok),
+                );
 
                 if let Some(monitor) = &mut self.deadline_monitor {
                     if let Some(record) = self.state.task(task_id) {

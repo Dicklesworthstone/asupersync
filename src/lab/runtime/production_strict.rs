@@ -29,7 +29,6 @@ use super::{
     LabRunReport, LabRuntime, OnReplayDivergence, ProductionReplayOptions, ProductionReplayState,
     ReplayReport,
 };
-use crate::trace::event::{TraceData, TraceEventKind};
 use crate::trace::replay::{
     CompactTaskId, ProductionCancellationEvent, ProductionCancellationPhase, ProductionSchedule,
     ReplayEvent,
@@ -131,16 +130,15 @@ pub enum StrictProductionReplayTermination {
         /// Typed difference, without exposing captured task data in diagnostics.
         reason: CancellationReplayDivergence,
     },
-    /// Order and quiescence matched, but a task's terminal outcome differs
+    /// A task's terminal outcome differs
     /// from the outcome captured for it (br-asupersync-bi2462.8). Reported
     /// only for a schedule that [`ProductionSchedule::carries_outcomes`].
     OutcomeMismatch {
-        /// Spawn ordinal of the first task whose outcome differs.
+        /// Spawn ordinal of the task whose outcome differs.
         ordinal: usize,
         /// Outcome captured in production.
         expected: Severity,
-        /// Outcome the Lab recorded; `None` when its completion is no longer
-        /// in the Lab's trace ring.
+        /// Finalized Lab outcome, or `None` if no terminal state was observed.
         observed: Option<Severity>,
     },
 }
@@ -252,6 +250,40 @@ impl CancellationReplay {
 
     fn complete(&self) -> bool {
         self.next == self.events.len()
+    }
+}
+
+/// Evidence retained by spawn ordinal independently of the diagnostic trace ring.
+#[derive(Debug)]
+pub(super) struct ReplayTaskOutcome {
+    ordinal: usize,
+    expected: Severity,
+    observed: Option<Severity>,
+}
+
+impl ReplayTaskOutcome {
+    fn mismatch(&self) -> Option<StrictProductionReplayTermination> {
+        (self.observed != Some(self.expected)).then_some(
+            StrictProductionReplayTermination::OutcomeMismatch {
+                ordinal: self.ordinal,
+                expected: self.expected,
+                observed: self.observed,
+            },
+        )
+    }
+}
+
+impl ProductionReplayState {
+    pub(super) fn observe_completion(&mut self, ordinal: usize, observed: Option<Severity>) {
+        if let Some(outcomes) = self.expected_outcomes.as_mut() {
+            let outcome = &mut outcomes[ordinal];
+            outcome.observed = observed;
+            if let Some(mismatch) = outcome.mismatch() {
+                // A cancellation mismatch in the same poll has precedence.
+                self.termination.get_or_insert(mismatch);
+                self.report.stopped = true;
+            }
+        }
     }
 }
 
@@ -371,8 +403,9 @@ impl LabRuntime {
     /// complete receipt requires exact source consumption, exact spawn count,
     /// and no live or queued work. When the schedule carries captured terminal
     /// outcomes, every recorded task must also end with the same outcome in
-    /// the Lab, or the receipt is
-    /// [`StrictProductionReplayTermination::OutcomeMismatch`]. An incomplete
+    /// the Lab. A mismatch pauses dispatch at that poll's completion and
+    /// yields [`StrictProductionReplayTermination::OutcomeMismatch`]. The
+    /// comparison remains available after diagnostic trace eviction. An incomplete
     /// receipt is not a successful replay, even if some or all recorded
     /// choices matched. A cancellation annex additionally authorizes requests
     /// at its recorded dispatch boundaries and requires the matching actual
@@ -525,38 +558,14 @@ impl LabRuntime {
         })
     }
 
-    /// Compare each captured terminal severity to the retained completion of
-    /// the lab task bound to the same spawn ordinal.
+    /// Check that every captured task supplied its own finalized outcome.
     fn replayed_outcome_mismatch(&self) -> Option<StrictProductionReplayTermination> {
-        let expected = self
-            .production_replay
+        self.production_replay
             .as_ref()?
             .expected_outcomes
-            .as_ref()?;
-        let (events, _, kept) = self.trace().snapshot_with_outcomes();
-        let kept: std::collections::BTreeMap<_, _> = kept.into_iter().collect();
-        let mut by_task = std::collections::BTreeMap::new();
-        for event in &events {
-            if event.kind == TraceEventKind::Complete
-                && let TraceData::Task { task, .. } = &event.data
-                && let Some(severity) = kept.get(&event.seq)
-            {
-                by_task.insert(CompactTaskId::from(*task).0, *severity);
-            }
-        }
-        let scheduler = self.scheduler.lock();
-        expected.iter().copied().find_map(|(ordinal, expected)| {
-            let observed = scheduler
-                .first_entry(ordinal)
-                .and_then(|task| by_task.get(&CompactTaskId::from(task).0).copied());
-            (observed != Some(expected)).then_some(
-                StrictProductionReplayTermination::OutcomeMismatch {
-                    ordinal,
-                    expected,
-                    observed,
-                },
-            )
-        })
+            .as_ref()?
+            .iter()
+            .find_map(ReplayTaskOutcome::mismatch)
     }
 }
 
@@ -701,15 +710,19 @@ pub(super) fn prepare_source(
                         reason: "invalid captured outcome",
                     },
                 )?;
-                expected.push((lookup[index].1, severity));
+                expected.push(ReplayTaskOutcome {
+                    ordinal: lookup[index].1,
+                    expected: severity,
+                    observed: None,
+                });
             }
         }
-        expected.sort_unstable_by_key(|entry| entry.0);
+        expected.sort_unstable_by_key(|entry| entry.ordinal);
         if expected.len() != spawns.len()
             || expected
                 .iter()
                 .enumerate()
-                .any(|(ordinal, entry)| entry.0 != ordinal)
+                .any(|(ordinal, entry)| entry.ordinal != ordinal)
         {
             return Err(StrictProductionReplayError::InvalidProjection {
                 reason: "captured completions do not cover each spawn exactly once",
