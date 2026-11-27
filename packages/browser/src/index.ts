@@ -8657,32 +8657,26 @@ function isBrowserBinaryValue(value: unknown): value is BrowserStorageValue {
 function normalizeBrowserArtifactRetentionPolicy(
   retention: Partial<BrowserArtifactRetentionPolicy> | undefined,
 ): BrowserArtifactRetentionPolicy {
-  let maxArtifacts = Math.max(
-    1,
-    Math.trunc(retention?.maxArtifacts ?? DEFAULT_BROWSER_ARTIFACT_RETENTION.maxArtifacts),
-  );
-  let maxTotalBytes = Math.max(
-    1024,
-    Math.trunc(retention?.maxTotalBytes ?? DEFAULT_BROWSER_ARTIFACT_RETENTION.maxTotalBytes),
-  );
-  let maxArtifactBytes = Math.max(
-    256,
-    Math.trunc(retention?.maxArtifactBytes ?? DEFAULT_BROWSER_ARTIFACT_RETENTION.maxArtifactBytes),
-  );
-  if (maxArtifactBytes > maxTotalBytes) {
-    maxArtifactBytes = maxTotalBytes;
+  function limit(
+    key: "maxArtifacts" | "maxTotalBytes" | "maxArtifactBytes",
+    minimum: number,
+  ): number {
+    const value = retention?.[key] ?? DEFAULT_BROWSER_ARTIFACT_RETENTION[key];
+    if (!Number.isFinite(value) || !Number.isSafeInteger(Math.trunc(value))) {
+      throw new RangeError(`browser artifact retention ${key} must be a finite safe numeric bound`);
+    }
+    return Math.max(minimum, Math.trunc(value));
   }
-  if (maxArtifacts < 1) {
-    maxArtifacts = 1;
+  const quotaStrategy = retention?.quotaStrategy ?? DEFAULT_BROWSER_ARTIFACT_RETENTION.quotaStrategy;
+  if (quotaStrategy !== "fail" && quotaStrategy !== "evict_oldest") {
+    throw new TypeError("browser artifact retention quotaStrategy must be fail or evict_oldest");
   }
-  if (maxTotalBytes < 1024) {
-    maxTotalBytes = 1024;
-  }
+  const maxTotalBytes = limit("maxTotalBytes", 1024);
   return {
-    maxArtifacts,
+    maxArtifacts: limit("maxArtifacts", 1),
     maxTotalBytes,
-    maxArtifactBytes,
-    quotaStrategy: retention?.quotaStrategy ?? DEFAULT_BROWSER_ARTIFACT_RETENTION.quotaStrategy,
+    maxArtifactBytes: Math.min(limit("maxArtifactBytes", 256), maxTotalBytes),
+    quotaStrategy,
   };
 }
 
@@ -9612,7 +9606,7 @@ export class BrowserArtifactStore {
     const archive: BrowserArtifactArchive = {
       schemaVersion: 1,
       namespace: this.namespace,
-      retention: this.retention,
+      retention: this.retentionPolicy(),
       artifacts,
     };
     const bytes = browserTextEncoder(this.storage.globalObject).encode(JSON.stringify(archive));

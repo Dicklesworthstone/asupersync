@@ -266,6 +266,35 @@ async function corruptStoredValue(env, store, logical = "__artifact_index__") {
 }
 
 for (const backend of ["localstorage", "indexeddb"]) {
+  test(`${backend}: artifact retention rejects unrepresentable bounds and unknown strategies`, async () => {
+    const env = await environment(backend);
+    for (const key of ["maxArtifacts", "maxArtifactBytes", "maxTotalBytes"]) {
+      for (const value of [NaN, Infinity, -Infinity, Number.MAX_SAFE_INTEGER + 1, "2"]) {
+        assert.throws(() => env.store({ [key]: value }), new RegExp(key));
+      }
+    }
+    assert.throws(() => env.store({ quotaStrategy: "unknown" }), /quotaStrategy/u);
+    const store = env.store({ maxArtifacts: 1.9, maxTotalBytes: 12, maxArtifactBytes: 3000 });
+    assert.deepEqual({ ...store.retentionPolicy() }, {
+      maxArtifacts: 1, maxTotalBytes: 1024, maxArtifactBytes: 1024, quotaStrategy: "evict_oldest",
+    });
+    const restored = env.store({}, "roundtrip");
+    await store.persistArtifact(custom("one"));
+    await restored.importArchive((await store.exportArchive()).bytes);
+    assert.deepEqual(ids(await restored.listArtifacts()), ["one"]);
+  });
+
+  test(`${backend}: editing exported archive metadata cannot change live artifact retention`, async () => {
+    const env = await environment(backend);
+    const store = env.store({ maxArtifacts: 1, quotaStrategy: "fail" });
+    await store.persistArtifact(custom("original"));
+    const exported = await store.exportArchive();
+    exported.archive.retention.maxArtifacts = 2;
+    await assert.rejects(store.persistArtifact(custom("second")), error => artifactError(error, "quota_exceeded"));
+    assert.equal(store.retentionPolicy().maxArtifacts, 1);
+    assert.deepEqual(ids(await store.listArtifacts()), ["original"]);
+  });
+
   test(`${backend}: storage.set owns accepted bytes before asynchronous host admission`, async () => {
     const env = await environment(backend);
     const storage = env.store().storage;
