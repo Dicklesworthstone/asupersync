@@ -1151,6 +1151,7 @@ fn deterministic_broker_guard() -> DeterministicBrokerTestGuard {
 #[test]
 fn broker_snapshot_update_tracks_generation_and_revocations() {
     let mut state = ConsumerState::default();
+    state.subscribed_topics.insert("orders".to_string());
     apply_broker_snapshot(
         &mut state,
         broker_snapshot_from_topic_maps(
@@ -2918,6 +2919,7 @@ fn consumer_poll_rechecks_brokerless_records_after_waiter_registration() {
 #[test]
 fn rebalance_toctou_drops_record_for_revoked_partition() {
     let mut state = ConsumerState::default();
+    state.subscribed_topics.insert("topic_a".to_string());
     // Pre-rebalance assignment.
     apply_broker_snapshot(
         &mut state,
@@ -2980,6 +2982,7 @@ fn rebalance_toctou_drops_record_for_revoked_partition() {
 #[test]
 fn rebalance_toctou_keeps_record_when_no_revocation() {
     let mut state = ConsumerState::default();
+    state.subscribed_topics.insert("topic_a".to_string());
     apply_broker_snapshot(
         &mut state,
         broker_snapshot_from_topic_maps(
@@ -3065,4 +3068,356 @@ fn timer_driver_used_when_attached() {
              attached, the now_fn closure must read from it \
              (observed: {observed}ns; expected >= 7s)"
     );
+}
+
+#[cfg(all(feature = "kafka", not(target_arch = "wasm32")))]
+mod native_subscription_publication {
+    use super::*;
+    use std::future::{Future, poll_fn};
+    use std::pin::Pin;
+    use std::task::Poll;
+
+    const OLD: &str = "subscription-old";
+    const NEXT: &str = "subscription-next";
+    const LAST: &str = "subscription-last";
+
+    fn run<F, Fut>(body: F)
+    where
+        F: FnOnce(Cx, Arc<KafkaConsumer>, Arc<BrokerOperations>) -> Fut,
+        Fut: Future<Output = ()>,
+    {
+        let cluster = rdkafka::mocking::MockCluster::new(1).unwrap();
+        for topic in [OLD, NEXT, LAST] {
+            cluster.create_topic(topic, 1, 1).unwrap();
+            nullable_native_fixture(&cluster.bootstrap_servers(), topic);
+        }
+        let config = ConsumerConfig::new(
+            vec![cluster.bootstrap_servers()],
+            "subscription-publication-group",
+        )
+        .force_real_kafka(true)
+        .enable_auto_commit(false)
+        .auto_offset_reset(AutoOffsetReset::Earliest)
+        .session_timeout(Duration::from_secs(10))
+        .with_property("group.protocol", "classic");
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .blocking_threads(1, 4)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let cx = Cx::current().unwrap();
+            let consumer = Arc::new(KafkaConsumer::new(config).unwrap());
+            consumer.subscribe(&cx, &[OLD]).await.unwrap();
+            let first = consumer
+                .poll_nullable(&cx, Duration::from_secs(30))
+                .await
+                .unwrap()
+                .expect("initial record from the native broker");
+            assert_eq!((first.topic.as_str(), first.offset), (OLD, 0));
+            assert_eq!(consumer.position(OLD, 0), Some(1));
+            let operations = Arc::clone(consumer.broker_ops.as_ref().unwrap());
+            body(cx.clone(), Arc::clone(&consumer), operations).await;
+            consumer.close(&cx).await.unwrap();
+        });
+        assert_eq!(
+            runtime.shutdown_drained(Duration::from_secs(10)).outcome,
+            crate::runtime::RootDrainOutcome::Quiescent
+        );
+        assert!(runtime.shutdown_timeout(Duration::from_secs(10)));
+    }
+
+    fn park_subscription(
+        operations: &BrokerOperations,
+    ) -> (
+        crate::channel::oneshot::Receiver<()>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let (published, wait_published) = crate::channel::oneshot::channel();
+        let (release, await_release) = std::sync::mpsc::channel();
+        *operations.after_subscribe_native.lock() = Some(BufferedRecordHook {
+            published,
+            release: await_release,
+        });
+        (wait_published, release)
+    }
+
+    async fn witnessed<F: Future + ?Sized>(
+        cx: &Cx,
+        mut operation: Pin<&mut F>,
+        reached: &mut crate::channel::oneshot::Receiver<()>,
+    ) {
+        let mut witness = Box::pin(reached.recv(cx));
+        poll_fn(|task| {
+            assert!(operation.as_mut().poll(task).is_pending());
+            witness.as_mut().poll(task)
+        })
+        .await
+        .expect("native worker reached the retained hook");
+    }
+
+    async fn retired(operations: Arc<BrokerOperations>) {
+        crate::runtime::spawn_blocking::spawn_blocking_on_thread(move || {
+            drop(operations.lock());
+        })
+        .await;
+    }
+
+    async fn native_topics(consumer: &KafkaConsumer) -> BTreeSet<String> {
+        let (native, operations) = consumer.broker_backend().unwrap();
+        crate::runtime::spawn_blocking::spawn_blocking_on_thread(move || {
+            let _guard = operations.lock();
+            let subscription = native.subscription().unwrap();
+            subscription
+                .elements()
+                .into_iter()
+                .map(|partition| partition.topic().to_string())
+                .collect()
+        })
+        .await
+    }
+
+    async fn buffer_second_record(
+        cx: &Cx,
+        consumer: &KafkaConsumer,
+        operations: &Arc<BrokerOperations>,
+    ) {
+        let (published, mut wait_published) = crate::channel::oneshot::channel();
+        let (release, await_release) = std::sync::mpsc::channel();
+        *operations.after_record_buffered.lock() = Some(BufferedRecordHook {
+            published,
+            release: await_release,
+        });
+        let mut polling = Box::pin(consumer.poll_nullable(cx, Duration::from_secs(30)));
+        witnessed(cx, polling.as_mut(), &mut wait_published).await;
+        drop(polling);
+        release.send(()).unwrap();
+        retired(Arc::clone(operations)).await;
+        let buffered = consumer.buffered_outcome.lock();
+        let record = buffered
+            .as_ref()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .record
+            .as_ref()
+            .expect("the actual native record remains retained");
+        assert_eq!((record.topic.as_str(), record.offset), (OLD, 1));
+    }
+
+    #[test]
+    fn dropped_waiter_still_publishes_the_native_subscription() {
+        run(|cx, consumer, operations| async move {
+            consumer
+                .commit_offsets(&cx, &[TopicPartitionOffset::new(OLD, 0, 1)])
+                .await
+                .unwrap();
+            let generation = consumer.rebalance_generation();
+            let (mut reached, release) = park_subscription(&operations);
+            let topics = [NEXT];
+            let mut subscribing = Box::pin(consumer.subscribe(&cx, &topics));
+            witnessed(&cx, subscribing.as_mut(), &mut reached).await;
+            assert_eq!(consumer.subscriptions(), vec![OLD.to_string()]);
+            drop(subscribing);
+            release.send(()).unwrap();
+            retired(Arc::clone(&operations)).await;
+            // No poll or group-metadata capture has reconciled state here.
+            assert_eq!(consumer.subscriptions(), vec![NEXT.to_string()]);
+            assert!(consumer.assigned_partitions().is_empty());
+            assert_eq!(consumer.position(OLD, 0), None);
+            assert_eq!(consumer.committed_offset(OLD, 0), Some(1));
+            assert_eq!(consumer.rebalance_generation(), generation + 1);
+            assert_eq!(
+                native_topics(&consumer).await,
+                BTreeSet::from([NEXT.to_string()])
+            );
+            let next = consumer
+                .poll_nullable(&cx, Duration::from_secs(30))
+                .await
+                .unwrap()
+                .expect("a record under the real new subscription");
+            assert_eq!((next.topic.as_str(), next.offset), (NEXT, 0));
+        });
+    }
+
+    #[test]
+    fn late_waiter_cannot_replace_a_newer_native_subscription() {
+        run(|cx, consumer, operations| async move {
+            let generation = consumer.rebalance_generation();
+            let (mut reached, release) = park_subscription(&operations);
+            let first_topics = [NEXT];
+            let mut first = Box::pin(consumer.subscribe(&cx, &first_topics));
+            witnessed(&cx, first.as_mut(), &mut reached).await;
+            let (attempted, mut wait_attempted) = crate::channel::oneshot::channel();
+            *operations.before_lock.lock() = Some(attempted);
+            let last_topics = [LAST];
+            let mut last = Box::pin(consumer.subscribe(&cx, &last_topics));
+            witnessed(&cx, last.as_mut(), &mut wait_attempted).await;
+            release.send(()).unwrap();
+            last.await.unwrap();
+            assert_eq!(consumer.subscriptions(), vec![LAST.to_string()]);
+            // Resume the older receipt only after the newer call has finished.
+            first.await.unwrap();
+            assert_eq!(consumer.subscriptions(), vec![LAST.to_string()]);
+            assert_eq!(consumer.rebalance_generation(), generation + 2);
+            assert_eq!(
+                native_topics(&consumer).await,
+                BTreeSet::from([LAST.to_string()])
+            );
+        });
+    }
+
+    #[test]
+    fn matching_buffered_record_refuses_before_subscription_effects() {
+        run(|cx, consumer, operations| async move {
+            let generation = consumer.rebalance_generation();
+            buffer_second_record(&cx, &consumer, &operations).await;
+            for topics in [vec![OLD], vec![OLD, NEXT], vec!["^subscription-.*"]] {
+                let error = consumer.subscribe(&cx, &topics).await.unwrap_err();
+                assert!(matches!(error, KafkaError::Config(message)
+                    if message.contains("retained record")));
+                assert_eq!(consumer.subscriptions(), vec![OLD.to_string()]);
+                assert_eq!(consumer.rebalance_generation(), generation);
+                assert_eq!(consumer.position(OLD, 0), Some(1));
+                assert_eq!(
+                    native_topics(&consumer).await,
+                    BTreeSet::from([OLD.to_string()])
+                );
+                let buffered = consumer.buffered_outcome.lock();
+                let record = buffered
+                    .as_ref()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .record
+                    .as_ref()
+                    .expect("refusal must preserve the already-fetched record");
+                assert_eq!((record.topic.as_str(), record.offset), (OLD, 1));
+            }
+            let retained = consumer
+                .poll_nullable(&cx, Duration::ZERO)
+                .await
+                .unwrap()
+                .expect("the refused subscription must not lose the record");
+            assert_eq!((retained.topic.as_str(), retained.offset), (OLD, 1));
+            assert_eq!(retained.payload.as_deref(), Some(&b""[..]));
+            consumer.subscribe(&cx, &[OLD, NEXT]).await.unwrap();
+            assert_eq!(
+                native_topics(&consumer).await,
+                BTreeSet::from([OLD.to_string(), NEXT.to_string()])
+            );
+            assert_eq!(consumer.rebalance_generation(), generation + 1);
+        });
+    }
+
+    #[test]
+    fn removed_topic_record_and_snapshot_do_not_reappear() {
+        run(|cx, consumer, operations| async move {
+            buffer_second_record(&cx, &consumer, &operations).await;
+            consumer.subscribe(&cx, &[NEXT]).await.unwrap();
+            {
+                let buffered = consumer.buffered_outcome.lock();
+                let outcome = buffered.as_ref().unwrap().as_ref().unwrap();
+                assert!(outcome.record.is_none());
+                assert!(outcome.snapshot.assigned_partitions.is_empty());
+                assert!(outcome.snapshot.positions.is_empty());
+            }
+            // Consume only the retained empty outcome, before a new native
+            // poll can mask an old snapshot resurrecting the removed topic.
+            assert!(
+                consumer
+                    .poll_nullable(&cx, Duration::ZERO)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(consumer.assigned_partitions().is_empty());
+            assert_eq!(consumer.position(OLD, 0), None);
+            let next = consumer
+                .poll_nullable(&cx, Duration::from_secs(30))
+                .await
+                .unwrap()
+                .expect("the native replacement subscription must receive data");
+            assert_eq!((next.topic.as_str(), next.offset), (NEXT, 0));
+        });
+    }
+
+    #[test]
+    fn queued_subscription_refuses_after_close_without_native_effects() {
+        run(|cx, consumer, operations| async move {
+            let (mut reached, release) = park_subscription(&operations);
+            let first_topics = [NEXT];
+            let mut first = Box::pin(consumer.subscribe(&cx, &first_topics));
+            witnessed(&cx, first.as_mut(), &mut reached).await;
+            let (attempted, mut wait_attempted) = crate::channel::oneshot::channel();
+            *operations.before_lock.lock() = Some(attempted);
+            let last_topics = [LAST];
+            let mut last = Box::pin(consumer.subscribe(&cx, &last_topics));
+            witnessed(&cx, last.as_mut(), &mut wait_attempted).await;
+            // A second native success would consume this sentinel. Its release
+            // is already available so a faulty implementation cannot hang here.
+            let (_unexpected_success, unexpected_release) = park_subscription(&operations);
+            unexpected_release.send(()).unwrap();
+            let mut closing = Box::pin(consumer.close(&cx));
+            assert!(
+                poll_fn(|task| Poll::Ready(closing.as_mut().poll(task)))
+                    .await
+                    .is_pending()
+            );
+            assert!(consumer.is_closed());
+            release.send(()).unwrap();
+            for result in [first.await, last.await] {
+                assert!(matches!(result, Err(KafkaError::Config(message))
+                    if message == "consumer is closed"));
+            }
+            closing.await.unwrap();
+            assert!(
+                operations.after_subscribe_native.lock().is_some(),
+                "a queued operation must not subscribe after close fenced admission"
+            );
+            drop(operations.after_subscribe_native.lock().take());
+            assert!(consumer.subscriptions().is_empty());
+            assert!(consumer.assigned_partitions().is_empty());
+            assert!(native_topics(&consumer).await.is_empty());
+        });
+    }
+
+    #[test]
+    fn snapshot_filter_respects_literals_and_native_pattern_authority() {
+        let mut state = ConsumerState::default();
+        state.subscribed_topics.insert(NEXT.to_string());
+        apply_broker_snapshot(
+            &mut state,
+            broker_snapshot_from_topic_maps(
+                BTreeSet::from([(OLD.to_string(), 0), (NEXT.to_string(), 0)]),
+                BTreeMap::from([
+                    ((OLD.to_string(), 0), 9),
+                    ((NEXT.to_string(), 0), 3),
+                ]),
+            ),
+        );
+        assert_eq!(
+            state.assigned_partitions,
+            BTreeSet::from([(NEXT.to_string(), 0)])
+        );
+        assert!(!state.positions.contains_key(&(OLD.to_string(), 0)));
+        assert_eq!(state.positions.get(&(NEXT.to_string(), 0)), Some(&3));
+
+        let mut patterned = ConsumerState::default();
+        patterned.subscribed_topics.insert("^orders.*".to_string());
+        let actual = ("orders-2026".to_string(), 0);
+        assert!(!patterned.subscribed_topics.contains(&actual.0));
+        assert!(subscription_may_include_topic(
+            &patterned.subscribed_topics,
+            &actual.0
+        ));
+        apply_broker_snapshot(
+            &mut patterned,
+            broker_snapshot_from_topic_maps(
+                BTreeSet::from([actual.clone()]),
+                BTreeMap::from([(actual.clone(), 7)]),
+            ),
+        );
+        assert!(patterned.assigned_partitions.contains(&actual));
+        assert_eq!(patterned.positions.get(&actual), Some(&7));
+    }
 }

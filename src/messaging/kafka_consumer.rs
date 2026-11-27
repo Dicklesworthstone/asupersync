@@ -1043,6 +1043,8 @@ struct BrokerOperations {
     after_seek_native: Mutex<Option<BufferedRecordHook>>,
     #[cfg(test)]
     after_commit_native: Mutex<Option<BufferedRecordHook>>,
+    #[cfg(test)]
+    after_subscribe_native: Mutex<Option<BufferedRecordHook>>,
 }
 
 #[cfg(all(test, feature = "kafka"))]
@@ -1631,8 +1633,22 @@ fn rebase_buffered_after_seek(
     }
 }
 
+/// Literal subscriptions can reject an old topic immediately. librdkafka also
+/// accepts patterns beginning with '^'; its own matcher remains authoritative
+/// for those patterns, whose dialect must not be approximated here.
 #[cfg(feature = "kafka")]
-fn apply_broker_snapshot(state: &mut ConsumerState, snapshot: BrokerSnapshot) {
+fn subscription_may_include_topic(topics: &BTreeSet<String>, topic: &str) -> bool {
+    topics.contains(topic) || topics.iter().any(|pattern| pattern.starts_with('^'))
+}
+
+#[cfg(feature = "kafka")]
+fn apply_broker_snapshot(state: &mut ConsumerState, mut snapshot: BrokerSnapshot) {
+    // A successful subscription change can precede its broker rebalance.
+    // Do not resurrect an explicitly unsubscribed literal topic during that
+    // interval. Pattern subscriptions retain native assignment authority.
+    snapshot.assigned_partitions.retain(|(topic, _)| {
+        subscription_may_include_topic(&state.subscribed_topics, topic)
+    });
     let previous_assignments = state.assigned_partitions.clone();
     if previous_assignments != snapshot.assigned_partitions {
         state.rebalance_generation = state.rebalance_generation.saturating_add(1);
@@ -1909,6 +1925,17 @@ impl KafkaConsumer {
     }
 
     /// Subscribe to a set of topics.
+    ///
+    /// Native subscription changes publish their topics, assignment generation,
+    /// and retained poll snapshot before the native operation retires, even if
+    /// its async waiter is dropped. Committed offsets are preserved.
+    ///
+    /// If an earlier abandoned poll retains a record for a requested topic,
+    /// this call returns a configuration error before changing the native
+    /// subscription. Poll that record first, then retry. A record for a removed
+    /// literal topic may be discarded. A requested regex pattern beginning with
+    /// '^' conservatively counts every retained record as potentially matching;
+    /// native matching remains authoritative for later pattern assignments.
     #[allow(unused_variables)]
     pub async fn subscribe(&self, cx: &Cx, topics: &[&str]) -> Result<(), KafkaError> {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
@@ -1929,14 +1956,75 @@ impl KafkaConsumer {
 
         #[cfg(feature = "kafka")]
         if let Some((consumer, broker_ops)) = self.broker_backend() {
-            let topic_list: Vec<String> = normalized.iter().cloned().collect();
+            let topics = normalized.clone();
+            let state = Arc::clone(&self.state);
+            let closed = Arc::clone(&self.closed);
+            let buffered_outcome = Arc::clone(&self.buffered_outcome);
+            let operation_cx = cx.clone();
             refuse_when_blocking_forbidden(cx)?;
-            crate::runtime::spawn_blocking::spawn_blocking_on_thread(move || {
+            let result = crate::runtime::spawn_blocking::spawn_blocking_on_thread(move || {
                 let _guard = broker_ops.lock();
-                let topic_refs: Vec<&str> = topic_list.iter().map(String::as_str).collect();
-                consumer.subscribe(&topic_refs).map_err(map_consumer_error)
+                consumer_checkpoint(&operation_cx)?;
+                {
+                    // Native polls cannot add another buffered record while
+                    // this job holds the operation lease. A concurrent waiter
+                    // may only consume the existing outcome after this check.
+                    let buffered = buffered_outcome.lock();
+                    let _state = state.lock();
+                    if closed.load(Ordering::Acquire) {
+                        return Err(KafkaError::Config("consumer is closed".to_string()));
+                    }
+                    if let Some(Ok(outcome)) = buffered.as_ref()
+                        && outcome.record.as_ref().is_some_and(|record| {
+                            subscription_may_include_topic(&topics, &record.topic)
+                        })
+                    {
+                        return Err(KafkaError::Config(
+                            "poll the retained record before resubscribing to a potentially matching topic"
+                                .to_string(),
+                        ));
+                    }
+                }
+                let topic_refs: Vec<&str> = topics.iter().map(String::as_str).collect();
+                consumer.subscribe(&topic_refs).map_err(map_consumer_error)?;
+                #[cfg(test)]
+                let hook = broker_ops.after_subscribe_native.lock().take();
+                #[cfg(test)]
+                if let Some(hook) = hook {
+                    let _ = hook.published.send_blocking(());
+                    hook.release
+                        .recv_timeout(Duration::from_secs(20))
+                        .expect("release the native-subscription witness");
+                }
+                // Match poll/rebalance's buffer -> state publication order.
+                // An old empty snapshot must not restore prior ownership, and
+                // a late async continuation must not overwrite newer topics.
+                let mut buffered = buffered_outcome.lock();
+                let mut state = state.lock();
+                if closed.load(Ordering::Acquire) {
+                    return Err(KafkaError::Config("consumer is closed".to_string()));
+                }
+                if let Some(Ok(outcome)) = buffered.as_mut() {
+                    if outcome.record.as_ref().is_some_and(|record| {
+                        !subscription_may_include_topic(&topics, &record.topic)
+                    }) {
+                        outcome.record = None;
+                    }
+                    outcome.snapshot = BrokerSnapshot::default();
+                }
+                let resubscribed = !state.subscribed_topics.is_empty();
+                state.subscribed_topics = topics;
+                state.assigned_partitions.clear();
+                state.positions.clear();
+                if resubscribed {
+                    state.rebalance_generation = state.rebalance_generation.saturating_add(1);
+                }
+                state.last_revoked_partitions.clear();
+                Ok(())
             })
-            .await?;
+            .await;
+            self.state_notify.notify_waiters();
+            return result;
         }
 
         if self.broker_operations_feature_disabled() {
