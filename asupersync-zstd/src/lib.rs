@@ -6,8 +6,9 @@
 //!
 //! Work in progress, tracked by `br-asupersync-t1fblr`. The decoder is
 //! complete for frames without dictionaries. The encoder stores
-//! ([`Level::Store`]) or compresses with a greedy hash match finder,
-//! Huffman literals and FSE-coded sequences ([`Level::Fast`]).
+//! ([`Level::Store`]) or compresses with greedy matching ([`Level::Fast`])
+//! or double-hash matching with one-byte lookahead ([`Level::DoubleFast`]).
+//! Both matchers emit Huffman literals and FSE-coded sequences.
 //! [`StreamEncoder`] and [`StreamDecoder`] accept fragmented input and output
 //! with bounded buffering. [`EncodeTransfer`] and [`DecodeTransfer`] drive
 //! nonblocking I/O callbacks while retaining progress across cancelled waits.

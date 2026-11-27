@@ -1,8 +1,10 @@
-//! Encode and decode throughput of `Level::Fast` on deterministic inputs,
-//! against libzstd at level 1 in the same process (libzstd is a
+//! Encode and decode throughput on deterministic inputs, against
+//! libzstd in the same process (libzstd is a
 //! dev-dependency, the differential oracle of br-asupersync-t1fblr.11).
 //!
 //! Run with `cargo run --release -p asupersync-zstd --example throughput`.
+//! The default compares Fast with libzstd level 1. Append `-- double-fast`
+//! to compare DoubleFast with libzstd level 3.
 //! Each comparison times this crate and libzstd in alternating passes for
 //! about a second and reports the best pass of each in MB/s (10^6 bytes of
 //! input per second). The ratio is the median, over adjacent pairs of passes,
@@ -105,7 +107,12 @@ fn best_pair(bytes: usize, mut ours: impl FnMut(), mut theirs: impl FnMut()) -> 
 }
 
 fn main() {
-    let params = EncodeParams::new(Level::Fast).with_checksum(false);
+    let (level, reference_level) = match std::env::args().nth(1).as_deref() {
+        None | Some("fast") => (Level::Fast, 1),
+        Some("double-fast") => (Level::DoubleFast, 3),
+        Some(other) => panic!("unknown strategy {other}, expected fast or double-fast"),
+    };
+    let params = EncodeParams::new(level).with_checksum(false);
     let inputs = [
         ("text", text(LEN)),
         ("mixed", mixed(LEN)),
@@ -114,7 +121,7 @@ fn main() {
     ];
     println!(
         "MB/s of input (best pass); x = median over adjacent pass pairs of this crate's speed \
-         / libzstd -1's."
+         / libzstd level {reference_level}'s ({level:?})."
     );
     println!(
         "round input   ratio ours/lib | encode ours     lib     x | decode ours     lib     x \
@@ -124,7 +131,7 @@ fn main() {
         for (name, data) in &inputs {
             let limits = DecodeLimits::new(data.len());
             let ours = encode_all(data, &params);
-            let theirs = zstd::bulk::compress(data, 1).expect("libzstd compress");
+            let theirs = zstd::bulk::compress(data, reference_level).expect("libzstd compress");
             for frame in [&ours, &theirs] {
                 assert_eq!(
                     decode_all(frame, &limits).as_deref(),
@@ -143,7 +150,7 @@ fn main() {
                     black_box(encode_all(black_box(data), &params));
                 },
                 || {
-                    black_box(zstd::bulk::compress(black_box(data), 1).ok());
+                    black_box(zstd::bulk::compress(black_box(data), reference_level).ok());
                 },
             );
             let decode = best_pair(

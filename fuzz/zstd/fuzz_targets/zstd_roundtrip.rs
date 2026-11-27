@@ -25,10 +25,10 @@ fuzz_target!(|data: &[u8]| {
     if input.len() > MAX_INPUT {
         return;
     }
-    let level = if selector & 1 == 0 {
-        Level::Store
-    } else {
-        Level::Fast
+    let level = match selector % 3 {
+        0 => Level::Store,
+        1 => Level::Fast,
+        _ => Level::DoubleFast,
     };
     let params = EncodeParams::new(level).with_checksum(selector & 2 != 0);
     let frame = encode_all(input, &params);

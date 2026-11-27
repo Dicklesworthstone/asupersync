@@ -3,7 +3,7 @@
 //! br-asupersync-t1fblr.19-.21).
 
 use crate::literals::encode_literals;
-use crate::matcher::{Match, MatchFinder};
+use crate::matcher::{DoubleFastFinder, Match, MatchFinder};
 use crate::sequences::{EncodedSequence, encode_sequences, offset_value};
 use crate::xxhash64::xxh64;
 
@@ -34,6 +34,9 @@ pub enum Level {
     /// literals and FSE-coded sequences. A block that does not shrink is
     /// stored raw.
     Fast,
+    /// Two hash tables search for long and short matches over a 1 MiB
+    /// window. One-byte lookahead can skip a short match for a longer one.
+    DoubleFast,
 }
 
 /// Encoder settings, built with [`Self::new`] and the `with_*` methods.
@@ -94,8 +97,16 @@ pub fn encode_into(input: &[u8], params: &EncodeParams, out: &mut Vec<u8>) {
             store_blocks(input, out);
         }
         Level::Fast => {
-            write_frame_header(input.len(), params.checksum, WINDOW_1_MIB, out);
-            fast_blocks(input, out);
+            let mut finder = MatchFinder::new(input.len());
+            compressed_blocks(input, out, params.checksum, |start, end, floor, matches| {
+                finder.find(input, start, end, floor, matches);
+            });
+        }
+        Level::DoubleFast => {
+            let mut finder = DoubleFastFinder::new();
+            compressed_blocks(input, out, params.checksum, |start, end, floor, matches| {
+                finder.find(input, start, end, floor, matches);
+            });
         }
     }
     if params.checksum {
@@ -158,8 +169,13 @@ fn store_blocks(input: &[u8], out: &mut Vec<u8>) {
 /// Compressed blocks of at most [`MAX_BLOCK`] bytes; a block whose
 /// compressed form is not smaller is stored raw (and leaves the repeat
 /// offsets as they were, as the decoder does).
-fn fast_blocks(input: &[u8], out: &mut Vec<u8>) {
-    let mut finder = MatchFinder::new(input.len());
+fn compressed_blocks(
+    input: &[u8],
+    out: &mut Vec<u8>,
+    checksum: bool,
+    mut find: impl FnMut(usize, usize, usize, &mut Vec<Match>),
+) {
+    write_frame_header(input.len(), checksum, WINDOW_1_MIB, out);
     let mut matches = Vec::new();
     let mut body = Vec::new();
     let mut rep = [1, 4, 8];
@@ -168,7 +184,8 @@ fn fast_blocks(input: &[u8], out: &mut Vec<u8>) {
         let end = (pos + MAX_BLOCK).min(input.len());
         let last = end >= input.len();
         let compressed = if end > pos {
-            compress_block(input, pos, end, rep, &mut finder, &mut matches, &mut body)
+            find(pos, end, end.saturating_sub(FAST_WINDOW), &mut matches);
+            compress_block(input, pos, end, rep, &matches, &mut body)
         } else {
             None
         };
@@ -197,16 +214,14 @@ fn compress_block(
     start: usize,
     end: usize,
     mut rep: [usize; 3],
-    finder: &mut MatchFinder,
-    matches: &mut Vec<Match>,
+    matches: &[Match],
     body: &mut Vec<u8>,
 ) -> Option<[usize; 3]> {
     body.clear();
-    finder.find(src, start, end, end.saturating_sub(FAST_WINDOW), matches);
     let mut literals = Vec::with_capacity(end - start);
     let mut sequences = Vec::with_capacity(matches.len());
     let mut pos = start;
-    for found in &*matches {
+    for found in matches {
         literals.extend_from_slice(&src[pos..pos + found.literals_length]);
         pos += found.literals_length + found.length;
         let (value, next_rep) = offset_value(found.offset, found.literals_length, rep);

@@ -172,9 +172,108 @@ impl MatchFinder {
     }
 }
 
+/// Two independent tables keep a short-prefix collision from evicting a
+/// useful long match. Both contain absolute positions in the current frame.
+pub(crate) struct DoubleFastFinder {
+    short: Vec<usize>,
+    long: Vec<usize>,
+}
+
+impl DoubleFastFinder {
+    const SHORT: usize = 5;
+
+    pub(crate) fn new() -> Self {
+        Self {
+            short: vec![EMPTY; 1 << HASH_LOG],
+            long: vec![EMPTY; 1 << HASH_LOG],
+        }
+    }
+
+    fn long_slot(src: &[u8], pos: usize, end: usize) -> Option<usize> {
+        let word = load(&src[..end], pos)?;
+        Some((word.wrapping_mul(PRIME) >> (u64::BITS - HASH_LOG)) as usize)
+    }
+
+    fn remember(&mut self, src: &[u8], pos: usize, end: usize) {
+        if end - pos >= Self::SHORT {
+            self.short[hash(src, pos, Self::SHORT)] = pos;
+            if let Some(slot) = Self::long_slot(src, pos, end) {
+                self.long[slot] = pos;
+            }
+        }
+    }
+
+    pub(crate) fn find(
+        &mut self,
+        src: &[u8],
+        start: usize,
+        end: usize,
+        window_start: usize,
+        matches: &mut Vec<Match>,
+    ) {
+        matches.clear();
+        let mut anchor = start;
+        let mut pos = start;
+        let mut last_offset = 0;
+        while end - pos >= Self::SHORT {
+            let long_slot = Self::long_slot(src, pos, end);
+            let short_slot = hash(src, pos, Self::SHORT);
+            let short = std::mem::replace(&mut self.short[short_slot], pos);
+            let long = long_slot.map(|slot| std::mem::replace(&mut self.long[slot], pos));
+            let repeat = (pos > anchor && last_offset != 0).then(|| pos - last_offset);
+            let candidate = repeat
+                .into_iter()
+                .chain(long)
+                .chain([short])
+                .find(|&at| at < pos && at >= window_start && same(src, at, pos, Self::SHORT));
+            let Some(mut at) = candidate else {
+                // Thin out probes only after a sustained run of misses.
+                pos = (pos + 1 + ((pos - anchor) >> 9)).min(end);
+                continue;
+            };
+            let mut len = Self::SHORT
+                + common_prefix(&src[at + Self::SHORT..end], &src[pos + Self::SHORT..end]);
+            // One literal can buy a much longer sequence on the next byte.
+            // Only probe after a short match, which bounds repeated scanning.
+            if len < 8
+                && let Some(slot) = Self::long_slot(src, pos + 1, end)
+            {
+                let next = self.long[slot];
+                if next <= pos
+                    && next >= window_start
+                    && src[next..next + 8] == src[pos + 1..pos + 9]
+                {
+                    pos += 1;
+                    at = next;
+                    len = 8 + common_prefix(&src[at + 8..end], &src[pos + 8..end]);
+                }
+            }
+            while pos > anchor && at > window_start && src[pos - 1] == src[at - 1] {
+                pos -= 1;
+                at -= 1;
+                len += 1;
+            }
+            last_offset = pos - at;
+            matches.push(Match {
+                literals_length: pos - anchor,
+                offset: last_offset,
+                length: len,
+            });
+            // Keep both ends of a long sequence searchable without rehashing
+            // an entire block of already matched bytes.
+            for inside in (pos + 1..pos + len.min(64)).step_by(3) {
+                self.remember(src, inside, end);
+            }
+            self.remember(src, pos + len - 2, end);
+            pos += len;
+            anchor = pos;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Match, MatchFinder, common_prefix, key, same};
+    use super::{DoubleFastFinder, Match, MatchFinder, common_prefix, key, same};
 
     /// The one-load key and comparison equal the byte-wise ones, including
     /// positions too close to the end for an 8-byte load.
@@ -261,6 +360,33 @@ mod tests {
                 "a repetitive text has matches"
             );
             replay(&text, start, end, window_start, &matches);
+        }
+    }
+
+    #[test]
+    fn double_fast_looks_past_a_short_match_for_a_longer_sequence() {
+        let src = b"BCDEFGHIJKL@ABCDE!#ABCDEFGHIJKL";
+        let mut matches = Vec::new();
+        DoubleFastFinder::new().find(src, 0, src.len(), 0, &mut matches);
+        replay(src, 0, src.len(), 0, &matches);
+        // "ABCDE" has a recent short hit, but the following "BCDEFGHIJKL"
+        // is longer and comes from the start of the frame.
+        assert_eq!(matches.last().unwrap().length, 11);
+        assert_eq!(matches.last().unwrap().offset, src.len() - 11);
+    }
+
+    #[test]
+    fn double_fast_respects_window_and_block_boundaries() {
+        let src = b"abcde-LONG-prefix!abcde?abcde-LONG-prefix!abcde-LONG-prefix";
+        let mut finder = DoubleFastFinder::new();
+        let mut matches = Vec::new();
+        for (start, end, floor) in [(0, 24, 0), (24, 42, 0), (42, src.len(), 30)] {
+            finder.find(src, start, end, floor, &mut matches);
+            replay(src, start, end, floor, &matches);
+            if start == 24 {
+                assert_eq!(matches[0].length, end - start);
+                assert_eq!(matches[0].offset, 24);
+            }
         }
     }
 

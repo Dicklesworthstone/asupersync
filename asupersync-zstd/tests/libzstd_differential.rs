@@ -104,9 +104,18 @@ fn inputs() -> Vec<(String, Vec<u8>)> {
 
 #[test]
 fn libzstd_decodes_every_fast_frame() {
+    check_encoded_frames(Level::Fast);
+}
+
+#[test]
+fn libzstd_decodes_every_double_fast_frame() {
+    check_encoded_frames(Level::DoubleFast);
+}
+
+fn check_encoded_frames(level: Level) {
     for (name, data) in inputs() {
         for checksum in [true, false] {
-            let params = EncodeParams::new(Level::Fast).with_checksum(checksum);
+            let params = EncodeParams::new(level).with_checksum(checksum);
             let frame = encode_all(&data, &params);
             let decoded = zstd::bulk::decompress(&frame, data.len().max(1))
                 .unwrap_or_else(|error| panic!("{name} (checksum {checksum}): libzstd: {error}"));
