@@ -297,7 +297,13 @@ impl<M> Drop for ActorCell<M> {
 /// whether it dropped cleanly. A caught payload is leaked, because dropping
 /// it can panic too.
 fn discard_contained<M>(msg: M) -> bool {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(msg))) {
+    contain_disposal(move || drop(msg))
+}
+
+/// Run one teardown action without letting its panic interrupt the remaining
+/// mailbox cleanup or replace the task's original outcome.
+pub(crate) fn contain_disposal(dispose: impl FnOnce()) -> bool {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(dispose)) {
         Ok(()) => true,
         Err(payload) => {
             forget_contained_drop_panic(payload);

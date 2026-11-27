@@ -74,7 +74,9 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use crate::actor::{ActorId, ActorState, dispatch_actor_shutdown_wakes, prepare_actor_abort};
+use crate::actor::{
+    ActorId, ActorState, contain_disposal, dispatch_actor_shutdown_wakes, prepare_actor_abort,
+};
 use crate::channel::mpsc;
 use crate::channel::oneshot;
 use crate::channel::session::{self, TrackedOneshotPermit};
@@ -806,6 +808,24 @@ enum Envelope<S: GenServer> {
     },
 }
 
+impl<S: GenServer> Envelope<S> {
+    fn discard(self) {
+        if let Self::Call {
+            request,
+            reply_permit,
+        } = self
+        {
+            // Release the caller before running the request's destructor.
+            contain_disposal(|| {
+                let _ = reply_permit.abort();
+            });
+            contain_disposal(|| drop(request));
+        } else {
+            contain_disposal(|| drop(self));
+        }
+    }
+}
+
 impl<S: GenServer> std::fmt::Debug for Envelope<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -829,6 +849,27 @@ struct GenServerCell<S: GenServer> {
 }
 
 impl<S: GenServer> GenServerCell<S> {
+    fn close_inputs(&mut self) {
+        // A rejected sender's waker can panic after the channel has closed.
+        contain_disposal(|| self.mailbox.close());
+        contain_disposal(|| self.mailbox.clear_recv_waker());
+        self.system.close();
+    }
+
+    fn next_for_drain(&mut self) -> Option<Envelope<S>> {
+        let notification = self.system.inner.lock().queue.pop_front();
+        notification
+            .map(|msg| Envelope::Info { msg })
+            .or_else(|| self.mailbox.try_recv().ok())
+    }
+
+    fn discard_pending(&mut self) {
+        self.close_inputs();
+        while let Some(envelope) = self.next_for_drain() {
+            envelope.discard();
+        }
+    }
+
     fn needs_initialization(&mut self) -> bool {
         if self.state.load() != ActorState::Stopping {
             return true;
@@ -854,12 +895,7 @@ impl<S: GenServer> Drop for GenServerCell<S> {
     /// stayed `Created` and reported itself alive forever.
     fn drop(&mut self) {
         self.state.store(ActorState::Stopped);
-        self.mailbox.close();
-        while let Ok(envelope) = self.mailbox.try_recv() {
-            if let Envelope::Call { reply_permit, .. } = envelope {
-                let _ = session::TrackedOneshotPermit::abort(reply_permit);
-            }
-        }
+        self.discard_pending();
     }
 }
 
@@ -909,6 +945,8 @@ impl<S: GenServer> SystemLane<S> {
         let waker = {
             let mut inner = self.inner.lock();
             if inner.closed {
+                drop(inner);
+                contain_disposal(|| drop(msg));
                 return;
             }
             inner.queue.push_back(msg);
@@ -956,15 +994,15 @@ impl<S: GenServer> SystemLane<S> {
         !inner.queue.is_empty()
     }
 
-    /// Stops accepting messages and returns the ones still queued.
-    fn close(&self) -> std::collections::VecDeque<S::Info> {
-        let (queue, waker) = {
+    /// Keeps pending notifications in the cell so a failed handler or a
+    /// dropped drain future can still dispose of each one independently.
+    fn close(&self) {
+        let waker = {
             let mut inner = self.inner.lock();
             inner.closed = true;
-            (std::mem::take(&mut inner.queue), inner.waker.take())
+            inner.waker.take()
         };
-        drop(waker);
-        queue
+        contain_disposal(|| drop(waker));
     }
 }
 
@@ -2189,34 +2227,19 @@ async fn run_gen_server_loop<S: GenServer>(
     // Calls during drain: reply with error (caller should not depend on drain).
     // Casts during drain: process normally if gracefully stopped, skip if aborted.
     // System messages still queued are info messages, drained first.
-    cell.mailbox.close();
-    let mut pending_system = cell.system.close();
+    cell.close_inputs();
 
     let mut drained: u64 = 0;
     let mut drain_yield_counter = 0u32;
-    while let Some(envelope) = pending_system
-        .pop_front()
-        .map(|msg| Envelope::Info { msg })
-        .or_else(|| cell.mailbox.try_recv().ok())
-    {
+    while let Some(envelope) = cell.next_for_drain() {
         match envelope {
-            Envelope::Call {
-                request: _,
-                reply_permit,
-            } => {
-                let _aborted = session::TrackedOneshotPermit::abort(reply_permit);
+            call @ Envelope::Call { .. } => {
+                call.discard();
                 cx.trace("gen_server::drain_abort_call");
             }
-            Envelope::Cast { msg } => {
-                if !is_aborted {
-                    server.handle_cast(&cx, msg).await;
-                }
-            }
-            Envelope::Info { msg } => {
-                if !is_aborted {
-                    server.handle_info(&cx, msg).await;
-                }
-            }
+            message if is_aborted => message.discard(),
+            Envelope::Cast { msg } => server.handle_cast(&cx, msg).await,
+            Envelope::Info { msg } => server.handle_info(&cx, msg).await,
         }
         drained += 1;
 
@@ -2469,21 +2492,9 @@ fn publish_server_panic<S: GenServer>(
     result_tx: oneshot::Sender<Result<S, JoinError>>,
     payload: &Box<dyn std::any::Any + Send>,
 ) -> crate::types::PanicPayload {
-    // The loop panicked before its graceful Phase-3 drain ran, so the mailbox
-    // may still hold queued `Envelope::Call` envelopes whose reply permits are
-    // armed obligations. Dropping the receiver (when `cell` drops) would drop
-    // them un-aborted, tripping a secondary `[ASUP-E101] OBLIGATION TOKEN
-    // LEAKED` panic inside the mpsc Receiver's Drop during task teardown (a
-    // double-fault into the executor drop path). Close and abort queued call
-    // permits here, mirroring the graceful drain.
-    cell.mailbox.close();
-    while let Ok(envelope) = cell.mailbox.try_recv() {
-        if let Envelope::Call { reply_permit, .. } = envelope {
-            let _ = session::TrackedOneshotPermit::abort(reply_permit);
-        }
-    }
-    // No handler runs after a panic: drop queued system messages.
-    drop(cell.system.close());
+    // Preserve the handler panic and resolve queued callers even when
+    // another buffered payload panics from its destructor.
+    cell.discard_pending();
     let panic_payload =
         crate::types::PanicPayload::new(crate::cx::scope::payload_to_string(payload));
     state.store(ActorState::Stopped);

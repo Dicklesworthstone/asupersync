@@ -467,6 +467,66 @@ fn dropping_an_unrun_server_aborts_its_queued_calls() {
 }
 
 #[test]
+fn unrun_server_disposes_each_message_even_when_payload_destructors_panic() {
+    struct DropBomb(Arc<AtomicUsize>);
+    impl Drop for DropBomb {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            panic!("queued payload destructor");
+        }
+    }
+
+    struct UnrunServer;
+    impl GenServer for UnrunServer {
+        type Call = DropBomb;
+        type Reply = ();
+        type Cast = DropBomb;
+        type Info = DropBomb;
+
+        fn handle_call(
+            &mut self,
+            _cx: &Cx,
+            _request: DropBomb,
+            _reply: Reply<()>,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            unreachable!("the task is never polled")
+        }
+    }
+
+    let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
+    let region = runtime.state.create_root_region(Budget::INFINITE);
+    let cx = lab_spawn_cx(&mut runtime, region, Budget::INFINITE);
+    let scope = crate::cx::Scope::<FailFast>::new(region, Budget::INFINITE);
+    let (handle, stored) = scope
+        .spawn_gen_server(&mut runtime.state, &cx, UnrunServer, 4)
+        .expect("spawn");
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let bomb = || DropBomb(Arc::clone(&dropped));
+    handle.try_cast(bomb()).expect("queue cast");
+    handle.system.push(bomb());
+    let mut first = std::pin::pin!(handle.call(&cx, bomb()));
+    let mut second = std::pin::pin!(handle.call(&cx, bomb()));
+    let mut task_cx = Context::from_waker(Waker::noop());
+    assert!(first.as_mut().poll(&mut task_cx).is_pending());
+    assert!(second.as_mut().poll(&mut task_cx).is_pending());
+
+    drop(stored);
+    assert_eq!(handle.state.load(), ActorState::Stopped);
+    assert!(matches!(
+        first.as_mut().poll(&mut task_cx),
+        Poll::Ready(Err(CallError::NoReply))
+    ));
+    assert!(matches!(
+        second.as_mut().poll(&mut task_cx),
+        Poll::Ready(Err(CallError::NoReply))
+    ));
+    assert_eq!(dropped.load(Ordering::SeqCst), 4);
+    // A monitor retaining this lane cannot park another payload in a dead cell.
+    handle.system.push(bomb());
+    assert_eq!(dropped.load(Ordering::SeqCst), 5);
+}
+
+#[test]
 fn gen_server_spawn_and_call() {
     init_test("gen_server_spawn_and_call");
 
