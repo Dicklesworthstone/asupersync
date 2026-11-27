@@ -9950,6 +9950,25 @@ function normalizeBrowserServiceWorkerBrokerMetadata(
   return snapshot as Record<string, unknown>;
 }
 
+// Both inputs have already crossed the JSON snapshot boundary. A replay may
+// reconstruct an object's keys in a different order; array order is significant.
+function brokerMetadataEqual(left: unknown, right: unknown): boolean {
+  const pending: [unknown, unknown][] = [[left, right]];
+  while (pending.length > 0) {
+    const [a, b] = pending.pop()!;
+    if (a === b) continue;
+    if (a === null || b === null || typeof a !== "object" || typeof b !== "object"
+        || Array.isArray(a) !== Array.isArray(b)) return false;
+    const keys = Object.keys(a);
+    if (keys.length !== Object.keys(b).length) return false;
+    for (const key of keys) {
+      if (!Object.prototype.hasOwnProperty.call(b, key)) return false;
+      pending.push([(a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key]]);
+    }
+  }
+  return true;
+}
+
 function normalizeBrowserServiceWorkerBrokerLeaseEpoch(value: number): number {
   if (!Number.isSafeInteger(value) || value < 0) {
     throw new TypeError("service-worker broker lease_epoch must be a nonnegative safe integer");
@@ -10651,7 +10670,7 @@ export class BrowserServiceWorkerBrokerStore {
           const fallbackTarget = prepared.fallbackTarget ?? registration.fallbackTarget;
           const replay = existing && existing.leaseEpoch === prepared.leaseEpoch &&
             existing.fallbackTarget === fallbackTarget &&
-            JSON.stringify(existing.metadata) === JSON.stringify(prepared.metadata);
+            brokerMetadataEqual(existing.metadata, prepared.metadata);
           if (replay && existing.completionRevision !== undefined) {
             finish(existing);
             return;
@@ -10759,7 +10778,7 @@ export class BrowserServiceWorkerBrokerStore {
           if (existing && existing.leaseEpoch === prepared.leaseEpoch &&
               existing.fallbackTarget === fallbackTarget && existing.targetLane === targetLane &&
               existing.reason === handoffReason &&
-              JSON.stringify(existing.metadata) === JSON.stringify(prepared.metadata)) {
+              brokerMetadataEqual(existing.metadata, prepared.metadata)) {
             finish(existing);
             return;
           }

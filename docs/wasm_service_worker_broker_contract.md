@@ -127,7 +127,10 @@ transaction. It returns `false` for a missing or superseded descriptor or a
 newer handoff epoch. The handoff record remains available for reconciliation.
 A changed descriptor and a deleted then recreated work ID receive fresh opaque
 revisions, even at the same clock reading and epoch. Identical replays preserve
-the revision across restarts. Hosts with `crypto.randomUUID()` can upgrade
+the revision across restarts. Replaying work or a handoff compares metadata by
+JSON value. Object keys can arrive in a different order, including inside arrays.
+Changing the order of array elements changes the metadata.
+Hosts with `crypto.randomUUID()` can upgrade
 legacy descriptors by replaying the request before execution. Hosts without
 this capability can still persist and list work. Completion requires a versioned
 receipt. It records no tombstone and leaves future readmission to the application.

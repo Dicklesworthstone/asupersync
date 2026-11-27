@@ -1326,6 +1326,29 @@ for (const backend of ["indexeddb", "localstorage"]) {
     assert.equal((await restarted.listDurableHandoffs()).length, 0);
   });
 
+  test(`${backend}: broker replay keeps completion valid across JSON object key order`, async () => {
+    const env = await brokerEnvironment(backend);
+    let now = 100;
+    const store = env.broker({ now: () => ++now });
+    const original = { source: "cache", items: [{ a: 1, b: 2 }, "last"] };
+    const reordered = { items: [{ b: 2, a: 1 }, "last"], source: "cache" };
+    const descriptor = await store.persistBrokerWork(brokerWork({ metadata: original }));
+    const handoff = await store.persistDurableHandoff(brokerWork({ metadata: original }));
+    env.failSet(key => key.startsWith("broker_work:") || key.startsWith("broker_handoff:"));
+    const replay = brokerWork({ metadata: reordered });
+    assert.equal((await store.persistBrokerWork(replay)).completionRevision, descriptor.completionRevision);
+    assert.equal((await store.persistDurableHandoff(replay)).recordedAtMs, handoff.recordedAtMs);
+    env.failSet(undefined);
+    assert.equal(await store.completeBrokerWork(descriptor), true);
+
+    const next = await store.persistBrokerWork(replay);
+    const changed = brokerWork({ metadata: { ...reordered, items: ["last", { b: 2, a: 1 }] } });
+    const replacement = await store.persistBrokerWork(changed);
+    assert.notEqual(replacement.completionRevision, next.completionRevision);
+    assert.equal(await store.completeBrokerWork(next), false);
+    assert.equal(await store.completeBrokerWork(replacement), true);
+  });
+
   test(`${backend}: broker same-epoch conflicts cannot replace an admitted event identity`, async () => {
     const { first } = await brokerEnvironment(backend);
     const descriptor = await first.persistBrokerWork(brokerWork());
