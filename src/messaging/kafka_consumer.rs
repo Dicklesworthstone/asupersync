@@ -1033,6 +1033,12 @@ struct BrokerOperations {
     before_lock: Mutex<Option<crate::channel::oneshot::Sender<()>>>,
     #[cfg(test)]
     after_record_buffered: Mutex<Option<BufferedRecordHook>>,
+    #[cfg(test)]
+    rebalance_failure_after_unassign: AtomicBool,
+    #[cfg(test)]
+    after_rebalance_native: Mutex<Option<BufferedRecordHook>>,
+    #[cfg(test)]
+    after_buffered_take: Mutex<Option<BufferedRecordHook>>,
 }
 
 #[cfg(all(test, feature = "kafka"))]
@@ -1288,7 +1294,7 @@ impl RebalanceAfterOpenHook {
 }
 
 #[cfg(feature = "kafka")]
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct BrokerSnapshot {
     assigned_partitions: BTreeSet<(String, i32)>,
     positions: BTreeMap<(String, i32), i64>,
@@ -1643,6 +1649,85 @@ fn apply_broker_snapshot(state: &mut ConsumerState, snapshot: BrokerSnapshot) {
     }
 }
 
+/// Publish a native rebalance before its blocking job can retire. Native calls
+/// are not transactional: revocation or an earlier seek can succeed before a
+/// later step fails. The wrapper must describe those effects even if its async
+/// waiter was dropped, and previously captured transaction metadata must expire.
+#[cfg(feature = "kafka")]
+fn publish_broker_rebalance(
+    state: &mut ConsumerState,
+    buffered: &mut Option<Result<BrokerPollOutcome, KafkaError>>,
+    operation: Result<(), KafkaError>,
+    observed: Result<BrokerSnapshot, KafkaError>,
+    attempted_positions: &BTreeSet<(String, i32)>,
+    completed_positions: &BTreeMap<(String, i32), i64>,
+    closed: bool,
+) -> Result<RebalanceResult, KafkaError> {
+    let (mut operation, mut snapshot) = match observed {
+        Ok(mut snapshot) => {
+            // A completed assignment/seek establishes the requested position
+            // until the next broker poll. Eager assign can return before the
+            // old fetch's app_pos is cleared, so even a concrete observed
+            // position can be stale here. The native operation lease excludes
+            // a new wrapper poll while these explicit offsets are published.
+            for (key, offset) in completed_positions {
+                if snapshot.assigned_partitions.contains(key) {
+                    snapshot.positions.insert(key.clone(), *offset);
+                }
+            }
+            (operation, snapshot)
+        }
+        // Unknown native ownership is not the previous ownership. Revoke local
+        // claims while retaining the original mutation error, if there was one.
+        Err(error) => (operation.and(Err(error)), BrokerSnapshot::default()),
+    };
+    if closed {
+        snapshot = BrokerSnapshot::default();
+        operation = operation.and(Err(KafkaError::Config("consumer is closed".to_string())));
+    }
+    snapshot
+        .positions
+        .retain(|key, _| snapshot.assigned_partitions.contains(key));
+
+    if let Some(Ok(outcome)) = buffered {
+        if let Some(record) = &outcome.record {
+            let key = (record.topic.clone(), record.partition);
+            let unchanged_failed_seek = !attempted_positions.contains(&key)
+                || snapshot
+                    .positions
+                    .get(&key)
+                    .zip(outcome.snapshot.positions.get(&key))
+                    .is_some_and(|(current, previous)| current == previous);
+            if !snapshot.assigned_partitions.contains(&key)
+                || completed_positions.contains_key(&key)
+                || !unchanged_failed_seek
+            {
+                // Revoked records belong to the successor. Repositioned
+                // partitions must fetch from the explicit offset, not deliver
+                // bytes buffered by a poll preceding the seek/assignment.
+                outcome.record = None;
+            }
+        }
+        // A later poll must not restore revoked ownership or pre-seek offsets.
+        outcome.snapshot = snapshot.clone();
+    }
+
+    let revoked: Vec<_> = state
+        .assigned_partitions
+        .difference(&snapshot.assigned_partitions)
+        .cloned()
+        .collect();
+    state.assigned_partitions = snapshot.assigned_partitions;
+    state.positions = snapshot.positions;
+    state.rebalance_generation = state.rebalance_generation.saturating_add(1);
+    state.last_revoked_partitions = revoked.iter().cloned().collect();
+    operation.map(|()| RebalanceResult {
+        generation: state.rebalance_generation,
+        assigned: state.assigned_partitions.iter().cloned().collect(),
+        revoked,
+    })
+}
+
 impl KafkaConsumer {
     /// Create a new Kafka consumer.
     pub fn new(config: ConsumerConfig) -> Result<Self, KafkaError> {
@@ -1865,6 +1950,11 @@ impl KafkaConsumer {
     ///
     /// The provided assignments replace current partition ownership. Any
     /// previously assigned partition not present in `assignments` is revoked.
+    /// Native cooperative operations can partially succeed before failing.
+    /// The observed assignment and positions are published before returning
+    /// the original error, including when the async waiter was dropped. If
+    /// native ownership cannot be read, local ownership claims are cleared.
+    /// Every admitted native attempt invalidates earlier group metadata.
     #[allow(clippy::too_many_lines)]
     pub async fn rebalance(
         &self,
@@ -1934,88 +2024,151 @@ impl KafkaConsumer {
         #[cfg(feature = "kafka")]
         if let Some((consumer, broker_ops)) = self.broker_backend() {
             let assignment_list: Vec<TopicPartitionOffset> = assignments.to_vec();
+            let state = Arc::clone(&self.state);
+            let closed = Arc::clone(&self.closed);
+            let buffered_outcome = Arc::clone(&self.buffered_outcome);
             refuse_when_blocking_forbidden(cx)?;
-            crate::runtime::spawn_blocking::spawn_blocking_on_thread(move || {
+            let result = crate::runtime::spawn_blocking::spawn_blocking_on_thread(move || {
                 let _guard = broker_ops.lock();
-                if assignment_list.is_empty() {
-                    if matches!(
+                if closed.load(Ordering::Acquire) {
+                    return Err(KafkaError::Config("consumer is closed".to_string()));
+                }
+                let mut attempted_positions = BTreeSet::new();
+                let mut completed_positions = BTreeMap::new();
+                let operation = (|| {
+                    if assignment_list.is_empty() {
+                        if matches!(
+                            consumer.rebalance_protocol(),
+                            rdkafka::consumer::RebalanceProtocol::Cooperative
+                        ) {
+                            // Cooperative consumers reject eager unassign.
+                            let current = consumer.assignment().map_err(map_consumer_error)?;
+                            consumer
+                                .incremental_unassign(&current)
+                                .map_err(map_consumer_error)
+                        } else {
+                            consumer.unassign().map_err(map_consumer_error)
+                        }
+                    } else if matches!(
                         consumer.rebalance_protocol(),
                         rdkafka::consumer::RebalanceProtocol::Cooperative
                     ) {
-                        // Cooperative consumers reject eager unassign. Unlike close(),
-                        // this path has not left the group and drained revoke callbacks,
-                        // so it must explicitly remove the actual native assignment.
                         let current = consumer.assignment().map_err(map_consumer_error)?;
-                        consumer
-                            .incremental_unassign(&current)
-                            .map_err(map_consumer_error)
-                    } else {
-                        consumer.unassign().map_err(map_consumer_error)
-                    }
-                } else if matches!(
-                    consumer.rebalance_protocol(),
-                    rdkafka::consumer::RebalanceProtocol::Cooperative
-                ) {
-                    let current = consumer.assignment().map_err(map_consumer_error)?;
-                    let mut to_unassign = TopicPartitionList::new();
-                    for elem in current.elements() {
-                        let in_target = assignment_list.iter().any(|tpo| {
-                            tpo.topic == elem.topic() && tpo.partition == elem.partition()
-                        });
-                        if !in_target {
-                            to_unassign.add_partition(elem.topic(), elem.partition());
+                        let mut to_unassign = TopicPartitionList::new();
+                        for elem in current.elements() {
+                            let in_target = assignment_list.iter().any(|tpo| {
+                                tpo.topic == elem.topic() && tpo.partition == elem.partition()
+                            });
+                            if !in_target {
+                                to_unassign.add_partition(elem.topic(), elem.partition());
+                            }
                         }
-                    }
-                    if to_unassign.count() > 0 {
-                        consumer
-                            .incremental_unassign(&to_unassign)
-                            .map_err(map_consumer_error)?;
-                    }
-
-                    let mut to_assign = TopicPartitionList::new();
-                    for tpo in &assignment_list {
-                        let already_assigned = current.elements().iter().any(|elem| {
-                            elem.topic() == tpo.topic && elem.partition() == tpo.partition
-                        });
-                        if !already_assigned {
-                            to_assign
-                                .add_partition_offset(
-                                    &tpo.topic,
-                                    tpo.partition,
-                                    Offset::Offset(tpo.offset),
-                                )
-                                .map_err(map_consumer_error)?;
-                        } else {
+                        if to_unassign.count() > 0 {
                             consumer
-                                .seek(
-                                    &tpo.topic,
-                                    tpo.partition,
-                                    Offset::Offset(tpo.offset),
-                                    Duration::from_secs(1),
-                                )
+                                .incremental_unassign(&to_unassign)
                                 .map_err(map_consumer_error)?;
+                            #[cfg(test)]
+                            if broker_ops
+                                .rebalance_failure_after_unassign
+                                .swap(false, Ordering::AcqRel)
+                            {
+                                return Err(KafkaError::Broker(
+                                    "injected rebalance failure after native revocation".to_string(),
+                                ));
+                            }
                         }
-                    }
-                    if to_assign.count() > 0 {
-                        consumer
-                            .incremental_assign(&to_assign)
+
+                        let mut to_assign = TopicPartitionList::new();
+                        for tpo in &assignment_list {
+                            let key = (tpo.topic.clone(), tpo.partition);
+                            let already_assigned = current.elements().iter().any(|elem| {
+                                elem.topic() == tpo.topic && elem.partition() == tpo.partition
+                            });
+                            if !already_assigned {
+                                to_assign
+                                    .add_partition_offset(
+                                        &tpo.topic,
+                                        tpo.partition,
+                                        Offset::Offset(tpo.offset),
+                                    )
+                                    .map_err(map_consumer_error)?;
+                            } else {
+                                attempted_positions.insert(key.clone());
+                                consumer
+                                    .seek(
+                                        &tpo.topic,
+                                        tpo.partition,
+                                        Offset::Offset(tpo.offset),
+                                        Duration::from_secs(1),
+                                    )
+                                    .map_err(map_consumer_error)?;
+                                completed_positions.insert(key, tpo.offset);
+                            }
+                        }
+                        if to_assign.count() > 0 {
+                            for elem in to_assign.elements() {
+                                attempted_positions
+                                    .insert((elem.topic().to_string(), elem.partition()));
+                            }
+                            consumer
+                                .incremental_assign(&to_assign)
+                                .map_err(map_consumer_error)?;
+                            for elem in to_assign.elements() {
+                                if let Some(offset) = offset_from_rdkafka(elem.offset()) {
+                                    completed_positions.insert(
+                                        (elem.topic().to_string(), elem.partition()),
+                                        offset,
+                                    );
+                                }
+                            }
+                        }
+                        Ok(())
+                    } else {
+                        let mut tpl = TopicPartitionList::new();
+                        for tpo in &assignment_list {
+                            tpl.add_partition_offset(
+                                &tpo.topic,
+                                tpo.partition,
+                                Offset::Offset(tpo.offset),
+                            )
                             .map_err(map_consumer_error)?;
+                            attempted_positions.insert((tpo.topic.clone(), tpo.partition));
+                        }
+                        consumer.assign(&tpl).map_err(map_consumer_error)?;
+                        for tpo in &assignment_list {
+                            completed_positions
+                                .insert((tpo.topic.clone(), tpo.partition), tpo.offset);
+                        }
+                        Ok(())
                     }
-                    Ok(())
-                } else {
-                    let mut tpl = TopicPartitionList::new();
-                    for tpo in &assignment_list {
-                        tpl.add_partition_offset(
-                            &tpo.topic,
-                            tpo.partition,
-                            Offset::Offset(tpo.offset),
-                        )
-                        .map_err(map_consumer_error)?;
-                    }
-                    consumer.assign(&tpl).map_err(map_consumer_error)
+                })();
+                #[cfg(test)]
+                let hook = broker_ops.after_rebalance_native.lock().take();
+                #[cfg(test)]
+                if let Some(hook) = hook {
+                    let _ = hook.published.send_blocking(());
+                    hook.release
+                        .recv_timeout(Duration::from_secs(20))
+                        .expect("release the native-rebalance witness");
                 }
+                let observed = capture_broker_snapshot(&consumer);
+                // Keep publication inside the same native serialization lease:
+                // a dropped async receipt cannot strand stale wrapper state.
+                let mut buffered = buffered_outcome.lock();
+                let mut state = state.lock();
+                publish_broker_rebalance(
+                    &mut state,
+                    &mut buffered,
+                    operation,
+                    observed,
+                    &attempted_positions,
+                    &completed_positions,
+                    closed.load(Ordering::Acquire),
+                )
             })
-            .await?;
+            .await;
+            self.state_notify.notify_waiters();
+            return result;
         }
 
         let mut state = self.state.lock();
@@ -2109,69 +2262,54 @@ impl KafkaConsumer {
                     // a record fetched as the deadline passed (its offset
                     // already stored under auto-commit) stayed buffered, and
                     // the next poll replayed it, even after a seek.
-                    let buffered_res = self.buffered_outcome.lock().take();
-                    if let Some(res) = buffered_res {
-                        match res {
-                            Ok(outcome) => {
-                                // br-asupersync-yis4hl: apply the broker snapshot
-                                // (which may reflect a rebalance that occurred
-                                // between consumer.poll() and now) and check
-                                // ATOMICALLY under the state lock that the
-                                // record's (topic, partition) is still in our
-                                // assignment. If revoked, DROP the record —
-                                // delivering it would let the application
-                                // process records for a partition we no longer
-                                // own (Kafka protocol violation; offset
-                                // clobber on the successor consumer in the
-                                // adversarial case).
-                                //
-                                // The auto-commit at line ~892 has already
-                                // written to rdkafka's local offset store, but
-                                // the broker rejects offset commits with a
-                                // stale generation id (standard Kafka
-                                // ConsumerGroupGeneration fence), so the
-                                // server-side state is naturally protected.
-                                // The remaining defense is to not let the
-                                // application observe the revoked record.
-                                let (dropped_record_for_revoked, announce_transient): (
-                                    bool,
-                                    Option<TransientConsumerError>,
-                                ) = {
-                                    let mut state = self.state.lock();
-                                    apply_broker_snapshot(&mut state, outcome.snapshot);
-                                    let announce = outcome.transient_error.and_then(|code| {
-                                        record_transient_error(&mut state, code, now_fn())
-                                    });
-                                    let dropped = if let Some(ref rec) = outcome.record {
-                                        let owned = state
-                                            .assigned_partitions
-                                            .contains(&(rec.topic.clone(), rec.partition));
-                                        !owned
-                                    } else {
-                                        false
-                                    };
-                                    (dropped, announce)
-                                };
-                                if let Some(transient) = announce_transient {
-                                    // Once per distinct code, not once per poll: the
-                                    // condition self-heals and a busy consumer would
-                                    // otherwise emit a line every 50 ms.
-                                    cx.trace(&format!(
-                                        "kafka consumer: transient {} while polling; kept polling until the deadline",
-                                        transient.code
-                                    ));
+                    let buffered_res = {
+                        // Publication uses the same buffer -> state order as
+                        // native rebalance. Releasing the buffer after take()
+                        // allowed a rebalance to publish, then an extracted old
+                        // snapshot to restore revoked ownership and positions.
+                        // Neither guard crosses an await or tracing callback.
+                        let mut buffered = self.buffered_outcome.lock();
+                        buffered.take().map(|result| {
+                            result.map(|mut outcome| {
+                                #[cfg(test)]
+                                let hook = broker_ops.after_buffered_take.lock().take();
+                                #[cfg(test)]
+                                if let Some(hook) = hook {
+                                    let _ = hook.published.send_blocking(());
+                                    hook.release
+                                        .recv_timeout(Duration::from_secs(20))
+                                        .expect("release the buffered-publication witness");
                                 }
-
-                                if !dropped_record_for_revoked {
-                                    if let Some(record) = outcome.record {
-                                        return Ok(Some(record));
-                                    }
+                                let mut state = self.state.lock();
+                                apply_broker_snapshot(&mut state, outcome.snapshot);
+                                let announce = outcome.transient_error.and_then(|code| {
+                                    record_transient_error(&mut state, code, now_fn())
+                                });
+                                // br-asupersync-yis4hl: never deliver a record
+                                // whose captured native assignment revoked it.
+                                if outcome.record.as_ref().is_some_and(|record| {
+                                    !state.assigned_partitions.contains(&(
+                                        record.topic.clone(),
+                                        record.partition,
+                                    ))
+                                }) {
+                                    outcome.record = None;
                                 }
-                                // Revoked record dropped silently. The next
-                                // poll iteration will fetch a fresh record
-                                // for an actually-owned partition.
-                            }
-                            Err(e) => return Err(e),
+                                (outcome.record, announce)
+                            })
+                        })
+                    };
+                    if let Some(result) = buffered_res {
+                        let (record, announce_transient) = result?;
+                        if let Some(transient) = announce_transient {
+                            // Announce each distinct transient code once.
+                            cx.trace(&format!(
+                                "kafka consumer: transient {} while polling; kept polling until the deadline",
+                                transient.code
+                            ));
+                        }
+                        if let Some(record) = record {
+                            return Ok(Some(record));
                         }
                         if timeout.is_zero() {
                             return Ok(None);

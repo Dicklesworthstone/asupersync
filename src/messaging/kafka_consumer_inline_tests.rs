@@ -1776,6 +1776,288 @@ fn native_empty_rebalance_eager_releases_assignment() {
     check_native_empty_rebalance("range", KafkaRebalanceProtocol::Eager);
 }
 
+#[cfg(feature = "kafka")]
+fn check_native_partial_rebalance_publication(
+    abandon_waiter: bool,
+    race_buffered_poll: bool,
+) {
+    let cluster = rdkafka::mocking::MockCluster::new(1).unwrap();
+    let topic = "partial-cooperative-rebalance";
+    cluster.create_topic(topic, 2, 1).unwrap();
+    let config = ConsumerConfig::new(
+        vec![cluster.bootstrap_servers()],
+        "partial-cooperative-rebalance-group",
+    )
+    .force_real_kafka(true)
+    .enable_auto_commit(false)
+    .with_property("group.protocol", "classic")
+    .with_property("partition.assignment.strategy", "cooperative-sticky");
+    let runtime = crate::runtime::RuntimeBuilder::current_thread()
+        .blocking_threads(1, 4)
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let cx = Cx::current().unwrap();
+        let consumer = Arc::new(KafkaConsumer::new(config).unwrap());
+        consumer.subscribe(&cx, &[topic]).await.unwrap();
+        let started = std::time::Instant::now();
+        while consumer.assigned_partitions().len() != 2
+            && started.elapsed() < Duration::from_secs(30)
+        {
+            consumer.poll(&cx, Duration::from_millis(100)).await.unwrap();
+        }
+        assert_eq!(
+            consumer.rebalance_protocol(),
+            KafkaRebalanceProtocol::Cooperative
+        );
+        assert_eq!(consumer.assigned_partitions().len(), 2);
+        let generation = consumer.rebalance_generation();
+        let old_metadata = consumer.group_metadata_for_state_test();
+        let (native, operations) = consumer.broker_backend().unwrap();
+        // An abandoned native poll can retain this snapshot even when no
+        // record arrived. It must not restore partition 1 on the next poll.
+        {
+            let _guard = operations.lock();
+            *consumer.buffered_outcome.lock() = Some(Ok(BrokerPollOutcome {
+                record: None,
+                snapshot: capture_broker_snapshot(&native).unwrap(),
+                transient_error: None,
+            }));
+        }
+        let parked_poll = if race_buffered_poll {
+            let (published, mut wait_published) = crate::channel::oneshot::channel();
+            let (release, await_release) = std::sync::mpsc::channel();
+            *operations.after_buffered_take.lock() = Some(BufferedRecordHook {
+                published,
+                release: await_release,
+            });
+            let polling_consumer = Arc::clone(&consumer);
+            let polling_cx = cx.clone();
+            let polling = std::thread::spawn(move || {
+                futures_lite::future::block_on(
+                    polling_consumer.poll(&polling_cx, Duration::ZERO),
+                )
+            });
+            wait_published.recv(&cx).await.unwrap();
+            // The real poll has removed the old outcome but has not applied
+            // its state. It must still hold the shared publication lock.
+            assert!(
+                consumer.buffered_outcome.try_lock().is_none(),
+                "a taken poll outcome must retain its buffer lock through state publication"
+            );
+            Some((release, polling))
+        } else {
+            None
+        };
+        operations
+            .rebalance_failure_after_unassign
+            .store(true, Ordering::Release);
+        let (published, mut wait_published) = crate::channel::oneshot::channel();
+        let (release, await_release) = std::sync::mpsc::channel();
+        *operations.after_rebalance_native.lock() = Some(BufferedRecordHook {
+            published,
+            release: await_release,
+        });
+        let target = [TopicPartitionOffset::new(topic, 0, 0)];
+        let mut rebalancing = Box::pin(consumer.rebalance(&cx, &target));
+        let mut witnessing = Box::pin(wait_published.recv(&cx));
+        std::future::poll_fn(|task| {
+            assert!(rebalancing.as_mut().poll(task).is_pending());
+            witnessing.as_mut().poll(task)
+        })
+        .await
+        .unwrap();
+        drop(witnessing);
+        // The worker is parked after a REAL successful native revocation and
+        // an injected failure before the retained partition's seek. Its lease
+        // prevents another native mutation during this direct observation.
+        assert_eq!(native.assignment().unwrap().count(), 1);
+        assert_eq!(consumer.assigned_partitions().len(), 2);
+        if let Some((release_poll, polling)) = parked_poll {
+            assert!(consumer.buffered_outcome.try_lock().is_none());
+            release_poll.send(()).unwrap();
+            assert!(polling.join().unwrap().unwrap().is_none());
+        }
+        if abandon_waiter {
+            drop(rebalancing);
+            release.send(()).unwrap();
+            let operations = Arc::clone(&operations);
+            crate::runtime::spawn_blocking::spawn_blocking_on_thread(move || {
+                // Retirement witness: publication must precede release of
+                // the same native operation lock, without another async poll.
+                drop(operations.lock());
+            })
+            .await;
+        } else {
+            release.send(()).unwrap();
+            let error = rebalancing.await.unwrap_err();
+            assert!(matches!(error, KafkaError::Broker(message)
+                if message == "injected rebalance failure after native revocation"));
+        }
+        assert_eq!(consumer.assigned_partitions(), vec![(topic.to_string(), 0)]);
+        assert_eq!(consumer.position(topic, 1), None);
+        assert_eq!(
+            consumer.last_revoked_partitions(),
+            vec![(topic.to_string(), 1)]
+        );
+        assert_eq!(consumer.rebalance_generation(), generation + 1);
+        assert!(matches!(
+            old_metadata.prepare_offsets(&target),
+            Err(KafkaError::Transaction(_))
+        ));
+        assert!(matches!(
+            consumer
+                .commit_offsets(&cx, &[TopicPartitionOffset::new(topic, 1, 1)])
+                .await,
+            Err(KafkaError::Config(message)) if message.contains("not assigned")
+        ));
+        if !race_buffered_poll {
+            assert!(consumer.poll(&cx, Duration::ZERO).await.unwrap().is_none());
+        }
+        assert_eq!(
+            consumer.assigned_partitions(),
+            vec![(topic.to_string(), 0)],
+            "the buffered pre-rebalance snapshot must not resurrect revoked ownership"
+        );
+        consumer.close(&cx).await.unwrap();
+    });
+    assert_eq!(
+        runtime.shutdown_drained(Duration::from_secs(10)).outcome,
+        crate::runtime::RootDrainOutcome::Quiescent
+    );
+    assert!(runtime.shutdown_timeout(Duration::from_secs(10)));
+}
+
+#[cfg(feature = "kafka")]
+#[test]
+fn native_partial_rebalance_reconciles_before_returning_original_error() {
+    check_native_partial_rebalance_publication(false, false);
+}
+
+#[cfg(feature = "kafka")]
+#[test]
+fn native_partial_rebalance_publishes_after_waiter_is_dropped() {
+    check_native_partial_rebalance_publication(true, false);
+}
+
+#[cfg(feature = "kafka")]
+#[test]
+fn native_rebalance_and_buffered_poll_publish_in_one_order() {
+    check_native_partial_rebalance_publication(false, true);
+}
+
+#[cfg(feature = "kafka")]
+#[test]
+fn failed_rebalance_preserves_only_unrepositioned_buffered_records() {
+    let key = ("orders".to_string(), 0);
+    for completed_seek in [false, true] {
+        let mut state = ConsumerState::default();
+        state.assigned_partitions.insert(key.clone());
+        state.positions.insert(key.clone(), 10);
+        state.rebalance_generation = 7;
+        let mut buffered = Some(Ok(BrokerPollOutcome {
+            record: Some(NullableConsumerRecord {
+                topic: key.0.clone(),
+                partition: key.1,
+                offset: 9,
+                key: None,
+                payload: Some(b"retained".to_vec()),
+                timestamp: None,
+                headers: Vec::new(),
+            }),
+            snapshot: BrokerSnapshot {
+                assigned_partitions: state.assigned_partitions.clone(),
+                positions: state.positions.clone(),
+            },
+            transient_error: None,
+        }));
+        // Eager assign can still report the old concrete app_pos while its
+        // fetch is stopping. A completed explicit offset must win over it.
+        let positions = [(key.clone(), if completed_seek { 42 } else { 10 })]
+            .into_iter()
+            .collect();
+        let completed = if completed_seek {
+            [(key.clone(), 12)].into_iter().collect()
+        } else {
+            BTreeMap::new()
+        };
+        let error = publish_broker_rebalance(
+            &mut state,
+            &mut buffered,
+            Err(KafkaError::Broker("later step failed".into())),
+            Ok(BrokerSnapshot {
+                assigned_partitions: [key.clone()].into_iter().collect(),
+                positions,
+            }),
+            &BTreeSet::from([key.clone()]),
+            &completed,
+            false,
+        )
+        .unwrap_err();
+        assert!(matches!(error, KafkaError::Broker(message) if message == "later step failed"));
+        assert_eq!(
+            state.rebalance_generation, 8,
+            "same membership still invalidates metadata"
+        );
+        assert_eq!(state.positions[&key], if completed_seek { 12 } else { 10 });
+        let outcome = buffered.unwrap().unwrap();
+        assert_eq!(outcome.record.is_some(), !completed_seek);
+        assert_eq!(outcome.snapshot.positions, state.positions);
+    }
+}
+
+#[cfg(feature = "kafka")]
+#[test]
+fn rebalance_snapshot_failure_revokes_unknown_ownership_without_erasing_mutation_error() {
+    let key = ("orders".to_string(), 0);
+    for mutation_failed in [false, true] {
+        let mut state = ConsumerState::default();
+        state.assigned_partitions.insert(key.clone());
+        state.positions.insert(key.clone(), 42);
+        let operation = if mutation_failed {
+            Err(KafkaError::Broker("original mutation failure".into()))
+        } else {
+            Ok(())
+        };
+        let mut buffered = Some(Ok(BrokerPollOutcome {
+            record: None,
+            snapshot: BrokerSnapshot {
+                assigned_partitions: state.assigned_partitions.clone(),
+                positions: state.positions.clone(),
+            },
+            transient_error: None,
+        }));
+        let error = publish_broker_rebalance(
+            &mut state,
+            &mut buffered,
+            operation,
+            Err(KafkaError::Broker("snapshot unavailable".into())),
+            &BTreeSet::from([key.clone()]),
+            &BTreeMap::from([(key.clone(), 12)]),
+            false,
+        )
+        .unwrap_err();
+        let expected = if mutation_failed {
+            "original mutation failure"
+        } else {
+            "snapshot unavailable"
+        };
+        assert!(matches!(error, KafkaError::Broker(message) if message == expected));
+        assert!(state.assigned_partitions.is_empty());
+        assert!(state.positions.is_empty());
+        assert_eq!(state.rebalance_generation, 1);
+        assert_eq!(state.last_revoked_partitions, BTreeSet::from([key.clone()]));
+        assert!(
+            buffered
+                .unwrap()
+                .unwrap()
+                .snapshot
+                .assigned_partitions
+                .is_empty()
+        );
+    }
+}
+
 /// br-asupersync-bi2462.115: an explicit empty rebalance clears only the
 /// local assignment; the group still owns this member's partition, so the
 /// `unsubscribe()` in close() queues an eager revoke. close() must run that
