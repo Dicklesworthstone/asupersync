@@ -820,8 +820,8 @@
     },
     {
       "path": "src/grpc/protobuf.rs",
-      "sha256": "6fa0ff6207b15980724bebb301abb70840e27bc5be660418941d24b78adc522d",
-      "line_count": 928,
+      "sha256": "9a1a08993ac07304316cc75e32b6ff17a11d49ea45ad9bbd340472694950a152",
+      "line_count": 934,
       "anchors": ["fn encode_to_bytes", "limits: ProtobufWireLimits"]
     },
     {

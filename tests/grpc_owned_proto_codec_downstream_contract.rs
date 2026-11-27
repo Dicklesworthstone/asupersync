@@ -95,8 +95,7 @@ impl ProtoMessage for Path {
             encoder.write_string(1, &self.label)?;
         }
         for point in &self.points {
-            let nested = point.encode_to_bytes(ProtobufWireLimits::default())?;
-            encoder.write_message(2, nested.as_ref())?;
+            encoder.write_nested_message(2, |nested| point.encode_fields(nested))?;
         }
         self.unknown.encode(encoder)?;
         Ok(())
@@ -158,6 +157,51 @@ fn downstream_message_round_trips_through_the_unary_codec() {
         sample_path(),
         "a downstream-defined message must survive a unary round trip unchanged"
     );
+}
+
+#[test]
+fn explicit_field_budget_allows_forwarding_a_large_repeated_message() {
+    // Each point is one nested message containing two scalar fields.
+    let n = 22_000;
+    let wire = Bytes::from([0x12, 0x04, 0x08, 0x01, 0x10, 0x02].repeat(n));
+    let limits = ProtobufWireLimits::for_message_size(wire.len()).with_max_fields(3 * n);
+    let mut codec = SymmetricProtoCodec::<Path>::new().with_wire_limits(limits);
+    let message = codec.decode(&wire).expect("admit all 66,000 fields");
+    assert_eq!(message.points.len(), n);
+
+    let mut automatic = SymmetricProtoCodec::<Path>::new();
+    assert!(matches!(
+        automatic.encode(&message),
+        Err(ProtoCodecError::Wire(
+            ProtobufWireError::FieldCountExceeded {
+                count: 65_537,
+                limit: 65_536,
+                ..
+            }
+        ))
+    ));
+    codec.set_max_decode_message_size(1);
+    let mut cloned = codec.clone();
+    cloned.set_max_encode_message_size(wire.len() - 1);
+    assert!(cloned.encode(&message).is_err());
+    cloned.set_max_encode_message_size(usize::MAX);
+    assert_eq!(
+        cloned.encode(&message).expect("forward the whole batch"),
+        wire
+    );
+    assert!(
+        cloned.decode(&wire).is_err(),
+        "inbound ceiling stays at one"
+    );
+    let mut oversized = message;
+    oversized.label = "extra".into();
+    assert!(matches!(
+        cloned.encode(&oversized),
+        Err(ProtoCodecError::Wire(
+            ProtobufWireError::MessageLimitExceeded { .. }
+                | ProtobufWireError::FieldCountExceeded { .. }
+        ))
+    ));
 }
 
 #[test]

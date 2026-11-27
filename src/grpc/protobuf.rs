@@ -717,12 +717,11 @@ pub enum ProtoCodecError {
 /// [`Codec::set_max_decode_message_size`] hooks are implemented, so a
 /// per-channel limit configured above this codec is actually honored.
 ///
-/// Beyond the byte ceiling, decoding is bounded structurally — field count,
-/// nesting depth, and total work — through [`ProtobufWireLimits`]. Use
-/// [`with_wire_limits`](Self::with_wire_limits) to tighten those for untrusted
-/// peers. Automatically selected limits follow later changes to the channel's
-/// inbound ceiling in either direction. Explicit wire limits remain upper
-/// bounds even when the channel's ceiling is raised.
+/// Encoding and decoding each default to 65,536 field records, depth 100,
+/// and a work budget derived from the respective byte ceiling. Set
+/// [`with_wire_limits`](Self::with_wire_limits) to use a custom structural
+/// policy for both directions. Each direction respects the smaller of its
+/// channel byte ceiling and the explicit policy's message ceiling.
 ///
 /// # Determinism
 ///
@@ -790,7 +789,7 @@ pub struct ProtoCodec<T, U> {
     decode_limits: ProtobufWireLimits,
     /// The original explicit message ceiling, before a channel tightens it.
     /// `None` means every structural limit is selected automatically.
-    explicit_decode_message_limit: Option<usize>,
+    explicit_message_limit: Option<usize>,
     /// `fn(T) -> U` rather than `(T, U)`: the codec owns no value of either
     /// type, so it must not inherit their auto traits or drop behavior.
     _marker: PhantomData<fn(T) -> U>,
@@ -811,24 +810,24 @@ impl<T, U> ProtoCodec<T, U> {
             max_encode_message_size: max_size,
             max_decode_message_size: max_size,
             decode_limits: ProtobufWireLimits::for_message_size(max_size),
-            explicit_decode_message_limit: None,
+            explicit_message_limit: None,
             _marker: PhantomData,
         }
     }
 
-    /// Replaces the structural decode budget.
+    /// Sets the structural budget used for encoding and decoding.
     ///
     /// The inbound byte ceiling is tightened to the budget's
     /// `max_message_len` when that is smaller, so the two can never disagree
     /// in the permissive direction.
     ///
-    /// Later channel-size changes may tighten this policy, but never raise
-    /// its field, depth, work, or original message ceilings. A temporary
-    /// channel reduction does not permanently reduce the explicit policy.
+    /// Channel-size changes apply to their own direction. They can tighten
+    /// this policy while preserving its original ceilings if the channel
+    /// later raises its limit.
     #[must_use]
     pub const fn with_wire_limits(mut self, limits: ProtobufWireLimits) -> Self {
         self.decode_limits = limits;
-        self.explicit_decode_message_limit = Some(limits.max_message_len);
+        self.explicit_message_limit = Some(limits.max_message_len);
         if limits.max_message_len < self.max_decode_message_size {
             self.max_decode_message_size = limits.max_message_len;
         }
@@ -866,7 +865,7 @@ impl<T, U> Clone for ProtoCodec<T, U> {
             max_encode_message_size: self.max_encode_message_size,
             max_decode_message_size: self.max_decode_message_size,
             decode_limits: self.decode_limits,
-            explicit_decode_message_limit: self.explicit_decode_message_limit,
+            explicit_message_limit: self.explicit_message_limit,
             _marker: PhantomData,
         }
     }
@@ -884,7 +883,14 @@ where
     fn encode(&mut self, item: &Self::Encode) -> Result<Bytes, Self::Error> {
         // The encoder enforces the ceiling as it writes, so an oversized
         // message never reserves the memory it was refused for.
-        let limits = ProtobufWireLimits::for_message_size(self.max_encode_message_size);
+        let limits = if let Some(explicit_limit) = self.explicit_message_limit {
+            ProtobufWireLimits {
+                max_message_len: explicit_limit.min(self.max_encode_message_size),
+                ..self.decode_limits
+            }
+        } else {
+            ProtobufWireLimits::for_message_size(self.max_encode_message_size)
+        };
         Ok(item.encode_to_bytes(limits)?)
     }
 
@@ -904,7 +910,7 @@ where
 
     fn set_max_decode_message_size(&mut self, max_size: usize) {
         self.max_decode_message_size = max_size;
-        if let Some(explicit_limit) = self.explicit_decode_message_limit {
+        if let Some(explicit_limit) = self.explicit_message_limit {
             // Preserve the caller's structural policy and its original ceiling
             // across a channel's lower-then-raise sequence.
             self.decode_limits.max_message_len = explicit_limit.min(max_size);
