@@ -2058,6 +2058,340 @@ fn rebalance_snapshot_failure_revokes_unknown_ownership_without_erasing_mutation
     }
 }
 
+#[cfg(all(feature = "kafka", not(target_arch = "wasm32")))]
+fn offset_operation<'a>(
+    consumer: &'a KafkaConsumer,
+    cx: &'a Cx,
+    offsets: &'a [TopicPartitionOffset],
+    commit: bool,
+) -> Pin<Box<dyn Future<Output = Result<(), KafkaError>> + 'a>> {
+    if commit {
+        Box::pin(consumer.commit_offsets(cx, offsets))
+    } else {
+        Box::pin(consumer.seek(cx, &offsets[0]))
+    }
+}
+
+#[cfg(all(feature = "kafka", not(target_arch = "wasm32")))]
+async fn native_committed_offset(consumer: &KafkaConsumer, topic: &str) -> Option<i64> {
+    let (native, operations) = consumer.broker_backend().unwrap();
+    let topic = topic.to_string();
+    crate::runtime::spawn_blocking::spawn_blocking_on_thread(move || {
+        let _guard = operations.lock();
+        let mut query = TopicPartitionList::new();
+        query.add_partition(&topic, 0);
+        let committed = native
+            .committed_offsets(query, Duration::from_secs(5))
+            .unwrap();
+        offset_from_rdkafka(committed.find_partition(&topic, 0).unwrap().offset())
+    })
+    .await
+}
+
+#[cfg(all(feature = "kafka", not(target_arch = "wasm32")))]
+#[test]
+fn native_seek_publishes_after_waiter_is_dropped() {
+    let cluster = rdkafka::mocking::MockCluster::new(1).unwrap();
+    let topic = "dropped-seek";
+    cluster.create_topic(topic, 1, 1).unwrap();
+    nullable_native_fixture(&cluster.bootstrap_servers(), topic);
+    let config = ConsumerConfig::new(vec![cluster.bootstrap_servers()], "dropped-seek-group")
+        .force_real_kafka(true)
+        .enable_auto_commit(false)
+        .auto_offset_reset(AutoOffsetReset::Earliest)
+        .with_property("group.protocol", "classic");
+    let runtime = crate::runtime::RuntimeBuilder::current_thread()
+        .blocking_threads(1, 4)
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let cx = Cx::current().unwrap();
+        let consumer = KafkaConsumer::new(config).unwrap();
+        consumer.subscribe(&cx, &[topic]).await.unwrap();
+        let first = consumer
+            .poll_nullable(&cx, Duration::from_secs(30))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.offset, 0);
+        assert_eq!(consumer.position(topic, 0), Some(1));
+        let (_, operations) = consumer.broker_backend().unwrap();
+        let (published, mut wait_published) = crate::channel::oneshot::channel();
+        let (release, await_release) = std::sync::mpsc::channel();
+        *operations.after_seek_native.lock() = Some(BufferedRecordHook {
+            published,
+            release: await_release,
+        });
+        let target = TopicPartitionOffset::new(topic, 0, 2);
+        let mut seeking = Box::pin(consumer.seek(&cx, &target));
+        let mut witness = Box::pin(wait_published.recv(&cx));
+        std::future::poll_fn(|task| {
+            assert!(seeking.as_mut().poll(task).is_pending());
+            witness.as_mut().poll(task)
+        })
+        .await
+        .unwrap();
+        drop(witness);
+        assert_eq!(consumer.position(topic, 0), Some(1));
+        drop(seeking);
+        release.send(()).unwrap();
+        crate::runtime::spawn_blocking::spawn_blocking_on_thread(move || {
+            drop(operations.lock());
+        })
+        .await;
+        // Inspect before polling can refresh state from the native handle.
+        assert_eq!(consumer.position(topic, 0), Some(2));
+        let next = consumer
+            .poll_nullable(&cx, Duration::from_secs(10))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(next.offset, 2);
+        assert!(next.payload.is_none(), "the actual target is the tombstone");
+        consumer.close(&cx).await.unwrap();
+    });
+    assert_eq!(
+        runtime.shutdown_drained(Duration::from_secs(10)).outcome,
+        crate::runtime::RootDrainOutcome::Quiescent
+    );
+    assert!(runtime.shutdown_timeout(Duration::from_secs(10)));
+}
+
+#[cfg(all(feature = "kafka", not(target_arch = "wasm32")))]
+#[test]
+fn native_dropped_commit_fences_a_queued_lower_broker_commit() {
+    let cluster = rdkafka::mocking::MockCluster::new(1).unwrap();
+    let topic = "dropped-commit";
+    cluster.create_topic(topic, 1, 1).unwrap();
+    nullable_native_fixture(&cluster.bootstrap_servers(), topic);
+    let config = ConsumerConfig::new(vec![cluster.bootstrap_servers()], "dropped-commit-group")
+        .force_real_kafka(true)
+        .enable_auto_commit(false)
+        .auto_offset_reset(AutoOffsetReset::Earliest)
+        .with_property("group.protocol", "classic");
+    let runtime = crate::runtime::RuntimeBuilder::current_thread()
+        .blocking_threads(1, 4)
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let cx = Cx::current().unwrap();
+        let consumer = KafkaConsumer::new(config).unwrap();
+        consumer.subscribe(&cx, &[topic]).await.unwrap();
+        assert!(consumer.poll(&cx, Duration::from_secs(30)).await.unwrap().is_some());
+        let (_, operations) = consumer.broker_backend().unwrap();
+        let (published, mut wait_published) = crate::channel::oneshot::channel();
+        let (release, await_release) = std::sync::mpsc::channel();
+        *operations.after_commit_native.lock() = Some(BufferedRecordHook {
+            published,
+            release: await_release,
+        });
+        let high = [TopicPartitionOffset::new(topic, 0, 3)];
+        let mut committing = Box::pin(consumer.commit_offsets(&cx, &high));
+        let mut witness = Box::pin(wait_published.recv(&cx));
+        std::future::poll_fn(|task| {
+            assert!(committing.as_mut().poll(task).is_pending());
+            witness.as_mut().poll(task)
+        })
+        .await
+        .unwrap();
+        drop(witness);
+        assert_eq!(consumer.committed_offset(topic, 0), None);
+
+        // This lower request passes the fast check while the successful
+        // higher commit is parked before publication. It must recheck later,
+        // before sending anything that could lower the BROKER's offset.
+        let (queued, mut wait_queued) = crate::channel::oneshot::channel();
+        *operations.before_lock.lock() = Some(queued);
+        let low = [TopicPartitionOffset::new(topic, 0, 2)];
+        let mut lower = Box::pin(consumer.commit_offsets(&cx, &low));
+        let mut witness = Box::pin(wait_queued.recv(&cx));
+        std::future::poll_fn(|task| {
+            assert!(lower.as_mut().poll(task).is_pending());
+            witness.as_mut().poll(task)
+        })
+        .await
+        .unwrap();
+        drop(witness);
+        drop(committing);
+        release.send(()).unwrap();
+        let error = lower.await.unwrap_err();
+        assert!(matches!(error, KafkaError::Config(message)
+            if message == "offset commit regression is not allowed"));
+        assert_eq!(consumer.committed_offset(topic, 0), Some(3));
+        assert_eq!(native_committed_offset(&consumer, topic).await, Some(3));
+        consumer.close(&cx).await.unwrap();
+    });
+    assert_eq!(
+        runtime.shutdown_drained(Duration::from_secs(10)).outcome,
+        crate::runtime::RootDrainOutcome::Quiescent
+    );
+    assert!(runtime.shutdown_timeout(Duration::from_secs(10)));
+}
+
+#[cfg(all(feature = "kafka", not(target_arch = "wasm32")))]
+fn check_native_queued_offset_generation(commit: bool, close: bool) {
+    let cluster = rdkafka::mocking::MockCluster::new(1).unwrap();
+    let topic = "queued-offset-generation";
+    cluster.create_topic(topic, 1, 1).unwrap();
+    nullable_native_fixture(&cluster.bootstrap_servers(), topic);
+    let config = ConsumerConfig::new(
+        vec![cluster.bootstrap_servers()],
+        "queued-offset-generation-group",
+    )
+    .force_real_kafka(true)
+    .enable_auto_commit(false)
+    .auto_offset_reset(AutoOffsetReset::Earliest)
+    .with_property("group.protocol", "classic");
+    let runtime = crate::runtime::RuntimeBuilder::current_thread()
+        .blocking_threads(1, 4)
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let cx = Cx::current().unwrap();
+        let consumer = KafkaConsumer::new(config).unwrap();
+        consumer.subscribe(&cx, &[topic]).await.unwrap();
+        assert!(consumer.poll(&cx, Duration::from_secs(30)).await.unwrap().is_some());
+        let generation = consumer.rebalance_generation();
+        let (_, operations) = consumer.broker_backend().unwrap();
+        let (published, mut wait_published) = crate::channel::oneshot::channel();
+        let (release, await_release) = std::sync::mpsc::channel();
+        *operations.after_rebalance_native.lock() = Some(BufferedRecordHook {
+            published,
+            release: await_release,
+        });
+        let reassignment = [TopicPartitionOffset::new(topic, 0, 2)];
+        let mut rebalancing = Box::pin(consumer.rebalance(&cx, &reassignment));
+        let mut witness = Box::pin(wait_published.recv(&cx));
+        std::future::poll_fn(|task| {
+            assert!(rebalancing.as_mut().poll(task).is_pending());
+            witness.as_mut().poll(task)
+        })
+        .await
+        .unwrap();
+        drop(witness);
+        assert_eq!(consumer.rebalance_generation(), generation);
+        let (queued, mut wait_queued) = crate::channel::oneshot::channel();
+        *operations.before_lock.lock() = Some(queued);
+        let requested = [TopicPartitionOffset::new(topic, 0, 1)];
+        let mut queued = offset_operation(&consumer, &cx, &requested, commit);
+        let mut witness = Box::pin(wait_queued.recv(&cx));
+        std::future::poll_fn(|task| {
+            assert!(queued.as_mut().poll(task).is_pending());
+            witness.as_mut().poll(task)
+        })
+        .await
+        .unwrap();
+        drop(witness);
+
+        if close {
+            let mut closing = Box::pin(consumer.close(&cx));
+            assert!(
+                std::future::poll_fn(|task| Poll::Ready(closing.as_mut().poll(task)))
+                    .await
+                    .is_pending()
+            );
+            assert!(consumer.is_closed());
+            release.send(()).unwrap();
+            assert!(rebalancing.await.is_err());
+            let error = queued.await.unwrap_err();
+            assert!(matches!(error, KafkaError::Config(message)
+                if message == "consumer is closed"));
+            closing.await.unwrap();
+            assert!(consumer.assigned_partitions().is_empty());
+            assert_eq!(consumer.position(topic, 0), None);
+            assert_eq!(consumer.committed_offset(topic, 0), None);
+        } else {
+            release.send(()).unwrap();
+            let rebound = rebalancing.await.unwrap();
+            assert_eq!(rebound.generation, generation + 1);
+            let error = queued.await.unwrap_err();
+            assert!(matches!(error, KafkaError::Config(message)
+                if message == "consumer assignment changed before offset operation"));
+            assert_eq!(consumer.position(topic, 0), Some(2));
+            assert_eq!(consumer.committed_offset(topic, 0), None);
+            assert_eq!(native_committed_offset(&consumer, topic).await, None);
+            consumer.close(&cx).await.unwrap();
+        }
+    });
+    assert_eq!(
+        runtime.shutdown_drained(Duration::from_secs(10)).outcome,
+        crate::runtime::RootDrainOutcome::Quiescent
+    );
+    assert!(runtime.shutdown_timeout(Duration::from_secs(10)));
+}
+
+#[cfg(all(feature = "kafka", not(target_arch = "wasm32")))]
+#[test]
+fn native_queued_seek_cannot_cross_same_partition_rebalance() {
+    check_native_queued_offset_generation(false, false);
+}
+
+#[cfg(all(feature = "kafka", not(target_arch = "wasm32")))]
+#[test]
+fn native_queued_commit_cannot_cross_same_partition_rebalance() {
+    check_native_queued_offset_generation(true, false);
+}
+
+#[cfg(all(feature = "kafka", not(target_arch = "wasm32")))]
+#[test]
+fn native_queued_offset_operations_refuse_after_close_starts() {
+    check_native_queued_offset_generation(false, true);
+    check_native_queued_offset_generation(true, true);
+}
+
+#[cfg(all(feature = "kafka", not(target_arch = "wasm32")))]
+#[test]
+fn native_commit_checks_ownership_before_a_buffered_revoke_is_consumed() {
+    let cluster = rdkafka::mocking::MockCluster::new(1).unwrap();
+    let topic = "unpublished-revoke";
+    cluster.create_topic(topic, 1, 1).unwrap();
+    nullable_native_fixture(&cluster.bootstrap_servers(), topic);
+    let config = ConsumerConfig::new(vec![cluster.bootstrap_servers()], "unpublished-revoke-group")
+        .force_real_kafka(true)
+        .enable_auto_commit(false)
+        .auto_offset_reset(AutoOffsetReset::Earliest)
+        .with_property("group.protocol", "classic");
+    let runtime = crate::runtime::RuntimeBuilder::current_thread()
+        .blocking_threads(1, 4)
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let cx = Cx::current().unwrap();
+        let consumer = KafkaConsumer::new(config).unwrap();
+        consumer.subscribe(&cx, &[topic]).await.unwrap();
+        assert!(consumer.poll(&cx, Duration::from_secs(30)).await.unwrap().is_some());
+        let (native, operations) = consumer.broker_backend().unwrap();
+        let buffered = Arc::clone(&consumer.buffered_outcome);
+        crate::runtime::spawn_blocking::spawn_blocking_on_thread(move || {
+            let _guard = operations.lock();
+            native.unassign().unwrap();
+            // Reproduce the publication boundary of a poll whose future was
+            // dropped after the native handle processed a real revocation.
+            *buffered.lock() = Some(Ok(BrokerPollOutcome {
+                record: None,
+                snapshot: capture_broker_snapshot(&native).unwrap(),
+                transient_error: None,
+            }));
+        })
+        .await;
+        assert_eq!(consumer.assigned_partitions(), vec![(topic.to_string(), 0)]);
+        let error = consumer
+            .commit_offsets(&cx, &[TopicPartitionOffset::new(topic, 0, 2)])
+            .await
+            .unwrap_err();
+        assert!(matches!(error, KafkaError::Config(message)
+            if message == "partition is not assigned to this consumer"));
+        assert_eq!(consumer.committed_offset(topic, 0), None);
+        assert_eq!(native_committed_offset(&consumer, topic).await, None);
+        consumer.close(&cx).await.unwrap();
+    });
+    assert_eq!(
+        runtime.shutdown_drained(Duration::from_secs(10)).outcome,
+        crate::runtime::RootDrainOutcome::Quiescent
+    );
+    assert!(runtime.shutdown_timeout(Duration::from_secs(10)));
+}
+
 /// br-asupersync-bi2462.115: an explicit empty rebalance clears only the
 /// local assignment; the group still owns this member's partition, so the
 /// `unsubscribe()` in close() queues an eager revoke. close() must run that

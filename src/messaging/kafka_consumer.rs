@@ -1039,6 +1039,10 @@ struct BrokerOperations {
     after_rebalance_native: Mutex<Option<BufferedRecordHook>>,
     #[cfg(test)]
     after_buffered_take: Mutex<Option<BufferedRecordHook>>,
+    #[cfg(test)]
+    after_seek_native: Mutex<Option<BufferedRecordHook>>,
+    #[cfg(test)]
+    after_commit_native: Mutex<Option<BufferedRecordHook>>,
 }
 
 #[cfg(all(test, feature = "kafka"))]
@@ -1647,6 +1651,42 @@ fn apply_broker_snapshot(state: &mut ConsumerState, snapshot: BrokerSnapshot) {
             state.positions.insert(key, offset);
         }
     }
+}
+
+/// Recheck a queued operation after acquiring the native serialization lease.
+/// A new generation may retain the same partitions but represent a different
+/// processing attempt, so matching partition names alone is insufficient.
+#[cfg(feature = "kafka")]
+fn validate_native_offset_generation(
+    state: &ConsumerState,
+    closed: &AtomicBool,
+    generation: u64,
+) -> Result<(), KafkaError> {
+    if closed.load(Ordering::Acquire) {
+        return Err(KafkaError::Config("consumer is closed".to_string()));
+    }
+    if state.rebalance_generation != generation {
+        return Err(KafkaError::Config(
+            "consumer assignment changed before offset operation".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "kafka")]
+fn validate_offset_assignment(
+    state: &ConsumerState,
+    key: &(String, i32),
+) -> Result<(), KafkaError> {
+    if !state.subscribed_topics.contains(&key.0) {
+        return Err(KafkaError::InvalidTopic(key.0.clone()));
+    }
+    if !state.assigned_partitions.contains(key) {
+        return Err(KafkaError::Config(
+            "partition is not assigned to this consumer".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// Publish a native rebalance before its blocking job can retire. Native calls
@@ -2580,13 +2620,19 @@ impl KafkaConsumer {
     }
 
     /// Commit offsets explicitly.
+    ///
+    /// Native retries revalidate ownership and monotonic offsets after acquiring
+    /// the native operation lease. A change in the wrapper's published assignment
+    /// generation while an operation is queued refuses that operation. This
+    /// generation is not a broker group-generation token. An acknowledged commit
+    /// is published before the lease retires, even when the async waiter is dropped.
     #[allow(unused_variables)]
     pub async fn commit_offsets(
         &self,
         cx: &Cx,
         offsets: &[TopicPartitionOffset],
     ) -> Result<(), KafkaError> {
-        cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
+        consumer_checkpoint(cx)?;
         self.ensure_open()?;
 
         if self.broker_operations_feature_disabled() {
@@ -2598,7 +2644,7 @@ impl KafkaConsumer {
         }
 
         let mut normalized = BTreeMap::new();
-        {
+        let generation = {
             let state = self.state.lock();
             if self.closed.load(Ordering::Acquire) {
                 return Err(KafkaError::Config("consumer is closed".to_string()));
@@ -2632,28 +2678,58 @@ impl KafkaConsumer {
                     ));
                 }
             }
-            drop(state);
-        }
+            state.rebalance_generation
+        };
 
         #[cfg(feature = "kafka")]
         if let Some((consumer, broker_ops)) = self.broker_backend() {
             let commit_batch = normalized.clone();
+            let state = Arc::clone(&self.state);
+            let closed = Arc::clone(&self.closed);
+            let operation_cx = cx.clone();
             let config = &self.config;
 
             refuse_when_blocking_forbidden(cx)?;
-            retry_consumer_operation(cx, config, || {
-                // Clone owned handles per attempt so the synchronous
-                // `commit(CommitMode::Sync)` runs on the blocking pool via a
-                // `'static` closure (matching subscribe/poll/etc.) instead of
-                // pinning the executor worker thread through
-                // `thread::scope().join()` for the full broker round-trip.
+            let result = retry_consumer_operation(cx, config, || {
                 let commit_batch = commit_batch.clone();
                 let consumer = consumer.clone();
                 let broker_ops = Arc::clone(&broker_ops);
+                let state = Arc::clone(&state);
+                let closed = Arc::clone(&closed);
+                let operation_cx = operation_cx.clone();
 
                 async move {
                     crate::runtime::spawn_blocking::spawn_blocking_on_thread(move || {
                         let _guard = broker_ops.lock();
+                        consumer_checkpoint(&operation_cx)?;
+                        {
+                            let state = state.lock();
+                            validate_native_offset_generation(&state, &closed, generation)?;
+                            for (key, offset) in &commit_batch {
+                                validate_offset_assignment(&state, key)?;
+                                if state
+                                    .committed_offsets
+                                    .get(key)
+                                    .is_some_and(|previous| offset < previous)
+                                {
+                                    return Err(KafkaError::Config(
+                                        "offset commit regression is not allowed".to_string(),
+                                    ));
+                                }
+                            }
+                        }
+                        // A native poll may have observed a group revocation
+                        // whose buffered snapshot is not consumed yet. Check
+                        // actual native ownership before sending any commit.
+                        let assigned = consumer
+                            .assignment()
+                            .map_err(map_consumer_error)?
+                            .to_topic_map();
+                        if commit_batch.keys().any(|key| !assigned.contains_key(key)) {
+                            return Err(KafkaError::Config(
+                                "partition is not assigned to this consumer".to_string(),
+                            ));
+                        }
                         let mut tpl = TopicPartitionList::new();
                         for ((topic, partition), offset) in &commit_batch {
                             tpl.add_partition_offset(topic, *partition, Offset::Offset(*offset))
@@ -2661,12 +2737,35 @@ impl KafkaConsumer {
                         }
                         consumer
                             .commit(&tpl, CommitMode::Sync)
-                            .map_err(map_consumer_error)
+                            .map_err(map_consumer_error)?;
+                        #[cfg(test)]
+                        let hook = broker_ops.after_commit_native.lock().take();
+                        #[cfg(test)]
+                        if let Some(hook) = hook {
+                            let _ = hook.published.send_blocking(());
+                            hook.release
+                                .recv_timeout(Duration::from_secs(20))
+                                .expect("release the native-offset-commit witness");
+                        }
+                        // The acknowledgement belongs to this native job,
+                        // not its awaiter. Publish it before another commit
+                        // can validate against the previous offset fence.
+                        let mut state = state.lock();
+                        if closed.load(Ordering::Acquire) {
+                            return Err(KafkaError::Config("consumer is closed".to_string()));
+                        }
+                        for (key, offset) in commit_batch {
+                            let current = state.committed_offsets.entry(key).or_insert(offset);
+                            *current = (*current).max(offset);
+                        }
+                        Ok(())
                     })
                     .await
                 }
             })
-            .await?;
+            .await;
+            self.state_notify.notify_waiters();
+            return result;
         }
 
         let mut state = self.state.lock();
@@ -2682,9 +2781,15 @@ impl KafkaConsumer {
     }
 
     /// Seek to a specific offset.
+    ///
+    /// Native seeks are bound to the assignment generation at admission. The
+    /// position and any retained poll result are updated together before the
+    /// native operation retires, independently of the async waiter's lifetime.
+    /// A native timeout still leaves the seek outcome unknown; it is not proof
+    /// that the broker kept the previous position.
     #[allow(unused_variables)]
     pub async fn seek(&self, cx: &Cx, tpo: &TopicPartitionOffset) -> Result<(), KafkaError> {
-        cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
+        consumer_checkpoint(cx)?;
         self.ensure_open()?;
 
         if self.broker_operations_feature_disabled() {
@@ -2698,7 +2803,7 @@ impl KafkaConsumer {
             ));
         }
 
-        {
+        let generation = {
             let state = self.state.lock();
             if self.closed.load(Ordering::Acquire) {
                 return Err(KafkaError::Config("consumer is closed".to_string()));
@@ -2714,29 +2819,62 @@ impl KafkaConsumer {
                     "partition is not assigned to this consumer".to_string(),
                 ));
             }
-        }
+            state.rebalance_generation
+        };
 
         #[cfg(feature = "kafka")]
         if let Some((consumer, broker_ops)) = self.broker_backend() {
-            let topic = tpo.topic.clone();
-            let partition = tpo.partition;
+            let key = (tpo.topic.clone(), tpo.partition);
             let offset = tpo.offset;
+            let state = Arc::clone(&self.state);
+            let closed = Arc::clone(&self.closed);
+            let operation_cx = cx.clone();
             let buffered_outcome = Arc::clone(&self.buffered_outcome);
             refuse_when_blocking_forbidden(cx)?;
-            crate::runtime::spawn_blocking::spawn_blocking_on_thread(move || {
+            let result = crate::runtime::spawn_blocking::spawn_blocking_on_thread(move || {
                 let _guard = broker_ops.lock();
+                consumer_checkpoint(&operation_cx)?;
+                {
+                    let state = state.lock();
+                    validate_native_offset_generation(&state, &closed, generation)?;
+                    validate_offset_assignment(&state, &key)?;
+                }
+                if !consumer
+                    .assignment()
+                    .map_err(map_consumer_error)?
+                    .to_topic_map()
+                    .contains_key(&key)
+                {
+                    return Err(KafkaError::Config(
+                        "partition is not assigned to this consumer".to_string(),
+                    ));
+                }
                 consumer
-                    .seek(
-                        &topic,
-                        partition,
-                        Offset::Offset(offset),
-                        Duration::from_secs(1),
-                    )
+                    .seek(&key.0, key.1, Offset::Offset(offset), Duration::from_secs(1))
                     .map_err(map_consumer_error)?;
-                rebase_buffered_after_seek(&mut buffered_outcome.lock(), &topic, partition, offset);
-                Ok::<(), KafkaError>(())
+                #[cfg(test)]
+                let hook = broker_ops.after_seek_native.lock().take();
+                #[cfg(test)]
+                if let Some(hook) = hook {
+                    let _ = hook.published.send_blocking(());
+                    hook.release
+                        .recv_timeout(Duration::from_secs(20))
+                        .expect("release the native-seek witness");
+                }
+                // Match poll/rebalance's buffer -> state publication order:
+                // an already-fetched snapshot cannot undo this seek, and an
+                // abandoned awaiter cannot strand its previous position.
+                let mut buffered = buffered_outcome.lock();
+                let mut state = state.lock();
+                validate_native_offset_generation(&state, &closed, generation)?;
+                validate_offset_assignment(&state, &key)?;
+                rebase_buffered_after_seek(&mut buffered, &key.0, key.1, offset);
+                state.positions.insert(key, offset);
+                Ok(())
             })
-            .await?;
+            .await;
+            self.state_notify.notify_waiters();
+            return result;
         }
 
         let mut state = self.state.lock();
