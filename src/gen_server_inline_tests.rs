@@ -381,6 +381,18 @@ impl GenServer for InitProbe {
         }
         Box::pin(async {})
     }
+
+    fn handle_info(
+        &mut self,
+        _cx: &Cx,
+        _msg: Self::Info,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        self.checkpoints.lock().push(serde_json::json!({
+            "phase": "handle_info",
+            "started": self.started.load(Ordering::SeqCst),
+        }));
+        Box::pin(async {})
+    }
 }
 
 fn assert_gen_server<S: GenServer>() {}
@@ -3064,6 +3076,35 @@ fn init_skipped_when_pre_cancelled_but_stop_runs() {
     crate::test_complete!("init_skipped_when_pre_cancelled_but_stop_runs");
 }
 
+#[test]
+fn graceful_pre_stop_initializes_for_a_system_message_with_an_empty_mailbox() {
+    let (sender, mailbox) = mpsc::channel(1);
+    let mut cell = GenServerCell {
+        mailbox,
+        state: Arc::new(GenServerStateCell::new(ActorState::Stopping)),
+        _keep_alive: sender,
+        system: Arc::new(SystemLane::new()),
+    };
+    cell.system.push(SystemMsg::Timeout {
+        tick_vt: Time::ZERO,
+        id: 1,
+    });
+    let server = InitProbe {
+        started: Arc::new(AtomicU8::new(0)),
+        checkpoints: Arc::new(Mutex::new(Vec::new())),
+    };
+    let server =
+        futures_lite::future::block_on(run_gen_server_loop(server, Cx::for_testing(), &mut cell));
+    assert_eq!(server.started.load(Ordering::SeqCst), 1);
+    let events = server.checkpoints.lock();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0]["phase"], "on_start");
+    assert_eq!(
+        events[1],
+        serde_json::json!({"phase": "handle_info", "started": 1})
+    );
+}
+
 /// Verify that budget consumed during on_start is subtracted from the main
 /// task budget when the guard restores.
 #[test]
@@ -4299,6 +4340,13 @@ fn conformance_drain_processes_queued_casts_on_stop() {
         type Cast = AccumCast;
         type Info = SystemMsg;
 
+        fn on_start(&mut self, _cx: &Cx) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            Box::pin(async move {
+                yield_now().await;
+                self.sum = 100;
+            })
+        }
+
         fn handle_call(
             &mut self,
             _cx: &Cx,
@@ -4371,8 +4419,8 @@ fn conformance_drain_processes_queued_casts_on_stop() {
     // The server should have processed all casts before stopping.
     let sum = final_sum.load(Ordering::SeqCst);
     assert_eq!(
-        sum, 60,
-        "server must drain queued casts before stopping: 10+20+30=60, got {sum}"
+        sum, 160,
+        "queued casts must run after initialization and before on_stop"
     );
 
     crate::test_complete!("conformance_drain_processes_queued_casts_on_stop");

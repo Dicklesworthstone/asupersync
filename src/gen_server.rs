@@ -585,7 +585,9 @@ pub trait GenServer: Send + 'static {
         Box::pin(async {})
     }
 
-    /// Called once when the server starts, before processing any messages.
+    /// Called once before processing any messages. A graceful stop before
+    /// the first poll skips this hook when both the mailbox and the runtime's
+    /// system-message lane are empty. Already queued messages require init.
     fn on_start(&mut self, _cx: &Cx) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         Box::pin(async {})
     }
@@ -824,6 +826,30 @@ struct GenServerCell<S: GenServer> {
     _keep_alive: mpsc::Sender<Envelope<S>>,
     /// DOWN notifications and trapped exit signals from the runtime.
     system: Arc<SystemLane<S>>,
+}
+
+impl<S: GenServer> GenServerCell<S> {
+    fn needs_initialization(&mut self) -> bool {
+        if self.state.load() != ActorState::Stopping {
+            return true;
+        }
+
+        // A sender may have checked the state before stop(). Revoke open
+        // reservations before deciding the mailbox has no work to drain.
+        self.mailbox.close();
+        if !self.mailbox.is_empty() {
+            return true;
+        }
+        // A DOWN or trapped exit can arrive independently of the mailbox.
+        // Seal an empty lane under its publication lock so a late event
+        // cannot reach a handler after we have committed to skipping init.
+        let mut system = self.system.inner.lock();
+        if system.queue.is_empty() {
+            system.closed = true;
+            return false;
+        }
+        true
+    }
 }
 
 impl<S: GenServer> Drop for GenServerCell<S> {
@@ -2080,9 +2106,7 @@ async fn run_gen_server_loop<S: GenServer>(
     cell.state.start_running();
 
     // Phase 1: Initialization
-    // Skip init when either the Cx is cancelled or the server was pre-stopped
-    // (stop() sets Stopping before scheduling, but does not cancel the Cx).
-    if cx.checkpoint().is_err() || cell.state.load() == ActorState::Stopping {
+    if cx.checkpoint().is_err() || !cell.needs_initialization() {
         cx.trace("gen_server::init_skipped_cancelled");
     } else {
         cx.trace("gen_server::init");
