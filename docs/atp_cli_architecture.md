@@ -155,13 +155,16 @@ asupersync --format json atp local-sync /work/left /work/right \
 asupersync --format json atp local-sync /work/left /work/right \
   --state-dir /work/sync-state
 
-# Apply non-destructive additions in both directions and persist convergence.
+# Apply the exact reviewed changes and persist convergence.
+# Replace REVIEW_ID with review_id from the preceding JSON preview.
 asupersync --format json atp local-sync /work/left /work/right \
-  --state-dir /work/sync-state --apply --staging-dir /work/sync-staging
+  --state-dir /work/sync-state --apply --approve-review REVIEW_ID \
+  --staging-dir /work/sync-staging
 
 # After reviewing the changes, explicitly authorize replacements and deletions.
 asupersync --format json atp local-sync /work/left /work/right \
-  --state-dir /work/sync-state --apply --staging-dir /work/sync-staging \
+  --state-dir /work/sync-state --apply --approve-review REVIEW_ID \
+  --staging-dir /work/sync-staging \
   --allow-overwrite --allow-permission-change --allow-delete
 ```
 
@@ -174,8 +177,20 @@ to initialization. Preview may confirm the durability of existing state files
 while holding their writer lease; it does not apply changes to the two trees.
 
 Each `--apply` prepares current inventories and revalidates them before effects.
-The `plan_id` identifies that invocation and its retained recovery job; it is not
-a reusable approval token from an earlier preview. Overwrite requires both
+Use `--approve-review REVIEW_ID` to bind application to a previously inspected
+preview. Its stable `review_id` covers the two root identities and inventories,
+the common baseline, and the state directory identity and durable generation.
+If any of these change, the command emits the fresh plan and exits with
+`atp_local_sync_review_changed` before applying tree changes or publishing a new
+baseline. Even a successful no-op synchronization advances the generation and
+invalidates the previous review. Initialization must be a separate invocation;
+`--approve-review` requires `--apply` and conflicts with `--initialize`.
+
+The `plan_id` still identifies one execution attempt and its retained recovery
+job. It changes on each preparation, even when `review_id` stays the same. The
+existing `--apply` form without `--approve-review` remains available for callers
+that intentionally authorize the current plan through their selected grants.
+A matching review never supplies those grants itself. Overwrite requires both
 `--allow-overwrite` and `--allow-permission-change`; deletion requires its separate
 `--allow-delete` grant. Originals are moved into quarantine, never unlinked by
 this command. There is no whole-tree transaction or automatic recovery cleanup.
@@ -189,6 +204,10 @@ use `0600` and new directories `0700`. Inventory bounds are configurable with
 
 JSON output uses `schema_version: 1` and `command: "atp.local-sync"`. `decisions`
 contains each actual path/action and its baseline/local/remote observations.
+`review_id` identifies the captured review; `approved_review_id` records the
+supplied approval or is null. A stale approval returns both IDs, the fresh
+decisions, and a null `result`; its structured error also includes the current
+history generation and runtime cleanup status.
 Application output preserves `result.actions`, including each action's last
 state, bytes written, durability, `staged_path` and `quarantine_path`.
 `result.complete` describes tree convergence; `result.publication` and

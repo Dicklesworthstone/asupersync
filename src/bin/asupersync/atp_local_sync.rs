@@ -1,5 +1,6 @@
 //! Persistent local reconciliation through the maintained native ATP engine.
 
+use super::atp_local_mirror::parse_review_id;
 use asupersync::cli::{CliError, ExitCode, Output};
 use clap::{ArgAction, Args};
 use std::path::PathBuf;
@@ -20,8 +21,12 @@ use std::path::PathBuf;
     Overwrites require both --allow-overwrite and --allow-permission-change. \
     Deleted or overwritten originals remain at the reported quarantine paths; no automatic \
     cleanup or whole-tree rollback occurs. A plan ID identifies one invocation and its recovery \
-    job; it is not an approval token for a later invocation. Each --apply prepares and \
-    revalidates the current changes against saved history before applying the selected grants."
+    job; it is not an approval token for a later invocation. To apply a previously reviewed \
+    plan, pass --apply --approve-review REVIEW_ID using the stable review_id from its preview. \
+    Changes to either tree or the saved common history refuse that approval before application \
+    and display the fresh plan. Initialize history separately before using --approve-review. \
+    Without --approve-review, --apply continues to prepare and revalidate the current changes \
+    against saved history before applying the selected grants."
 )]
 pub struct LocalSyncArgs {
     /// First directory to reconcile
@@ -39,6 +44,9 @@ pub struct LocalSyncArgs {
     /// Apply the current plan and durably record convergence
     #[arg(long, action = ArgAction::SetTrue, requires = "staging_dir")]
     apply: bool,
+    /// Apply only if current trees and common history match this previously reviewed ID
+    #[arg(long, value_name = "REVIEW_ID", value_parser = parse_review_id, requires = "apply", conflicts_with = "initialize")]
+    approve_review: Option<String>,
     /// Existing external directory in which to retain staging and recovery data
     #[arg(long, value_name = "PATH", requires = "apply")]
     staging_dir: Option<PathBuf>,
@@ -109,6 +117,8 @@ mod native {
         mode: &'static str,
         content_profile: &'static str,
         initialized: bool,
+        review_id: String,
+        approved_review_id: Option<String>,
         plan_id: String,
         baseline_generation: u64,
         local_root: PathBuf,
@@ -226,15 +236,19 @@ mod native {
     impl Outputtable for LocalSyncOutput {
         fn human_format(&self) -> String {
             let mut text = format!(
-                "Local synchronization {}\n  Local: {}\n  Remote: {}\n  History: {} (generation {})\n  Plan: {}\n  Profile: {}\n",
+                "Local synchronization {}\n  Local: {}\n  Remote: {}\n  History: {} (generation {})\n  Review ID: {}\n  Plan: {}\n  Profile: {}\n",
                 self.mode,
                 self.local_root.display(),
                 self.remote_root.display(),
                 self.state_directory.display(),
                 self.baseline_generation,
+                self.review_id,
                 self.plan_id,
                 self.content_profile,
             );
+            if let Some(approved) = &self.approved_review_id {
+                let _ = writeln!(text, "  Approved review ID: {approved}");
+            }
             if self.initialized {
                 text.push_str(
                     "  Created history; initialization alone declares no common baseline.\n",
@@ -286,11 +300,15 @@ mod native {
                 {
                     let _ = writeln!(text, "  Failure: {error}");
                 }
+            } else if let Some(approved) = &self.approved_review_id
+                && approved != &self.review_id
+            {
+                text.push_str("  Review changed; no tree or common-history changes were applied. Inspect this fresh plan before approving it.\n");
             } else if let Some(error) = &self.application_error {
                 let _ = writeln!(text, "  No application receipt: {error}");
                 text.push_str("  Reopen history and inspect staging before another attempt.\n");
             } else {
-                text.push_str("  Preview only. Use --apply with --staging-dir and the required grants to apply current changes.\n");
+                text.push_str("  Preview only. Use --apply --approve-review REVIEW_ID with --staging-dir and the required grants to apply this reviewed plan.\n");
             }
             if !self.runtime_quiescent || !self.runtime_stopped {
                 text.push_str("  Runtime cleanup was not confirmed.\n");
@@ -300,6 +318,26 @@ mod native {
     }
 
     pub fn run(args: &LocalSyncArgs, output: &mut Output) -> Result<(), CliError> {
+        // Clap rejects these combinations for normal invocations. Keep the
+        // approval boundary intact for direct callers before opening history.
+        if let Some(approved) = &args.approve_review {
+            if !args.apply || args.initialize || args.staging_dir.is_none() {
+                return Err(CliError::new(
+                    "atp_local_sync_review_arguments",
+                    "Review approval requires --apply and --staging-dir without --initialize",
+                )
+                .suggestion("Initialize history and preview it first, then use its review_id to approve a later application")
+                .exit_code(ExitCode::USER_ERROR));
+            }
+            super::parse_review_id(approved).map_err(|detail| {
+                CliError::new(
+                    "atp_local_sync_review_arguments",
+                    "Invalid local synchronization review ID",
+                )
+                .detail(detail)
+                .exit_code(ExitCode::USER_ERROR)
+            })?;
+        }
         // Do not canonicalize away symlinks before the native engine can refuse
         // them. UTF-8 also makes every emitted recovery path exactly serializable.
         for (label, path) in [
@@ -339,6 +377,23 @@ mod native {
         output
             .flush()
             .map_err(|error| receipt_output_error(error, &report))?;
+        if let Some(approved) = &report.approved_review_id
+            && approved != &report.review_id
+        {
+            return Err(CliError::new(
+                "atp_local_sync_review_changed",
+                "Local synchronization changed after review",
+            )
+            .detail("No tree or common-history changes were applied; inspect the freshly emitted plan before approving its review_id")
+            .context("approved_review_id", approved)
+            .context("review_id", &report.review_id)
+            .context("plan_id", &report.plan_id)
+            .context("baseline_generation", report.baseline_generation)
+            .context("state_directory", &report.state_directory)
+            .context("runtime_quiescent", quiescent)
+            .context("runtime_stopped", stopped)
+            .exit_code(ExitCode::USER_ERROR));
+        }
         if report.mode == "apply"
             && !report
                 .result
@@ -469,6 +524,8 @@ mod native {
             mode: if args.apply { "apply" } else { "plan" },
             content_profile: "linux-gnu-content-only-v1",
             initialized: args.initialize,
+            review_id: prepared.review_id().to_owned(),
+            approved_review_id: args.approve_review.clone(),
             plan_id: prepared.plan_id().to_owned(),
             baseline_generation: generation,
             local_root: prepared.local().root().to_path_buf(),
@@ -484,6 +541,15 @@ mod native {
             runtime_quiescent: false,
             runtime_stopped: false,
         };
+        if let Some(approved) = &args.approve_review
+            && approved != &report.review_id
+        {
+            report.application_error = Some(format!(
+                "Approved review {approved} no longer matches current review {}. No tree or common-history changes were applied.",
+                report.review_id
+            ));
+            return Ok(report);
+        }
         if args.apply {
             let staging = args.staging_dir.as_ref().ok_or_else(|| {
                 CliError::new(

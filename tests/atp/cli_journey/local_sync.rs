@@ -283,6 +283,12 @@ fn assert_header(report: &Value, fixture: &Fixture, mode: &str, generation: u64)
     assert_eq!(report["runtime_quiescent"], true, "{report:#}");
     assert_eq!(report["runtime_stopped"], true, "{report:#}");
     assert!(report["application_error"].is_null(), "{report:#}");
+    assert!(
+        report["review_id"]
+            .as_str()
+            .is_some_and(|id| id.len() == 64),
+        "{report:#}"
+    );
     assert!(report["plan_id"].as_str().is_some_and(|id| !id.is_empty()));
 }
 
@@ -341,6 +347,45 @@ fn assert_refused_before_effects(report: &Value, fixture: &Fixture, generation: 
     }
 }
 
+fn assert_review_refused(
+    invocation: &Invocation,
+    fixture: &Fixture,
+    approved: &str,
+    generation: u64,
+) -> Value {
+    let report = invocation.failure_json();
+    assert_eq!(invocation.output.status.code(), Some(ExitCode::USER_ERROR));
+    assert_eq!(report["command"], "atp.local-sync", "{report:#}");
+    assert_eq!(report["mode"], "apply", "{report:#}");
+    assert_eq!(report["baseline_generation"], generation, "{report:#}");
+    assert_eq!(report["approved_review_id"], approved, "{report:#}");
+    assert_ne!(report["review_id"], approved, "{report:#}");
+    assert_eq!(report["state_directory"].as_str(), fixture.state.to_str());
+    assert!(report["result"].is_null(), "{report:#}");
+    assert!(
+        report["application_error"]
+            .as_str()
+            .is_some_and(|error| error.contains("No tree or common-history changes were applied")),
+        "{report:#}"
+    );
+    assert_eq!(report["runtime_quiescent"], true, "{report:#}");
+    assert_eq!(report["runtime_stopped"], true, "{report:#}");
+    let error: Value = serde_json::from_slice(&invocation.output.stderr).unwrap_or_else(|error| {
+        panic!(
+            "expected structured stale-review error: {error}\n{}",
+            invocation.describe()
+        )
+    });
+    assert_eq!(error["type"], "atp_local_sync_review_changed", "{error:#}");
+    assert_eq!(error["context"]["approved_review_id"], approved, "{error:#}");
+    assert_eq!(error["context"]["review_id"], report["review_id"], "{error:#}");
+    assert_eq!(
+        error["context"]["baseline_generation"], generation,
+        "{error:#}"
+    );
+    report
+}
+
 fn decisions(report: &Value) -> Vec<BidirectionalSyncDecision> {
     serde_json::from_value(report["decisions"].clone()).expect("native reconciliation decisions")
 }
@@ -391,6 +436,8 @@ fn local_sync_initialization_previews_both_directions_without_applying() {
     let reopened = fixture.plan(&[]).success_json();
     assert_plan(&reopened, &fixture, 0);
     assert_eq!(decisions(&initialized), decisions(&reopened));
+    assert_eq!(initialized["review_id"], reopened["review_id"]);
+    assert_ne!(initialized["plan_id"], reopened["plan_id"]);
     assert_eq!(
         fixture.state_bytes(),
         state,
@@ -407,6 +454,151 @@ fn local_sync_initialization_previews_both_directions_without_applying() {
     assert!(!fixture.local.join("remote.txt").exists());
     assert!(!fixture.remote.join("local.txt").exists());
     assert!(directory_entries(&fixture.staging).is_empty());
+}
+
+#[test]
+fn local_sync_matching_review_applies_and_persists_the_reviewed_changes() {
+    let fixture = Fixture::new("matching-review");
+    fs::write(fixture.local.join("left.txt"), b"reviewed local bytes").unwrap();
+    fs::write(fixture.remote.join("right.txt"), b"reviewed remote bytes").unwrap();
+    let preview = fixture.plan(&["--initialize"]).success_json();
+    assert_plan(&preview, &fixture, 0);
+    let approved = preview["review_id"].as_str().unwrap();
+
+    let report = fixture.apply(&["--approve-review", approved]).success_json();
+    assert_durable(&report, &fixture, 1);
+    assert_eq!(report["review_id"], approved);
+    assert_eq!(report["approved_review_id"], approved);
+    assert_ne!(report["plan_id"], preview["plan_id"]);
+    assert_eq!(decisions(&report), decisions(&preview));
+    for root in [&fixture.local, &fixture.remote] {
+        assert_eq!(
+            fs::read(root.join("left.txt")).unwrap(),
+            b"reviewed local bytes"
+        );
+        assert_eq!(
+            fs::read(root.join("right.txt")).unwrap(),
+            b"reviewed remote bytes"
+        );
+    }
+    for path in ["left.txt", "right.txt"] {
+        assert_eq!(receipt(&report, path)["state"], "published");
+        assert_eq!(receipt(&report, path)["durable"], true);
+    }
+    let reopened = fixture.plan(&[]).success_json();
+    assert_plan(&reopened, &fixture, 1);
+    assert!(
+        decisions(&reopened)
+            .iter()
+            .all(|decision| decision.action == BidirectionalSyncAction::Keep)
+    );
+}
+
+#[test]
+fn local_sync_changed_tree_refuses_stale_review_and_emits_a_fresh_plan() {
+    for (scenario, change_local) in [("stale-local-review", true), ("stale-remote-review", false)] {
+        let fixture = Fixture::new(scenario);
+        fs::write(fixture.local.join("left.txt"), b"local before review").unwrap();
+        fs::write(fixture.remote.join("right.txt"), b"remote before review").unwrap();
+        let preview = fixture.plan(&["--initialize"]).success_json();
+        assert_plan(&preview, &fixture, 0);
+        let approved = preview["review_id"].as_str().unwrap();
+        let state = fixture.state_bytes();
+        if change_local {
+            fs::write(fixture.local.join("left.txt"), b"local edited after review").unwrap();
+        } else {
+            fs::write(fixture.remote.join("right.txt"), b"remote edited after review").unwrap();
+        }
+        let local_bytes = fs::read(fixture.local.join("left.txt")).unwrap();
+        let remote_bytes = fs::read(fixture.remote.join("right.txt")).unwrap();
+
+        let invocation = fixture.apply(&["--approve-review", approved]);
+        let fresh = assert_review_refused(&invocation, &fixture, approved, 0);
+        assert_ne!(decisions(&fresh), decisions(&preview));
+        assert_eq!(fixture.state_bytes(), state);
+        assert!(directory_entries(&fixture.staging).is_empty());
+        assert_eq!(fs::read(fixture.local.join("left.txt")).unwrap(), local_bytes);
+        assert_eq!(
+            fs::read(fixture.remote.join("right.txt")).unwrap(),
+            remote_bytes
+        );
+        assert!(!fixture.local.join("right.txt").exists());
+        assert!(!fixture.remote.join("left.txt").exists());
+
+        // The refusal supplies the actual fresh review, usable by a later
+        // invocation only while both current inventories and history stay put.
+        let reviewed = fresh["review_id"].as_str().unwrap();
+        let applied = fixture.apply(&["--approve-review", reviewed]).success_json();
+        assert_durable(&applied, &fixture, 1);
+        assert_eq!(applied["review_id"], reviewed);
+        assert_eq!(fs::read(fixture.remote.join("left.txt")).unwrap(), local_bytes);
+        assert_eq!(
+            fs::read(fixture.local.join("right.txt")).unwrap(),
+            remote_bytes
+        );
+    }
+}
+
+#[test]
+fn local_sync_history_advance_invalidates_review_without_content_changes() {
+    let fixture = Fixture::new("stale-generation-review");
+    fixture.establish("shared.txt", b"unchanged common contents");
+    let preview = fixture.plan(&[]).success_json();
+    assert_plan(&preview, &fixture, 1);
+    let approved = preview["review_id"].as_str().unwrap();
+
+    // The original --apply form stays available and records a newly verified
+    // common generation even when every content decision remains Keep.
+    let unreviewed = fixture.apply(&[]).success_json();
+    assert_durable(&unreviewed, &fixture, 2);
+    assert!(unreviewed["approved_review_id"].is_null());
+    assert_eq!(decisions(&unreviewed), decisions(&preview));
+    let state = fixture.state_bytes();
+    let staging = directory_entries(&fixture.staging);
+
+    let invocation = fixture.apply(&["--approve-review", approved]);
+    let fresh = assert_review_refused(&invocation, &fixture, approved, 2);
+    assert_eq!(decisions(&fresh), decisions(&preview));
+    assert_eq!(fixture.state_bytes(), state);
+    assert_eq!(directory_entries(&fixture.staging), staging);
+    for root in [&fixture.local, &fixture.remote] {
+        assert_eq!(
+            fs::read(root.join("shared.txt")).unwrap(),
+            b"unchanged common contents"
+        );
+    }
+}
+
+#[test]
+fn local_sync_review_arguments_refuse_before_initializing_history() {
+    let fixture = Fixture::new("review-arguments");
+    fs::write(fixture.local.join("local.txt"), b"unapplied local contents").unwrap();
+    let syntactically_valid_id = "0".repeat(64);
+    for invocation in [
+        fixture.plan(&["--approve-review", &syntactically_valid_id]),
+        fixture.apply(&["--initialize", "--approve-review", &syntactically_valid_id]),
+        fixture.apply(&["--approve-review", "not-a-review-id"]),
+    ] {
+        invocation.assert_failure();
+        assert_eq!(
+            invocation.output.status.code(),
+            Some(2),
+            "Clap must reject arguments before opening history: {}",
+            invocation.describe()
+        );
+        assert!(
+            invocation.output.stdout.is_empty(),
+            "Argument rejection must not emit a synchronization receipt: {}",
+            invocation.describe()
+        );
+    }
+    assert!(directory_entries(&fixture.state).is_empty());
+    assert!(directory_entries(&fixture.staging).is_empty());
+    assert!(!fixture.remote.join("local.txt").exists());
+    assert_eq!(
+        fs::read(fixture.local.join("local.txt")).unwrap(),
+        b"unapplied local contents"
+    );
 }
 
 #[test]
@@ -554,18 +746,40 @@ fn local_sync_conflict_preserves_both_versions_and_blocks_unrelated_copy() {
 #[test]
 fn local_sync_overwrite_requires_each_explicit_grant_before_effects() {
     let fixture = Fixture::new("overwrite-consent");
+    fs::write(fixture.local.join("retired.txt"), b"retained deleted contents").unwrap();
     fixture.establish("shared.txt", b"original");
     fs::write(fixture.local.join("shared.txt"), b"edited").unwrap();
+    let retained_local = fixture.root.join("retained-local-original.txt");
+    fs::rename(fixture.local.join("retired.txt"), &retained_local).unwrap();
     let state = fixture.state_bytes();
     let staging = directory_entries(&fixture.staging);
+    let preview = fixture.plan(&[]).success_json();
+    assert_plan(&preview, &fixture, 1);
+    assert_eq!(
+        decision(&preview, "shared.txt").action,
+        BidirectionalSyncAction::CopyLocalToRemote
+    );
+    assert_eq!(
+        decision(&preview, "retired.txt").action,
+        BidirectionalSyncAction::DeleteRemote
+    );
+    let approved = preview["review_id"].as_str().unwrap();
 
+    // A matching review selects this exact plan; it grants no overwrite,
+    // permission-change, or deletion authority of its own. Every missing grant
+    // must refuse the whole plan before either action starts.
     for flags in [
         &[][..],
-        &["--allow-overwrite"][..],
-        &["--allow-permission-change"][..],
+        &["--allow-delete", "--allow-permission-change"][..],
+        &["--allow-delete", "--allow-overwrite"][..],
+        &["--allow-overwrite", "--allow-permission-change"][..],
     ] {
-        let report = fixture.apply(flags).failure_json();
+        let mut reviewed_flags = vec!["--approve-review", approved];
+        reviewed_flags.extend_from_slice(flags);
+        let report = fixture.apply(&reviewed_flags).failure_json();
         assert_refused_before_effects(&report, &fixture, 1);
+        assert_eq!(report["review_id"], approved);
+        assert_eq!(report["approved_review_id"], approved);
         assert_eq!(report["has_conflicts"], false);
         assert_eq!(report["has_destructive_actions"], true);
         assert_eq!(
@@ -576,18 +790,43 @@ fn local_sync_overwrite_requires_each_explicit_grant_before_effects() {
             fs::read(fixture.remote.join("shared.txt")).unwrap(),
             b"original"
         );
+        assert_eq!(
+            fs::read(fixture.remote.join("retired.txt")).unwrap(),
+            b"retained deleted contents"
+        );
+        assert_eq!(fs::read(&retained_local).unwrap(), b"retained deleted contents");
+        assert!(!fixture.local.join("retired.txt").exists());
         assert_eq!(fixture.state_bytes(), state);
         assert_eq!(directory_entries(&fixture.staging), staging);
     }
 
     let report = fixture
-        .apply(&["--allow-overwrite", "--allow-permission-change"])
+        .apply(&[
+            "--approve-review",
+            approved,
+            "--allow-overwrite",
+            "--allow-permission-change",
+            "--allow-delete",
+        ])
         .success_json();
     assert_durable(&report, &fixture, 2);
+    assert_eq!(report["review_id"], approved);
+    assert_eq!(report["approved_review_id"], approved);
     assert_eq!(
         fs::read(fixture.remote.join("shared.txt")).unwrap(),
         b"edited"
     );
+    assert!(!fixture.remote.join("retired.txt").exists());
+    for (path, contents) in [
+        ("shared.txt", &b"original"[..]),
+        ("retired.txt", &b"retained deleted contents"[..]),
+    ] {
+        let action = receipt(&report, path);
+        assert_eq!(action["durable"], true);
+        let quarantine = Path::new(action["quarantine_path"].as_str().unwrap());
+        assert!(quarantine.starts_with(&fixture.staging));
+        assert_eq!(fs::read(quarantine).unwrap(), contents);
+    }
 }
 
 #[test]
