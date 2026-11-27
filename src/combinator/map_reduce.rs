@@ -1529,10 +1529,20 @@ where
             };
             let Some(next_admitted) = admitted.checked_add(1) else {
                 failures.error(admitted, MapReduceExecutionError::InputIndexExhausted);
+                if let Some(payload) = executing_map_discard(item) {
+                    failures.panic(admitted, MapReduceStopCause::InputPanicked, payload);
+                }
                 break;
             };
             if executing_map_caller_cancel(cx, &mut caller_cancel_observed, &mut failures, admitted)
             {
+                // The source can cancel its owner while yielding one last
+                // item. Retire that unadmitted value inside the same panic
+                // boundary as the source, so its destructor cannot unwind
+                // past cancellation and the joins of already admitted maps.
+                if let Some(payload) = executing_map_discard(item) {
+                    failures.panic(admitted, MapReduceStopCause::InputPanicked, payload);
+                }
                 break;
             }
             let mapper = Arc::clone(&map);
