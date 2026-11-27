@@ -19,10 +19,10 @@ fn split_headers_wait_for_both_complete_varints() {
             let mut wire = encoded(0, type_width);
             wire.extend(encoded(63, length_width));
             for split in 0..wire.len() {
-                assert_eq!(FrameHeader::decode(&wire[..split], 63), Ok(None));
+                assert_eq!(FrameHeader::decode(&wire[..split], 63, 63), Ok(None));
             }
             assert_eq!(
-                FrameHeader::decode(&wire, 63),
+                FrameHeader::decode(&wire, 63, 63),
                 Ok(Some(FrameHeader {
                     kind: 0,
                     payload_len: 63,
@@ -40,7 +40,7 @@ fn declared_oversize_is_rejected_before_payload_arrives() {
         let mut wire = encoded(0, 1);
         wire.extend(encoded(64, width));
         assert_eq!(
-            FrameHeader::decode(&wire, 63),
+            FrameHeader::decode(&wire, 63, 63),
             Err(FrameHeaderError::PayloadTooLarge {
                 payload_size: 64,
                 max_size: 63,
@@ -61,7 +61,7 @@ fn type_and_length_boundaries_preserve_the_following_payload() {
         let mut wire = encoded(value, width);
         wire.extend(encoded(0, 1));
         wire.extend([0xff; 17]);
-        let head = FrameHeader::decode(&wire, 0).unwrap().unwrap();
+        let head = FrameHeader::decode(&wire, 0, 0).unwrap().unwrap();
         assert_eq!(head.kind, value);
         assert_eq!(head.payload_len, 0);
         assert_eq!(head.header_len, width + 1);
@@ -75,11 +75,11 @@ fn maximum_varint_does_not_truncate_to_an_addressable_length() {
     wire.extend(encoded((1_u64 << 62) - 1, 8));
     if usize::BITS < 64 {
         assert_eq!(
-            FrameHeader::decode(&wire, usize::MAX),
+            FrameHeader::decode(&wire, usize::MAX, usize::MAX),
             Err(FrameHeaderError::AddressOverflow)
         );
     } else {
-        let head = FrameHeader::decode(&wire, usize::MAX).unwrap().unwrap();
+        let head = FrameHeader::decode(&wire, usize::MAX, usize::MAX).unwrap().unwrap();
         assert_eq!(head.payload_len as u64, (1_u64 << 62) - 1);
         assert_eq!(head.header_len, 9);
     }
@@ -107,4 +107,40 @@ fn empty_data_frame_is_complete_and_zero_budget_does_not_consume() {
     assert!(!cursor.is_complete());
     assert_eq!(cursor.take_len(1, 1), 1);
     assert!(cursor.is_complete());
+}
+
+#[test]
+fn streaming_data_budget_admits_large_frames_without_relaxing_metadata_limits() {
+    let metadata_limit = 1024 * 1024;
+    let data_limit = metadata_limit + 1;
+    for kind in [0, 1, 4, 0x21] {
+        let mut wire = encoded(kind, 1);
+        wire.extend(encoded(data_limit as u64, 4));
+        let result = FrameHeader::decode(&wire, metadata_limit, data_limit);
+        if kind == 0 {
+            let mut cursor = DataFrameCursor::new(result.unwrap().unwrap().payload_len);
+            for _ in 0..64 {
+                assert_eq!(cursor.take_len(usize::MAX, 16 * 1024), 16 * 1024);
+            }
+            assert_eq!(cursor.take_len(usize::MAX, 16 * 1024), 1);
+            assert!(cursor.is_complete());
+        } else {
+            assert_eq!(
+                result,
+                Err(FrameHeaderError::PayloadTooLarge {
+                    payload_size: data_limit,
+                    max_size: metadata_limit,
+                })
+            );
+        }
+    }
+    let mut oversize = encoded(0, 1);
+    oversize.extend(encoded((data_limit + 1) as u64, 4));
+    assert_eq!(
+        FrameHeader::decode(&oversize, metadata_limit, data_limit),
+        Err(FrameHeaderError::PayloadTooLarge {
+            payload_size: data_limit + 1,
+            max_size: data_limit,
+        })
+    );
 }

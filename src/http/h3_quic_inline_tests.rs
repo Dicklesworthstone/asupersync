@@ -1133,6 +1133,57 @@ fn drain_peer_limit_stream(cx: &Cx, connection: &mut QuicConnection, stream: Str
 }
 
 #[test]
+fn streaming_data_uses_its_own_wire_limit_and_preserves_fin() {
+    let cx = Cx::for_testing();
+    let mut connection = QuicConnection::server(NativeQuicConnectionConfig::default());
+    connection.begin_handshake(&cx).unwrap();
+    connection.mark_handshake_keys_available(&cx).unwrap();
+    connection.mark_app_keys_available(&cx).unwrap();
+    connection.confirm_handshake(&cx).unwrap();
+
+    let mut session = NativeH3Session::with_config(H3ConnectionConfig {
+        endpoint_role: H3EndpointRole::Server,
+        max_frame_payload_size: 64,
+        ..H3ConnectionConfig::default()
+    });
+    session
+        .enable_streaming_receive_with_data_limit(NonZeroUsize::new(8).unwrap(), 129)
+        .unwrap();
+    session
+        .initialize(&cx, &mut connection, H3Settings::default())
+        .unwrap();
+    let stream = StreamId(0);
+    let offset = receive_request_head(&cx, &mut connection, stream, false);
+    assert!(matches!(
+        next_field_limit_event(&cx, &mut session, &mut connection),
+        NativeH3Event::RequestHeaders { stream_id, .. } if stream_id == stream
+    ));
+
+    let payload: Vec<u8> = (0..129).collect();
+    let wire = encode_frame(H3Frame::Data(payload.clone())).unwrap();
+    connection
+        .inner_mut()
+        .receive_stream_bytes(&cx, stream, offset, wire, true)
+        .unwrap();
+    let mut received = Vec::new();
+    loop {
+        match next_field_limit_event(&cx, &mut session, &mut connection) {
+            NativeH3Event::Data { stream_id, bytes } => {
+                assert_eq!(stream_id, stream);
+                assert!((1..=8).contains(&bytes.len()));
+                received.extend_from_slice(&bytes);
+            }
+            NativeH3Event::Finished { stream_id } => {
+                assert_eq!(stream_id, stream);
+                break;
+            }
+            other => panic!("unexpected event {other:?}"),
+        }
+    }
+    assert_eq!(received, payload);
+}
+
+#[test]
 fn peer_field_limit_refuses_both_request_paths_before_opening_a_stream() {
     for incremental in [false, true] {
         for duplicate_utf8 in [false, true] {

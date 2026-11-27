@@ -5,7 +5,7 @@ use super::{
     ManagedEndpointConfig, ManagedEndpointError, ManagedQuicEndpoint, NativeH3Client,
     NativeH3ClientConfig, NativeH3ClientError, NativeH3Event, NativeH3RequestWriter,
     NativeH3Session, NativeH3SessionError, NativeQuicConnectionError, NativeQuicUdpConnection,
-    NonZeroUsize, POLL_STEPS, Pin, Poll, QuicConnection, StreamId, add_field_size, check_limit,
+    POLL_STEPS, Pin, Poll, QuicConnection, StreamId, add_field_size, check_limit,
     content_length, fields_size, fmt, validate_request_head_with_settings, validate_response_head,
 };
 use crate::cx::CancelWakerToken;
@@ -489,8 +489,7 @@ impl TunnelCore {
         cx: &Cx,
         connection: &mut QuicConnection,
     ) -> Result<(), NativeH3TunnelError> {
-        self.session
-            .enable_streaming_receive(NonZeroUsize::new(IO_CHUNK_BYTES).expect("nonzero chunk"))?;
+        self.config.configure_receive(&mut self.session)?;
         self.session.initialize(
             cx,
             connection,

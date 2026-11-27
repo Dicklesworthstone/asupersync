@@ -323,6 +323,7 @@ impl std::ops::Deref for RecvBuf {
 #[derive(Debug, Clone)]
 struct StreamingReceive {
     max_chunk_bytes: NonZeroUsize,
+    max_data_frame_bytes: usize,
     ready: BTreeMap<StreamId, StreamReadiness>,
     paused: BTreeSet<StreamId>,
     poll_after: Option<StreamId>,
@@ -1162,6 +1163,24 @@ impl NativeH3Session {
         &mut self,
         max_chunk_bytes: NonZeroUsize,
     ) -> Result<(), NativeH3SessionError> {
+        self.enable_streaming_receive_with_data_limit(
+            max_chunk_bytes,
+            self.config.max_frame_payload_size,
+        )
+    }
+
+    /// Enable bounded DATA delivery with an independent wire-frame payload limit.
+    ///
+    /// A request or response DATA frame can span any number of chunk-sized
+    /// reads. Its declared size is checked before delivery and never used as an
+    /// allocation size. Zero allows empty DATA frames only. All other frame
+    /// types retain the configured `max_frame_payload_size` limit. Callers
+    /// remain responsible for the cumulative body limit across DATA frames.
+    pub fn enable_streaming_receive_with_data_limit(
+        &mut self,
+        max_chunk_bytes: NonZeroUsize,
+        max_data_frame_bytes: usize,
+    ) -> Result<(), NativeH3SessionError> {
         if self.initialized {
             return Err(NativeH3SessionError::InvalidState(
                 "streaming receive must be configured before initialization",
@@ -1169,6 +1188,7 @@ impl NativeH3Session {
         }
         self.streaming_receive = Some(StreamingReceive {
             max_chunk_bytes,
+            max_data_frame_bytes,
             ready: BTreeMap::new(),
             paused: BTreeSet::new(),
             poll_after: None,
@@ -2729,8 +2749,11 @@ impl NativeH3Session {
                         .push_back(NativeH3Event::Data { stream_id, bytes });
                     return Ok(());
                 }
-                let Some(header) = frame_header(&stream.bytes, self.config.max_frame_payload_size)?
-                else {
+                let Some(header) = frame_header(
+                    &stream.bytes,
+                    self.config.max_frame_payload_size,
+                    streaming.max_data_frame_bytes,
+                )? else {
                     return Ok(());
                 };
                 if header.kind == 0 {
@@ -3216,7 +3239,7 @@ fn complete_frame_len(
     input: &[u8],
     max_payload_size: usize,
 ) -> Result<Option<usize>, NativeH3SessionError> {
-    let Some(header) = frame_header(input, max_payload_size)? else {
+    let Some(header) = frame_header(input, max_payload_size, max_payload_size)? else {
         return Ok(None);
     };
     debug_assert!(header.header_len <= FRAME_HEADER_MAX_BYTES);
@@ -3226,8 +3249,9 @@ fn complete_frame_len(
 fn frame_header(
     input: &[u8],
     max_payload_size: usize,
+    max_data_size: usize,
 ) -> Result<Option<FrameHeader>, NativeH3SessionError> {
-    FrameHeader::decode(input, max_payload_size).map_err(|error| match error {
+    FrameHeader::decode(input, max_payload_size, max_data_size).map_err(|error| match error {
         FrameHeaderError::AddressOverflow => NativeH3SessionError::Protocol(
             H3NativeError::InvalidFrame("HTTP/3 frame length exceeds addressable range"),
         ),

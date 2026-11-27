@@ -80,6 +80,17 @@ impl Default for NativeH3ClientConfig {
 }
 
 impl NativeH3ClientConfig {
+    fn configure_receive(&self, session: &mut NativeH3Session) -> Result<(), NativeH3SessionError> {
+        // Keep small application limits enforced by the response collector,
+        // which reports its typed cumulative body error. Larger limits also
+        // admit a peer sending the entire permitted body in one DATA frame.
+        let frame_limit = super::h3_native::H3ConnectionConfig::default().max_frame_payload_size;
+        session.enable_streaming_receive_with_data_limit(
+            NonZeroUsize::new(IO_CHUNK_BYTES).expect("nonzero chunk"),
+            frame_limit.max(self.max_response_body_bytes),
+        )
+    }
+
     fn validate(&self) -> Result<(), NativeH3ClientError> {
         if self.timeout.is_zero() {
             return Err(NativeH3ClientError::InvalidConfig(
@@ -1208,8 +1219,7 @@ impl<'a> Exchange<'a> {
         config: NativeH3ClientConfig,
     ) -> Result<Self, NativeH3ClientError> {
         let mut session = NativeH3Session::client();
-        session
-            .enable_streaming_receive(NonZeroUsize::new(IO_CHUNK_BYTES).expect("nonzero chunk"))?;
+        config.configure_receive(&mut session)?;
         session.initialize(
             cx,
             connection,

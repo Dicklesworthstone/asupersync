@@ -23,6 +23,7 @@ impl FrameHeader {
     pub(super) fn decode(
         bytes: &[u8],
         max_payload_size: usize,
+        max_data_size: usize,
     ) -> Result<Option<Self>, FrameHeaderError> {
         let Some((kind, type_len)) = decode_varint(bytes) else {
             return Ok(None);
@@ -32,10 +33,15 @@ impl FrameHeader {
         };
         let payload_len =
             usize::try_from(payload_len).map_err(|_| FrameHeaderError::AddressOverflow)?;
-        if payload_len > max_payload_size {
+        let limit = if kind == 0 {
+            max_data_size
+        } else {
+            max_payload_size
+        };
+        if payload_len > limit {
             return Err(FrameHeaderError::PayloadTooLarge {
                 payload_size: payload_len,
-                max_size: max_payload_size,
+                max_size: limit,
             });
         }
         let header_len = type_len + length_len;
