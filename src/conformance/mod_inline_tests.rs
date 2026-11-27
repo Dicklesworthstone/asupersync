@@ -133,6 +133,62 @@ fn test_lab_runtime_target_block_on() {
     assert_eq!(result, 42);
 }
 
+/// A parked root must receive virtual I/O at its scheduled time, both with
+/// a later timer in the wheel and when the reactor is its only wake source.
+#[cfg(unix)]
+#[test]
+fn lab_runtime_target_delivers_virtual_io_at_its_own_deadline() {
+    use crate::runtime::reactor::{Event, Interest};
+    use crate::types::Time;
+    use std::task::{Context, Poll, Waker};
+
+    for with_later_timer in [true, false] {
+        let config = TestConfig::new().with_max_steps(32);
+        let mut runtime = LabRuntimeTarget::create_runtime(config);
+        let timer = runtime.state.timer_driver_handle().expect("lab timer");
+        let io = runtime.state.io_driver_handle().expect("lab I/O driver");
+        let reactor = Arc::clone(runtime.lab_reactor());
+        let mut later = Box::pin(crate::time::Sleep::with_timer_driver(
+            Time::from_secs(10),
+            timer.clone(),
+        ));
+        if with_later_timer {
+            assert!(
+                later
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                    .is_pending()
+            );
+        }
+
+        let delivered_at = LabRuntimeTarget::block_on(&mut runtime, async move {
+            let (source, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+            source.set_nonblocking(true).unwrap();
+            let mut registration = None;
+            poll_fn(|cx| {
+                if registration.is_some() {
+                    return if reactor.next_event_time().is_none() {
+                        Poll::Ready(timer.now())
+                    } else {
+                        Poll::Pending
+                    };
+                }
+                // Only the modeled event can wake this task; the peer sends no data.
+                let ready = io
+                    .register(&source, Interest::READABLE, cx.waker().clone())
+                    .expect("register modeled descriptor");
+                let token = ready.token();
+                reactor.inject_event(token, Event::readable(token), Duration::from_secs(1));
+                registration = Some(ready);
+                Poll::Pending
+            })
+            .await
+        });
+
+        assert_eq!(delivered_at, Time::from_secs(1));
+    }
+}
+
 /// A task that reserves a oneshot permit (a SendPermit obligation it holds)
 /// and hands it to a real thread is parked on work outside the lab. The
 /// harness must wait for that thread instead of counting idle steps: those

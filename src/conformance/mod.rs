@@ -750,18 +750,10 @@ impl ConformanceTarget for LabRuntimeTarget {
                 }
             }
 
-            // When every task is parked on a virtual-time sleep/timeout the
-            // scheduler is empty and step_for_test cannot make progress; jump
-            // to the next timer deadline the same way run_with_auto_advance
-            // does (br-asupersync-uvqpga). No-op when no timer is pending.
-            // A spawn awaiting admission, or a deferred cancel, is runnable
-            // work the scheduler does not show yet: step_for_test admits it
-            // first. Advancing here instead let a deadline fire before a task
-            // spawned just ahead of it was ever polled, which the production
-            // runtime does only under a stall.
-            if runtime.scheduler.lock().is_empty() && !runtime.has_pending_dispatch_commands() {
-                runtime.advance_to_next_timer();
-            }
+            // Deliver the earliest virtual timer or reactor event. Admissions,
+            // cancellation, finalizers and obligation posts are already runnable
+            // at the current time and must get a step before the clock moves.
+            runtime.advance_idle_time();
 
             // Nothing runnable, no timer and no pending command: only a real thread
             // outside the lab (SQLite's blocking pool, for one) can wake the parked

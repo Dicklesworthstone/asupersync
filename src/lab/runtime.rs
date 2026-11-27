@@ -3191,13 +3191,13 @@ impl LabRuntime {
 
     /// True when nothing inside the lab can make progress, yet it is not quiescent:
     /// no runnable task, no pending dispatch command or obligation post, and no
-    /// timer to fire. Only a wake from outside the lab (a real thread, such as a
-    /// blocking pool finishing work) can move it forward.
+    /// timer or reactor event to deliver. Only an outside wake, such as a
+    /// blocking pool finishing work on a real thread, can move it forward.
     pub(crate) fn awaits_external_wake(&self) -> bool {
         self.scheduler.lock().is_empty()
             && !self.has_pending_dispatch_commands()
             && !self.state.has_pending_obligation_posts()
-            && self.next_timer_deadline().is_none()
+            && self.next_auto_advance_deadline().is_none()
             && !self.is_quiescent()
     }
 
@@ -3716,7 +3716,7 @@ impl LabRuntime {
     /// Moves virtual time to the next timer or lab-reactor deadline when no
     /// task, command or obligation post can run before it, and returns whether
     /// time moved. The next step fires what is due.
-    fn advance_idle_time(&mut self) -> bool {
+    pub(crate) fn advance_idle_time(&mut self) -> bool {
         if !self.scheduler.lock().is_empty()
             || self.has_pending_dispatch_commands()
             || self.state.has_pending_obligation_posts()
