@@ -281,6 +281,16 @@ pub fn negotiate(local: &DecodeCapability, offer: &CodecOffer) -> Option<CodecAc
     })
 }
 
+/// Sender-side zstd strategies supported by the ATP encoder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CompressionLevel {
+    /// ATP level 1 uses a greedy match finder.
+    Fast,
+    /// ATP level 3 uses two match tables and one-byte lookahead.
+    DoubleFast,
+}
+
 /// Whether a sender compresses bulk data (br-asupersync-t1fblr.16).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -292,6 +302,13 @@ pub enum CompressionMode {
     /// whenever that makes it smaller, and raw otherwise. Without the `zstd`
     /// cargo feature this behaves as [`Self::Off`].
     Zstd,
+    /// Offer zstd with an explicit sender strategy. The receiver negotiates
+    /// the same codec, window and chunk limits as with [`Self::Zstd`].
+    /// Without the `zstd` feature the sender makes no offer.
+    On {
+        /// How the sender finds matches in each independently encoded chunk.
+        level: CompressionLevel,
+    },
     /// Offer zstd as [`Self::Zstd`] does, but spend no effort where it does
     /// not pay (br-asupersync-t1fblr.24). An entry whose name or first bytes
     /// mark an already-compressed format (zstd, gzip, xz, zip, JPEG, PNG,
@@ -396,7 +413,7 @@ impl EntryCompression {
     pub(crate) fn should_try(&mut self, offset: u64, chunk: &[u8]) -> bool {
         match self.mode {
             CompressionMode::Off => false,
-            CompressionMode::Zstd => true,
+            CompressionMode::Zstd | CompressionMode::On { .. } => true,
             CompressionMode::Auto => {
                 if offset == 0 && has_compressed_signature(chunk) {
                     self.skip = true;
@@ -429,6 +446,21 @@ impl EntryCompression {
         }
     }
 
+    #[cfg(feature = "zstd")]
+    fn encoder_level(&self) -> asupersync_zstd::Level {
+        match self.mode {
+            CompressionMode::On {
+                level: CompressionLevel::DoubleFast,
+            } => asupersync_zstd::Level::DoubleFast,
+            CompressionMode::Off
+            | CompressionMode::Zstd
+            | CompressionMode::Auto
+            | CompressionMode::On {
+                level: CompressionLevel::Fast,
+            } => asupersync_zstd::Level::Fast,
+        }
+    }
+
     /// [`compress_chunk`] for the entry's bytes at `offset`, when these
     /// decisions say to try.
     #[cfg(feature = "zstd")]
@@ -441,7 +473,7 @@ impl EntryCompression {
         if !self.should_try(offset, raw) {
             return None;
         }
-        let compressed = compress_chunk(accept, raw);
+        let compressed = compress_chunk_at_level(accept, raw, self.encoder_level());
         self.record(
             raw.len(),
             compressed.as_ref().map(|(_, payload)| payload.len()),
@@ -502,7 +534,7 @@ pub fn local_decode_capability(max_chunk_raw: u32) -> DecodeCapability {
 pub fn local_offer(mode: CompressionMode, chunk_size: usize) -> Option<CodecOffer> {
     match mode {
         CompressionMode::Off => None,
-        CompressionMode::Zstd | CompressionMode::Auto => {
+        CompressionMode::Zstd | CompressionMode::On { .. } | CompressionMode::Auto => {
             #[cfg(feature = "zstd")]
             {
                 let max_chunk_raw = u32::try_from(chunk_size).ok()?;
@@ -534,6 +566,15 @@ pub const CHUNK_CODEC_OVERHEAD: usize = 16;
 #[cfg(feature = "zstd")]
 #[must_use]
 pub fn compress_chunk(accept: &CodecAccept, raw: &[u8]) -> Option<(ChunkCodec, Vec<u8>)> {
+    compress_chunk_at_level(accept, raw, asupersync_zstd::Level::Fast)
+}
+
+#[cfg(feature = "zstd")]
+fn compress_chunk_at_level(
+    accept: &CodecAccept,
+    raw: &[u8],
+    level: asupersync_zstd::Level,
+) -> Option<(ChunkCodec, Vec<u8>)> {
     let raw_len = u32::try_from(raw.len()).ok()?;
     if raw_len > accept.max_chunk_raw || window_log_for(raw.len()) > accept.max_window_log {
         return None;
@@ -541,8 +582,7 @@ pub fn compress_chunk(accept: &CodecAccept, raw: &[u8]) -> Option<(ChunkCodec, V
     let WireCodec::Zstd = accept.codec;
     // The chunk is covered by the transfer's SHA-256, so the frame skips
     // zstd's own content checksum.
-    let params =
-        asupersync_zstd::EncodeParams::new(asupersync_zstd::Level::Fast).with_checksum(false);
+    let params = asupersync_zstd::EncodeParams::new(level).with_checksum(false);
     let compressed = asupersync_zstd::encode_all(raw, &params);
     (compressed.len() + CHUNK_CODEC_OVERHEAD <= raw.len())
         .then(|| (ChunkCodec::new(WireCodec::Zstd, raw_len), compressed))
@@ -708,13 +748,14 @@ impl ChunkPipeline {
             return;
         }
         let accept = self.accept;
+        let level = entry.encoder_level();
         // The chunk waits in a slot the job takes it from: a refused spawn
         // never ran the job, so the chunk is still there to compress inline.
         let slot = std::sync::Arc::new(parking_lot::Mutex::new(Some(raw)));
         let job_slot = std::sync::Arc::clone(&slot);
         let spawned = cx.spawn_blocking_drained(move |_| {
             let raw = job_slot.lock().take().unwrap_or_default();
-            let compressed = compress_chunk(&accept, &raw);
+            let compressed = compress_chunk_at_level(&accept, &raw, level);
             (raw, compressed)
         });
         match spawned {
@@ -731,7 +772,7 @@ impl ChunkPipeline {
             }
             Err(_) => {
                 let raw = slot.lock().take().unwrap_or_default();
-                let compressed = compress_chunk(&accept, &raw);
+                let compressed = compress_chunk_at_level(&accept, &raw, level);
                 self.slots.push_back(PipelineSlot::Ready {
                     chunk: PipelinedChunk {
                         index,

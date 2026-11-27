@@ -20,8 +20,8 @@ mod source_walk;
 pub mod streaming;
 
 pub use codec::{
-    ChunkCodec, ChunkCodecError, CodecAccept, CodecOffer, CompressionMode, DecodeCapability,
-    WireCodec,
+    ChunkCodec, ChunkCodecError, CodecAccept, CodecOffer, CompressionLevel, CompressionMode,
+    DecodeCapability, WireCodec,
 };
 pub use compression::{
     CompressionAlgorithm, CompressionDescriptor, CompressionError, CompressionPolicy,

@@ -69,7 +69,7 @@ use asupersync::net::atp::transport_common::metadata::{
     path_is_link_or_reparse, path_is_link_or_reparse_sync,
 };
 use asupersync::net::atp::transport_common::{
-    CompressionMode, FilterSet, TransferProgress, plan_transfer,
+    CompressionLevel, CompressionMode, FilterSet, TransferProgress, plan_transfer,
 };
 use asupersync::net::atp::transport_rq::{
     self, DEFAULT_MAX_FEEDBACK_ROUNDS, DEFAULT_REPAIR_OVERHEAD, DEFAULT_ROUND_TAIL_DRAIN_MS,
@@ -255,6 +255,12 @@ enum Compress {
     /// accepted and compressing makes the chunk smaller (`on` is an alias).
     #[value(alias = "on")]
     Zstd,
+    /// Offer zstd with the level-1 greedy encoder (also used by zstd and on).
+    #[value(name = "level:1")]
+    Level1,
+    /// Offer zstd with the level-3 double-fast encoder.
+    #[value(name = "level:3")]
+    Level3,
     /// Offer zstd like `zstd`, but send raw the files whose name or first
     /// bytes mark an already-compressed format, and back off from data that
     /// does not compress.
@@ -266,6 +272,12 @@ impl Compress {
         match self {
             Self::Off => CompressionMode::Off,
             Self::Zstd => CompressionMode::Zstd,
+            Self::Level1 => CompressionMode::On {
+                level: CompressionLevel::Fast,
+            },
+            Self::Level3 => CompressionMode::On {
+                level: CompressionLevel::DoubleFast,
+            },
             Self::Auto => CompressionMode::Auto,
         }
     }
@@ -274,6 +286,8 @@ impl Compress {
         match self {
             Self::Off => "off",
             Self::Zstd => "zstd",
+            Self::Level1 => "level:1",
+            Self::Level3 => "level:3",
             Self::Auto => "auto",
         }
     }
@@ -12309,7 +12323,12 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
                 Ok(())
             );
         }
-        for compress in [Compress::Zstd, Compress::Auto] {
+        for compress in [
+            Compress::Zstd,
+            Compress::Auto,
+            Compress::Level1,
+            Compress::Level3,
+        ] {
             assert!(
                 validate_requested_compression(Transport::Rq, compress)
                     .expect_err("rq has no codec path")
@@ -12349,6 +12368,19 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
             Compress::Zstd
         );
         assert_eq!(parse(&["--compress", "on"]).expect("on"), Compress::Zstd);
+        assert_eq!(
+            parse(&["--compress=level:1"]).unwrap().mode(),
+            CompressionMode::On {
+                level: CompressionLevel::Fast
+            }
+        );
+        assert_eq!(
+            parse(&["--compress=level:3"]).unwrap().mode(),
+            CompressionMode::On {
+                level: CompressionLevel::DoubleFast
+            }
+        );
+        assert!(parse(&["--compress=level:2"]).is_err());
         assert_eq!(
             parse(&["--compress", "auto"]).expect("auto"),
             Compress::Auto

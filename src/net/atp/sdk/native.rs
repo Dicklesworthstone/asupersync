@@ -182,6 +182,8 @@ impl AtpSdk {
     /// This is how an SDK sender compresses (br-asupersync-t1fblr.18):
     /// `QuicSendOptions::new().with_compression(CompressionMode::Zstd)`, or
     /// `CompressionMode::Auto`, offers zstd for the reliable source stream.
+    /// Select `CompressionMode::On { level: CompressionLevel::DoubleFast }`
+    /// for level 3. The existing `Zstd` mode uses the level-1 fast encoder.
     /// A receiver built with the `zstd` feature accepts the offer; an older
     /// receiver ignores it and the stream stays raw. Without the `zstd`
     /// feature the sender makes no offer. Receipts, hashes and reported

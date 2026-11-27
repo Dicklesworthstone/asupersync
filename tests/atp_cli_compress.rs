@@ -440,6 +440,7 @@ fn compression_follows_the_flag(wire: Wire) {
     let mut wrong = Vec::new();
     for (label, name, compress, compressed) in [
         ("zstd", "payload.txt", Some("zstd"), true),
+        ("level3", "payload.txt", Some("level:3"), true),
         ("auto", "payload.txt", Some("auto"), true),
         ("auto, a .png name", "payload.png", Some("auto"), false),
         ("default", "payload.txt", None, false),

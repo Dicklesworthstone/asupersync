@@ -84,6 +84,16 @@ fn off_never_offers() {
     assert_eq!(CompressionMode::default(), CompressionMode::Off);
 }
 
+#[test]
+fn explicit_levels_share_the_existing_zstd_offer() {
+    for level in [CompressionLevel::Fast, CompressionLevel::DoubleFast] {
+        assert_eq!(
+            local_offer(CompressionMode::On { level }, 256 * 1024),
+            local_offer(CompressionMode::Zstd, 256 * 1024)
+        );
+    }
+}
+
 /// Auto never tries an entry whose name or first bytes mark a compressed
 /// format; Zstd tries everything and Off nothing.
 #[test]
@@ -225,6 +235,45 @@ mod zstd {
         )
         .unwrap();
         assert_eq!(out, raw);
+    }
+
+    #[test]
+    fn explicit_levels_select_the_encoder_for_direct_and_pipelined_chunks() {
+        let accept = session();
+        let raw = b"BCDEFGHIJKL@ABCDE!#ABCDEFGHIJKL".repeat(256);
+        let fast = compress_chunk(&accept, &raw).unwrap();
+        let cx = crate::cx::Cx::for_testing();
+        for (level, encoder) in [
+            (CompressionLevel::Fast, asupersync_zstd::Level::Fast),
+            (
+                CompressionLevel::DoubleFast,
+                asupersync_zstd::Level::DoubleFast,
+            ),
+        ] {
+            let params = asupersync_zstd::EncodeParams::new(encoder).with_checksum(false);
+            let expected = asupersync_zstd::encode_all(&raw, &params);
+            assert_eq!(expected == fast.1, level == CompressionLevel::Fast);
+            let mut entry = EntryCompression::new(CompressionMode::On { level }, "data.bin");
+            let (record, bytes) = entry.compress(&accept, 0, &raw).unwrap();
+            assert_eq!(bytes, expected);
+            let mut out = Vec::new();
+            decompress_chunk(
+                &record.to_bytes(),
+                Some(&accept),
+                raw.len() as u64,
+                &bytes,
+                &mut out,
+            )
+            .unwrap();
+            assert_eq!(out, raw);
+
+            let mut pipeline = ChunkPipeline::new(accept, 1);
+            pipeline.push(&cx, &mut entry, 0, 0, raw.clone());
+            let chunk = crate::util::future::block_on(pipeline.next(0, &mut entry))
+                .unwrap()
+                .unwrap();
+            assert_eq!(chunk.compressed, Some((record, expected)));
+        }
     }
 
     /// Auto offers what Zstd offers, compresses text, and stops trying

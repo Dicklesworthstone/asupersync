@@ -72,6 +72,9 @@ never read (`src/net/atp/transport_common/codec.rs`, br-asupersync-t1fblr.16).
 From the command line, `atp send --transport tcp --compress zstd` makes the
 offer, in an `atp` built with `--features atp-cli,zstd`. `--compress auto`
 offers the same codec but sends raw the files that are already compressed.
+Use `--compress=level:1` to select the greedy encoder explicitly, or
+`--compress=level:3` for the double-fast encoder. These choices work for
+TCP and QUIC source streams and use the same peer negotiation.
 An `atp recv` from such a build accepts without a flag. `atp send` refuses
 `--compress` on `--transport rq` and in a build without the codec, rather
 than sending raw without saying so (br-asupersync-t1fblr.18).
