@@ -8,6 +8,7 @@ use super::{ChildRegionError, Cx, ScopedTimeoutClose, cap};
 use crate::runtime::spawn_mailbox::{BranchRegionSlot, SpawnGateway};
 use crate::runtime::state::SpawnError;
 use crate::runtime::{JoinError, TaskHandle};
+use crate::stream::Stream;
 use crate::types::{CancelReason, PanicPayload, RegionId};
 use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet};
@@ -127,7 +128,7 @@ pub struct ScopedJoinBoundedReport<T> {
     pub stop: ScopedJoinBoundedStop,
     /// Exactly the pulled inputs, in input order, including submission refusal.
     pub attempts: Vec<ScopedJoinAttempt<T>>,
-    /// Whether the iterator actually returned `None`; a discarded tail is not EOF.
+    /// Whether the source actually returned `None`; a discarded tail is not EOF.
     pub input_exhausted: bool,
     /// First source or unused-input retirement panic, even after another stop.
     pub input_panic: Option<PanicPayload>,
@@ -303,6 +304,34 @@ fn empty_attempt<T>(index: usize) -> ScopedJoinAttempt<T> {
 }
 
 const BOUNDED_JOIN_QUANTUM: usize = 64;
+
+/// A single admission engine serves synchronous iterators and pinned streams.
+/// Source construction and retirement stay inside the explicit owner's scope.
+trait BoundedJoinSource {
+    type Factory;
+
+    fn poll_next(&mut self, task: &mut Context<'_>) -> Poll<Option<Self::Factory>>;
+}
+
+struct IteratorJoinSource<I>(I);
+
+impl<I: Iterator> BoundedJoinSource for IteratorJoinSource<I> {
+    type Factory = I::Item;
+
+    fn poll_next(&mut self, _task: &mut Context<'_>) -> Poll<Option<Self::Factory>> {
+        Poll::Ready(self.0.next())
+    }
+}
+
+struct StreamJoinSource<S>(Pin<Box<S>>);
+
+impl<S: Stream> BoundedJoinSource for StreamJoinSource<S> {
+    type Factory = S::Item;
+
+    fn poll_next(&mut self, task: &mut Context<'_>) -> Poll<Option<Self::Factory>> {
+        self.0.as_mut().poll_next(task)
+    }
+}
 
 type BoundedJoinClose = Pin<
     Box<
@@ -753,11 +782,99 @@ where
         Fut: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
+        self.join_scoped_source_bounded(limit, factories, |factories| {
+            IteratorJoinSource(factories.into_iter())
+        })
+    }
+
+    /// Join an asynchronous stream of factories with at most `limit` active subtrees.
+    ///
+    /// Shares [`Self::join_all_scoped_bounded`]'s all-settled results, private
+    /// regions, source-order receipts, cancellation and panic handling. Each
+    /// input retains its slot until its entire subtree closes, including its
+    /// descendants, obligations and finalizers. A successful body alone cannot
+    /// release admission credit.
+    ///
+    /// The stream is polled only with available credit. A pending source does
+    /// not stop already-admitted branches or their cleanup from progressing,
+    /// and does not cause an idle collector to self-wake. The source must
+    /// arrange a wake when its next item becomes available. Admission and
+    /// candidate polling share the same 64-step cooperative quantum as the
+    /// iterator API. The stream is never polled after its first `None`, an
+    /// admission refusal, owner cancellation, or a source panic.
+    ///
+    /// The source is pinned internally and need not be `Unpin`, `Send`, or
+    /// `'static`; it may borrow caller-owned state. Its polling and destruction
+    /// run under the explicit owner's ambient context, even if the unpolled
+    /// joining future is dropped. Factories run under their admitted child
+    /// context. Source polling or retirement panics are retained in
+    /// `input_panic` while every admitted subtree is cancelled and drained.
+    ///
+    /// The limit bounds active subtrees, not retained results or the stream's
+    /// own storage: N yielded inputs retain O(N) receipts. Dropping the joining
+    /// future requests every subtree's close before dropping the source but
+    /// cannot await cleanup. Dropping the source follows its own cancellation
+    /// contract; this API does not promise to preserve unread source items.
+    ///
+    /// # Errors
+    /// Runtime preflight has the same rules as [`Self::join_all_scoped_bounded`]:
+    /// a missing runtime or spawn authority is refused before the first source
+    /// poll, while a pre-cancelled owner returns an empty cancelled report.
+    /// An authorized empty stream completes with `input_exhausted = true`.
+    ///
+    /// ```no_run
+    /// # async fn example(cx: &asupersync::Cx) {
+    /// use asupersync::cx::{ScopedJoinBoundedStop, ScopedJoinTask};
+    /// use std::num::NonZeroUsize;
+    /// let source = asupersync::stream::iter(
+    ///     (0..1_000).map(|n| move |_child| async move { n * 2 }),
+    /// );
+    /// let report = cx.join_all_scoped_stream_bounded(
+    ///     NonZeroUsize::new(8).unwrap(), source,
+    /// ).await.expect("runtime available");
+    /// assert!(matches!(report.stop, ScopedJoinBoundedStop::Completed));
+    /// assert!(report.input_exhausted);
+    /// assert!(matches!(report.attempts[999].task, ScopedJoinTask::Joined(Ok(1_998))));
+    /// assert!(report.attempts.iter().all(|attempt| matches!(attempt.close, Some(Ok(_)))));
+    /// # }
+    /// ```
+    pub fn join_all_scoped_stream_bounded<T, S, F, Fut>(
+        &self,
+        limit: NonZeroUsize,
+        factories: S,
+    ) -> impl Future<Output = Result<ScopedJoinBoundedReport<T>, ScopedJoinError>>
+    + use<Caps, T, S, F, Fut>
+    where
+        Caps: cap::CapSetRuntimeMask,
+        S: Stream<Item = F>,
+        F: FnOnce(Cx<Caps>) -> Fut + Send + 'static,
+        Fut: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        self.join_scoped_source_bounded(limit, factories, |factories| {
+            StreamJoinSource(Box::pin(factories))
+        })
+    }
+
+    fn join_scoped_source_bounded<T, Input, Source, F, Fut>(
+        &self,
+        limit: NonZeroUsize,
+        input: Input,
+        into_source: fn(Input) -> Source,
+    ) -> impl Future<Output = Result<ScopedJoinBoundedReport<T>, ScopedJoinError>>
+    + use<Caps, T, Input, Source, F, Fut>
+    where
+        Caps: cap::CapSetRuntimeMask,
+        Source: BoundedJoinSource<Factory = F>,
+        F: FnOnce(Cx<Caps>) -> Fut + Send + 'static,
+        Fut: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
         let owner = self.clone();
         self.with_ambient(async move {
             if owner.is_cancel_requested() {
                 let reason = owner_reason(&owner);
-                let input_panic = catch_unwind(AssertUnwindSafe(|| drop(factories)))
+                let input_panic = catch_unwind(AssertUnwindSafe(|| drop(input)))
                     .err()
                     .map(bounded_input_panic);
                 return Ok(ScopedJoinBoundedReport {
@@ -778,7 +895,7 @@ where
             {
                 return Err(ScopedJoinError::Spawn(SpawnError::RuntimeUnavailable));
             }
-            let mut inputs = match catch_unwind(AssertUnwindSafe(|| factories.into_iter())) {
+            let mut inputs = match catch_unwind(AssertUnwindSafe(|| into_source(input))) {
                 Ok(inputs) => Some(inputs),
                 Err(payload) => {
                     return Ok(ScopedJoinBoundedReport {
@@ -812,6 +929,7 @@ where
                 let _ = cancelled.as_mut().poll(task);
                 observe_bounded_owner(&owner, &mut owner_cancellation, &mut stop, &mut cancel);
                 let mut remaining = BOUNDED_JOIN_QUANTUM;
+                let mut source_pending = false;
                 if let Some(pass) = &mut cancel {
                     if !owned.cancel_some(pass, &mut remaining) {
                         task.waker().wake_by_ref();
@@ -861,7 +979,10 @@ where
                     }
                     remaining -= 1;
                     let next = catch_unwind(AssertUnwindSafe(|| {
-                        inputs.as_mut().expect("unretired lazy source").next()
+                        inputs
+                            .as_mut()
+                            .expect("unretired lazy source")
+                            .poll_next(task)
                     }));
                     match next {
                         Err(payload) => {
@@ -874,7 +995,11 @@ where
                             );
                             break;
                         }
-                        Ok(None) => {
+                        Ok(Poll::Pending) => {
+                            source_pending = true;
+                            break;
+                        }
+                        Ok(Poll::Ready(None)) => {
                             input_exhausted = true;
                             observe_bounded_owner(
                                 &owner,
@@ -895,7 +1020,7 @@ where
                                 }
                             }
                         }
-                        Ok(Some(factory)) => {
+                        Ok(Poll::Ready(Some(factory))) => {
                             unused = Some(factory);
                             let index = owned.insert(&gateway);
                             observe_bounded_owner(
@@ -951,7 +1076,10 @@ where
                 }
                 if cancel.is_some()
                     || owned.ready.has_ready()
-                    || (stop.is_none() && !input_exhausted && owned.branches.len() < limit.get())
+                    || (stop.is_none()
+                        && !input_exhausted
+                        && !source_pending
+                        && owned.branches.len() < limit.get())
                 {
                     task.waker().wake_by_ref();
                 }
