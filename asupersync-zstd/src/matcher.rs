@@ -29,7 +29,7 @@ pub struct Match {
 
 /// The length of the common prefix of `a` and `b`, compared eight bytes at a
 /// time.
-fn common_prefix(a: &[u8], b: &[u8]) -> usize {
+pub(crate) fn common_prefix(a: &[u8], b: &[u8]) -> usize {
     let limit = a.len().min(b.len());
     let word = |bytes: &[u8], at: usize| {
         let mut word = [0_u8; 8];

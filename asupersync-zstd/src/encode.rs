@@ -4,6 +4,7 @@
 
 use crate::huffman::HuffmanCode;
 use crate::literals::encode_literals;
+use crate::long_distance::LongDistanceFinder;
 use crate::matcher::{DoubleFastFinder, Match, MatchFinder};
 use crate::sequences::{
     EncodedSequence, EncoderTables, encode_sequences_with_history, offset_value,
@@ -27,6 +28,29 @@ const WINDOW_1_MIB: u8 = 0x50;
 /// How far back [`Level::Fast`] matches reach.
 const FAST_WINDOW: usize = 1 << 20;
 
+/// Maximum backward distance for long-distance matching, in powers of two.
+/// Construct this from a receiver's supported window log before encoding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LongDistanceWindow(u8);
+
+impl LongDistanceWindow {
+    /// Use a window of 2 through 128 MiB (logs 21 through 27).
+    #[must_use]
+    pub const fn from_log(log: u8) -> Option<Self> {
+        if log >= 21 && log <= 27 {
+            Some(Self(log))
+        } else {
+            None
+        }
+    }
+
+    /// Base-two logarithm of the maximum match distance in bytes.
+    #[must_use]
+    pub const fn log(self) -> u8 {
+        self.0
+    }
+}
+
 /// How hard the encoder works.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -40,6 +64,9 @@ pub enum Level {
     /// Two hash tables search for long and short matches over a 1 MiB
     /// window. One-byte lookahead can skip a short match for a longer one.
     DoubleFast,
+    /// Double-fast matching plus a sparse index of distant repeated regions.
+    /// The frame never requests a window larger than the supplied bound.
+    LongDistance(LongDistanceWindow),
 }
 
 /// Encoder settings, built with [`Self::new`] and the `with_*` methods.
@@ -96,20 +123,54 @@ pub fn encode_all(input: &[u8], params: &EncodeParams) -> Vec<u8> {
 pub fn encode_into(input: &[u8], params: &EncodeParams, out: &mut Vec<u8>) {
     match params.level {
         Level::Store => {
-            write_frame_header(input.len(), params.checksum, WINDOW_128_KIB, out);
+            write_frame_header(
+                input.len(),
+                params.checksum,
+                WINDOW_128_KIB,
+                SINGLE_SEGMENT_MAX,
+                out,
+            );
             store_blocks(input, out);
         }
         Level::Fast => {
             let mut finder = MatchFinder::new(input.len());
-            compressed_blocks(input, out, params, |start, end, floor, matches| {
-                finder.find(input, start, end, floor, matches);
-            });
+            compressed_blocks(
+                input,
+                out,
+                params,
+                WINDOW_1_MIB,
+                SINGLE_SEGMENT_MAX,
+                |start, end, floor, matches| {
+                    finder.find(input, start, end, floor, matches);
+                },
+            );
         }
         Level::DoubleFast => {
             let mut finder = DoubleFastFinder::new();
-            compressed_blocks(input, out, params, |start, end, floor, matches| {
-                finder.find(input, start, end, floor, matches);
-            });
+            compressed_blocks(
+                input,
+                out,
+                params,
+                WINDOW_1_MIB,
+                SINGLE_SEGMENT_MAX,
+                |start, end, floor, matches| {
+                    finder.find(input, start, end, floor, matches);
+                },
+            );
+        }
+        Level::LongDistance(window) => {
+            let size = 1_usize << window.log();
+            let mut finder = LongDistanceFinder::new(input.len());
+            compressed_blocks(
+                input,
+                out,
+                params,
+                (window.log() - 10) << 3,
+                size.min(SINGLE_SEGMENT_MAX),
+                |start, end, _, matches| {
+                    finder.find(input, start, end, size, matches);
+                },
+            );
         }
     }
     if params.checksum {
@@ -118,11 +179,17 @@ pub fn encode_into(input: &[u8], params: &EncodeParams, out: &mut Vec<u8>) {
     }
 }
 
-/// The frame header for `len` bytes of content. Content up to
-/// [`SINGLE_SEGMENT_MAX`] is a single segment; larger content declares
+/// The frame header for `len` bytes of content. Content up to the supplied
+/// single-segment limit uses its size as the window; larger content declares
 /// `window_descriptor`.
-fn write_frame_header(len: usize, checksum: bool, window_descriptor: u8, out: &mut Vec<u8>) {
-    let single_segment = len <= SINGLE_SEGMENT_MAX;
+fn write_frame_header(
+    len: usize,
+    checksum: bool,
+    window_descriptor: u8,
+    single_segment_max: usize,
+    out: &mut Vec<u8>,
+) {
+    let single_segment = len <= single_segment_max;
     let len64 = u64::try_from(len).unwrap_or(u64::MAX);
     let (size_flag, size_bytes): (u8, Vec<u8>) = if single_segment && len < 256 {
         (0, vec![u8::try_from(len).unwrap_or(0)])
@@ -179,7 +246,7 @@ struct BlockHistory {
 impl BlockHistory {
     fn commit(&mut self, next: Self, level: Level) {
         self.offsets = next.offsets;
-        if level == Level::DoubleFast {
+        if matches!(level, Level::DoubleFast | Level::LongDistance(_)) {
             if next.literals.is_some() {
                 self.literals = next.literals;
             }
@@ -195,9 +262,17 @@ fn compressed_blocks(
     input: &[u8],
     out: &mut Vec<u8>,
     params: &EncodeParams,
+    window_descriptor: u8,
+    single_segment_max: usize,
     mut find: impl FnMut(usize, usize, usize, &mut Vec<Match>),
 ) {
-    write_frame_header(input.len(), params.checksum, WINDOW_1_MIB, out);
+    write_frame_header(
+        input.len(),
+        params.checksum,
+        window_descriptor,
+        single_segment_max,
+        out,
+    );
     let mut history = BlockHistory {
         offsets: [1, 4, 8],
         literals: None,
@@ -300,6 +375,33 @@ mod tests {
                 state.to_be_bytes()[0]
             })
             .collect()
+    }
+
+    #[test]
+    fn long_distance_reuses_shifted_regions_only_inside_the_selected_window() {
+        use super::LongDistanceWindow;
+        use crate::DecodeError;
+
+        assert!(LongDistanceWindow::from_log(20).is_none());
+        assert!(LongDistanceWindow::from_log(28).is_none());
+        let mut data = lcg(73, (3 << 20) + 47);
+        let copy = 17..(1 << 20) + 17;
+        data.extend_from_within(copy);
+        let encode = |log| {
+            let window = LongDistanceWindow::from_log(log).unwrap();
+            encode_all(&data, &EncodeParams::new(Level::LongDistance(window)))
+        };
+        let narrow = encode(21);
+        let wide = encode(22);
+        assert!(wide.len() + (900 << 10) < narrow.len());
+        for (frame, log) in [(&narrow, 21), (&wide, 22)] {
+            let limits = DecodeLimits::new(data.len()).with_max_window(1 << log);
+            assert_eq!(decode_all(frame, &limits).as_deref(), Ok(&data[..]));
+            assert_eq!(
+                decode_all(frame, &limits.with_max_window((1 << log) - 1)),
+                Err(DecodeError::WindowTooLarge)
+            );
+        }
     }
 
     fn input(name: &str) -> Vec<u8> {

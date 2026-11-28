@@ -241,3 +241,17 @@ fn double_fast_reuses_literal_tables_across_raw_blocks() {
     }
     assert_eq!(pos + 4, frame.len());
 }
+
+#[test]
+fn libzstd_decodes_shifted_long_distance_copies() {
+    use asupersync_zstd::LongDistanceWindow;
+
+    let mut plain = noise(55, (4 << 20) + 137, 0xff);
+    plain.extend_from_within(51..(2 << 20) + 51);
+    let level = Level::LongDistance(LongDistanceWindow::from_log(23).unwrap());
+    let frame = encode_all(&plain, &EncodeParams::new(level));
+    assert!(frame.len() < plain.len() - (1 << 20));
+    let mut decoded = Vec::new();
+    zstd::stream::copy_decode(&frame[..], &mut decoded).unwrap();
+    assert_eq!(decoded, plain);
+}
