@@ -69,6 +69,12 @@ never read (`src/net/atp/transport_common/codec.rs`, br-asupersync-t1fblr.16).
 - With no offer, no accept, or an older peer on either side, the wire stays
   exactly as described above.
 
+For full TCP transfers the receiver advertises four decode slots. When consecutive
+compressed chunks of an entry are already buffered, up to four can decode on the
+runtime's blocking pool. The receiver stages and hashes their raw bytes in wire
+order. A partial next frame can wait while the preceding chunk is written.
+Receivers without blocking-worker capacity can decode inline.
+
 From the command line, `atp send --transport tcp --compress zstd` makes the
 offer, in an `atp` built with `--features atp-cli,zstd`. `--compress auto`
 offers the same codec but sends raw the files that are already compressed.

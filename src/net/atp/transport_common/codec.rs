@@ -144,7 +144,7 @@ pub struct DecodeCapability {
     pub max_window_log: u8,
     /// The largest raw chunk the receiver will decode, in bytes.
     pub max_chunk_raw: u32,
-    /// How many chunks the receiver decodes concurrently (1 today).
+    /// Maximum concurrent chunk decodes on a supported receive path.
     pub decode_slots: u8,
 }
 

@@ -528,11 +528,17 @@ where
     S: AsyncReadExt + AsyncWriteExt + Unpin,
 {
     fn new(stream: S) -> Self {
+        let decode = codec::local_decode_capability(MAX_COMPRESSED_CHUNK_RAW);
+        #[cfg(feature = "zstd")]
+        let decode = DecodeCapability {
+            decode_slots: receive_codec::MAX_DECODE_SLOTS,
+            ..decode
+        };
         Self {
             stream,
             codec: AtpFrameCodec::new(),
             rbuf: BytesMut::new(),
-            decode: codec::local_decode_capability(MAX_COMPRESSED_CHUNK_RAW),
+            decode,
             chunk_codec: None,
             expected_merkle_v2: None,
             compression: CompressionMode::Off,
@@ -4107,6 +4113,8 @@ pub async fn send_path_with_options(
 
 mod delta_manifest_validation;
 mod delta_storage;
+#[cfg(feature = "zstd")]
+mod receive_codec;
 mod sender_validation;
 
 fn transfer_id_hex(merkle_root_hex: &str, total_bytes: u64, file_count: usize) -> String {
@@ -4770,7 +4778,9 @@ where
     // and closed.
     let mut active: Option<(usize, Option<crate::fs::File>)> = None;
     let mut received: u64 = 0;
-    // Holds one decompressed chunk at a time (at most MAX_COMPRESSED_CHUNK_RAW).
+    #[cfg(feature = "zstd")]
+    let mut decode_queue = receive_codec::DecodeQueue::default();
+    // Reused on the inline path when the runtime has no blocking pool.
     let mut raw_scratch = Vec::new();
 
     // Drive the receive loop in a helper future so the staging directory is
@@ -4778,9 +4788,16 @@ where
     let recv_result: Result<(), TransportError> = async {
         loop {
             cx.checkpoint().map_err(|_| TransportError::Cancelled)?;
-            let frame =
+            #[cfg(feature = "zstd")]
+            let (frame, decoded) = decode_queue
+                .next(cx, &mut transport, &manifest.entries, &states, config.idle_timeout)
+                .await?;
+            #[cfg(not(feature = "zstd"))]
+            let (frame, decoded) = (
                 with_transport_timeout(cx, config.idle_timeout, "receive frame", transport.recv())
-                    .await?;
+                    .await?,
+                None::<Vec<u8>>,
+            );
             match frame.frame_type() {
                 FrameType::ObjectData => {
                     let (index, offset, payload) = parse_data_frame(&frame)?;
@@ -4793,13 +4810,16 @@ where
                     let remaining = entry
                         .size
                         .saturating_sub(states.get(idx).map_or(0, |st| st.bytes_written));
-                    let chunk = raw_chunk(
-                        &frame,
-                        transport.chunk_codec.as_ref(),
-                        remaining,
-                        payload,
-                        &mut raw_scratch,
-                    )?;
+                    let chunk = match &decoded {
+                        Some(raw) => raw.as_slice(),
+                        None => raw_chunk(
+                            &frame,
+                            transport.chunk_codec.as_ref(),
+                            remaining,
+                            payload,
+                            &mut raw_scratch,
+                        )?,
+                    };
 
                     // Close the previous entry's staging file when a new entry
                     // begins (the sender streams entries in index order).
