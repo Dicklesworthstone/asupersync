@@ -3173,14 +3173,14 @@ mod unused_delta_payload_helpers {
         )
         .await?;
         match frame.frame_type() {
-            FrameType::ObjectComplete | FrameType::Close => Ok(()),
+            FrameType::ObjectComplete => Ok(()),
             FrameType::Error => Err(TransportError::Frame(format!(
                 "peer sent Error frame: {}",
                 String::from_utf8_lossy(frame.payload())
             ))),
             other => Err(TransportError::Unexpected {
                 got: other,
-                expected: "ObjectComplete | Close",
+                expected: "ObjectComplete",
             }),
         }
     }
@@ -3303,7 +3303,7 @@ mod unused_delta_payload_helpers {
                         });
                     }
                 }
-                FrameType::ObjectComplete | FrameType::Close => break,
+                FrameType::ObjectComplete => break,
                 FrameType::Error => {
                     return Err(TransportError::Frame(format!(
                         "peer sent Error frame: {}",
@@ -3313,7 +3313,7 @@ mod unused_delta_payload_helpers {
                 other => {
                     return Err(TransportError::Unexpected {
                         got: other,
-                        expected: "ObjectData | ObjectComplete | Close",
+                        expected: "ObjectData | ObjectComplete",
                     });
                 }
             }
@@ -4353,7 +4353,6 @@ where
                         .await?;
                 }
                 FrameType::ObjectComplete => break,
-                FrameType::Close => break,
                 FrameType::Error => {
                     return Err(TransportError::Frame(format!(
                         "peer sent Error frame: {}",
@@ -4363,7 +4362,7 @@ where
                 other => {
                     return Err(TransportError::Unexpected {
                         got: other,
-                        expected: "ObjectData | ObjectComplete | Close",
+                        expected: "ObjectData | ObjectComplete",
                     });
                 }
             }
@@ -4688,13 +4687,10 @@ where
                 transport.recv(),
             )
             .await?;
-            if !matches!(
-                complete.frame_type(),
-                FrameType::ObjectComplete | FrameType::Close
-            ) {
+            if complete.frame_type() != FrameType::ObjectComplete {
                 return Err(TransportError::Unexpected {
                     got: complete.frame_type(),
-                    expected: "ObjectComplete | Close",
+                    expected: "ObjectComplete",
                 });
             }
             let base = safe_base_for_root_name(dest_dir, &manifest.root_name)?;
@@ -4895,7 +4891,6 @@ where
                     st.update_with_chunk(chunk);
                 }
                 FrameType::ObjectComplete => break,
-                FrameType::Close => break,
                 FrameType::Error => {
                     return Err(TransportError::Frame(format!(
                         "peer sent Error frame: {}",
@@ -4905,7 +4900,7 @@ where
                 other => {
                     return Err(TransportError::Unexpected {
                         got: other,
-                        expected: "ObjectData | ObjectComplete | Close",
+                        expected: "ObjectData | ObjectComplete",
                     });
                 }
             }

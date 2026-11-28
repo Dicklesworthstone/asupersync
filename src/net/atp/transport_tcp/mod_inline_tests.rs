@@ -876,6 +876,69 @@ fn negotiated_v2_native_full_delta_and_noop_transfers_preserve_legacy_identity()
 }
 
 #[test]
+fn close_before_object_complete_refuses_publication_in_each_tcp_transfer_mode() {
+    let previous = vec![b'a'; 3 * 4096];
+    let mut payload = previous.clone();
+    payload[4096..8192].fill(b'b');
+    for (mode, baseline, retry_bytes) in [
+        ("full", None, payload.len() as u64),
+        ("delta", Some(&previous), 4096),
+        ("noop", Some(&payload), 0),
+    ] {
+        let scratch = tempfile::tempdir().unwrap();
+        let root = scratch.path().canonicalize().unwrap();
+        let source = root.join("payload.bin");
+        let dest = root.join("inbox");
+        let target = dest.join("payload.bin");
+        std::fs::create_dir(&dest).unwrap();
+        std::fs::write(&source, &payload).unwrap();
+        if let Some(bytes) = baseline {
+            std::fs::write(&target, bytes).unwrap();
+        }
+
+        // All requested data has arrived. Close ends the session but cannot
+        // authorize publication in place of the sender's ObjectComplete.
+        let (sent, received) = run_merkle_transfer(
+            source.clone(),
+            &dest,
+            merkle_transfer_config(),
+            Some((
+                FrameType::ObjectComplete,
+                Box::new(|_| Frame::empty(FrameType::Close).unwrap()),
+            )),
+        );
+        assert!(
+            matches!(
+                received,
+                Err(TransportError::Unexpected {
+                    got: FrameType::Close,
+                    ..
+                })
+            ),
+            "{mode}: {received:?}"
+        );
+        assert!(sent.is_err(), "{mode}: sender received a success proof");
+        assert_eq!(
+            std::fs::read_dir(&dest).unwrap().count(),
+            usize::from(baseline.is_some()),
+            "{mode}: receive left staging or published a new file"
+        );
+        if let Some(bytes) = baseline {
+            assert_eq!(
+                &std::fs::read(&target).unwrap(),
+                bytes,
+                "{mode}: baseline changed"
+            );
+        }
+
+        let (sent, received) = run_merkle_transfer(source, &dest, merkle_transfer_config(), None);
+        assert_eq!(sent.unwrap().bytes_sent, retry_bytes, "{mode}: retry mode");
+        assert!(received.unwrap().committed);
+        assert_eq!(std::fs::read(&target).unwrap(), payload);
+    }
+}
+
+#[test]
 fn negotiated_v2_mismatch_refuses_full_delta_and_noop_publication() {
     let previous = vec![b'a'; 3 * 4096];
     let mut payload = previous.clone();
