@@ -1806,6 +1806,129 @@ fn spawn_supervised_actor_panic_surfaces_as_task_outcome() {
     crate::test_complete!("spawn_supervised_actor_panic_surfaces_as_task_outcome");
 }
 
+#[test]
+fn dropping_an_unpolled_actor_retires_its_refs_and_wakes_waiting_senders() {
+    for supervised in [false, true] {
+        let mut state = RuntimeState::new();
+        let region = state.create_root_region(Budget::INFINITE);
+        let cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(region, Budget::INFINITE);
+        let (handle, stored) = if supervised {
+            scope.spawn_supervised_actor(
+                &mut state,
+                &cx,
+                Counter::new,
+                crate::supervision::SupervisionStrategy::Stop,
+                1,
+            )
+        } else {
+            scope.spawn_actor(&mut state, &cx, Counter::new(), 1)
+        }
+        .unwrap();
+        let actor = handle.sender();
+        actor.try_send(1).unwrap();
+
+        let panics = Waker::from(Arc::new(PanickingShutdownWaker));
+        let count = Arc::new(crate::sync::atomic::AtomicUsize::new(0));
+        let observer = terminal_state_waker(Arc::clone(&handle.state), Arc::clone(&count));
+        let mut first = Box::pin(actor.reserve(&cx));
+        let mut second = Box::pin(actor.reserve(&cx));
+        assert!(
+            first
+                .as_mut()
+                .poll(&mut Context::from_waker(&panics))
+                .is_pending()
+        );
+        assert!(
+            second
+                .as_mut()
+                .poll(&mut Context::from_waker(&observer))
+                .is_pending()
+        );
+        assert!(actor.is_alive());
+
+        drop(stored);
+
+        assert!(!actor.is_alive());
+        assert!(actor.is_closed());
+        assert_eq!(count.load(Ordering::Relaxed), 1);
+        for mut waiter in [first, second] {
+            assert!(matches!(
+                waiter
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop())),
+                Poll::Ready(Err(SendError::Disconnected(())))
+            ));
+        }
+        handle.stop();
+        assert!(
+            !actor.is_alive(),
+            "a later stop must preserve terminal state"
+        );
+    }
+}
+
+#[test]
+fn a_waiting_senders_wake_panic_cannot_skip_the_cancelled_actors_stop_hook() {
+    let cx = Cx::for_testing();
+    let client = Cx::for_testing();
+    let (sender, mailbox) = mpsc::channel(1);
+    let mut cell = ActorCell {
+        mailbox,
+        state: Arc::new(ActorStateCell::new(ActorState::Created)),
+    };
+    sender.try_send(10).unwrap();
+    let panics = Waker::from(Arc::new(PanickingShutdownWaker));
+    let mut waiter = Box::pin(sender.reserve(&client));
+    assert!(
+        waiter
+            .as_mut()
+            .poll(&mut Context::from_waker(&panics))
+            .is_pending()
+    );
+
+    cx.cancel_with(crate::types::CancelKind::ParentCancelled, None);
+    let actor = futures_lite::future::block_on(run_actor_loop(Counter::new(), cx, &mut cell));
+    assert!(actor.stopped);
+    assert_eq!(actor.count, 0, "cancelled actors discard the buffered tail");
+    assert!(matches!(
+        waiter
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop())),
+        Poll::Ready(Err(SendError::Disconnected(())))
+    ));
+}
+
+#[test]
+fn dropping_a_parked_actor_contains_its_receive_waker_destructor() {
+    struct PanicOnDrop;
+    impl std::task::Wake for PanicOnDrop {
+        fn wake(self: Arc<Self>) {}
+    }
+    impl Drop for PanicOnDrop {
+        fn drop(&mut self) {
+            panic!("parked receiver waker destructor");
+        }
+    }
+
+    let (_sender, mailbox) = mpsc::channel::<()>(1);
+    let state = Arc::new(ActorStateCell::new(ActorState::Running));
+    let mut cell = ActorCell {
+        mailbox,
+        state: Arc::clone(&state),
+    };
+    let waker = Waker::from(Arc::new(PanicOnDrop));
+    assert!(
+        cell.mailbox
+            .poll_recv(&Cx::for_testing(), &mut Context::from_waker(&waker))
+            .is_pending()
+    );
+    drop(waker);
+
+    drop(cell);
+    assert_eq!(state.load(), ActorState::Stopped);
+}
+
 // br-asupersync-pk44qd S2: a supervised actor that crashed left its other
 // buffered messages in the mailbox, and they dropped with the receiver when
 // the task ended. A message whose destructor panics replaced the task's

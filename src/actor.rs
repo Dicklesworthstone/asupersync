@@ -278,6 +278,18 @@ struct ActorCell<M> {
     state: Arc<ActorStateCell>,
 }
 
+impl<M> ActorCell<M> {
+    fn close_mailbox(&mut self) {
+        // Closing publishes disconnection before invoking waiting senders.
+        // A callback panic must not skip the drain or the actor's stop hook.
+        contain_disposal(|| self.mailbox.close());
+        // try_recv can drop the old receive waker after extracting a message.
+        // Retire it separately so a destructor panic cannot take that message
+        // out of the protected drain.
+        contain_disposal(|| self.mailbox.clear_recv_waker());
+    }
+}
+
 impl<M> Drop for ActorCell<M> {
     // The normal exits drain the mailbox. Messages still buffered when the
     // actor's task ends some other way (an abort during a restart backoff, a
@@ -286,7 +298,10 @@ impl<M> Drop for ActorCell<M> {
     // the task's panic, replacing its real outcome, and a second one aborted
     // the process. Drop them here one at a time, each panic contained.
     fn drop(&mut self) {
-        self.mailbox.close();
+        // Admission can fail, or the owner can drop the task before the first
+        // poll. In both cases the loop never publishes a terminal state.
+        self.state.store(ActorState::Stopped);
+        self.close_mailbox();
         while let Ok(msg) = self.mailbox.try_recv() {
             discard_contained(msg);
         }
@@ -1109,7 +1124,7 @@ async fn run_actor_loop<A: Actor>(mut actor: A, cx: Cx, cell: &mut ActorCell<A::
     // We seal the mailbox to prevent any new reservations or commits, then
     // process remaining messages if gracefully stopped. If aborted, we just
     // empty the mailbox to drop the messages.
-    cell.mailbox.close();
+    cell.close_mailbox();
 
     let discard_buffered_message = |msg| {
         if !discard_contained(msg) {
