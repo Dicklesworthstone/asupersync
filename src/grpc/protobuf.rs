@@ -545,6 +545,32 @@ where
     merge_fields(target, &mut nested)
 }
 
+/// Method-call dispatch for derived nested fields. Rust autodereferences a
+/// boxed message while preferring a custom `ProtoMessage` impl on the box
+/// itself. Both paths use the containing message's encoder or decoder.
+#[doc(hidden)]
+pub trait DerivedNestedMessage: ProtoMessage {
+    /// Emit the nested value with its field key and length prefix.
+    fn __asupersync_encode_nested(
+        &self,
+        tag: u32,
+        encoder: &mut ProtobufWireEncoder,
+    ) -> Result<(), ProtobufWireError> {
+        encoder.write_nested_message(tag, |nested| self.encode_fields(nested))
+    }
+
+    /// Merge one occurrence into the existing value.
+    fn __asupersync_merge_nested<'wire>(
+        &mut self,
+        field: &ProtobufWireField<'wire>,
+        decoder: &mut ProtobufWireDecoder<'wire, '_>,
+    ) -> Result<(), ProtobufWireError> {
+        merge_nested_message(self, field, decoder)
+    }
+}
+
+impl<M: ProtoMessage> DerivedNestedMessage for M {}
+
 /// Verbatim storage for field records a schema does not recognize.
 ///
 /// Embed this in a message and record into it from

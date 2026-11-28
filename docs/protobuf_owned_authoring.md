@@ -33,6 +33,10 @@ The scalar vocabulary is `double`, `float`, `int32`, `int64`, `uint32`,
 `bool`, `string`, and `bytes`. Repeated numeric, boolean, and enumeration fields
 accept both packed and unpacked input; `packed` controls only the emitted form.
 
+Recursive message fields can use `Option<Box<Node>>`. A message-valued oneof
+variant can likewise hold `Box<Node>`. Boxing changes the Rust layout only.
+Each embedded message still consumes the enclosing wire depth and work budget.
+
 A oneof is an enum derived with `asupersync::ProtoOneof`. Every variant is a
 one-value tuple variant with its own scalar, string, bytes, nested message, or
 enumeration attribute and tag. The containing field repeats the sorted tag set.

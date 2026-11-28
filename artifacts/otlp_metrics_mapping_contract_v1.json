@@ -820,8 +820,8 @@
     },
     {
       "path": "src/grpc/protobuf.rs",
-      "sha256": "9a1a08993ac07304316cc75e32b6ff17a11d49ea45ad9bbd340472694950a152",
-      "line_count": 934,
+      "sha256": "ea9c17a1054456311f9ff0bfa4b6dd3f22aa82bf0c622321bab398581d5201c2",
+      "line_count": 960,
       "anchors": ["fn encode_to_bytes", "limits: ProtobufWireLimits"]
     },
     {
@@ -892,7 +892,7 @@
     },
     {
       "path": "tests/protobuf_owned_otlp_schema_contract.rs",
-      "sha256": "f5fcb856b06252a9316b83d7c202a5c2867d54dcbd5a36e36cea4c39da250fac",
+      "sha256": "f1c905eded65fa575cca7bed7ddf53d335bacfa01545b0716d480f321ade57c3",
       "line_count": 2240,
       "anchors": ["The JSON-shaped fixture is not protobuf wire evidence", "Generated request builders are test/fuzz gated"]
     },
@@ -910,7 +910,7 @@
     },
     {
       "path": "artifacts/protobuf_owned_otlp_schema_v1.json",
-      "sha256": "dcda749858dbd99113576a8e530a5f94b27890812a097a8efc450c0426931562",
+      "sha256": "1f74f6c10060862b303dec4fb69dc782a0078ea12aa3ef79b6409558888cf547",
       "line_count": 1126,
       "anchors": ["NEW_A3_SCHEMA_POLICY_NOT_INCUMBENT_PARITY", "data_points_per_metric", "signal_construction_separation"]
     },

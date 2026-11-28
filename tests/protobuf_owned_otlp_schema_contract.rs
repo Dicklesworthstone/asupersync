@@ -26,7 +26,7 @@ use std::path::PathBuf;
 
 const ARTIFACT_PATH: &str = "artifacts/protobuf_owned_otlp_schema_v1.json";
 const DOC_PATH: &str = "docs/protobuf_owned_otlp_schema.md";
-const ARTIFACT_SHA256: &str = "dcda749858dbd99113576a8e530a5f94b27890812a097a8efc450c0426931562";
+const ARTIFACT_SHA256: &str = "1f74f6c10060862b303dec4fb69dc782a0078ea12aa3ef79b6409558888cf547";
 const DOC_SHA256: &str = "fd133292a5a1c33fbb0315b71b547ebcf9c5dc7b38cf1d10377ba79536946abf";
 const SCHEMA_SIGNATURE_SHA256: &str =
     "2b9311b5c766da1b2fb88262aeb89e125c41f8ea4d8406e534a2e9b42839256b";
@@ -37,7 +37,7 @@ const SERVICE_SIGNATURE_SHA256: &str =
 const ORACLE_PIN_SIGNATURE_SHA256: &str =
     "f8d06b6ad60ce88a932eb3426a68007013ae428270159c57c1a889e46f333544";
 const REPOSITORY_PIN_SIGNATURE_SHA256: &str =
-    "f22ad26265e9dbdc034638f4abfb69b1930e53c51c1af4a88a66550f27b709d5";
+    "a168fffe87041f1e89acaed55b8c6cd087a7635031e8e047f31531fb46f80da8";
 const DOC_BEGIN: &str = "<!-- BEGIN PROTOBUF OWNED OTLP SCHEMA -->";
 const DOC_END: &str = "<!-- END PROTOBUF OWNED OTLP SCHEMA -->";
 

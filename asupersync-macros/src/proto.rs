@@ -693,11 +693,10 @@ fn encode_call(
         Kind::String => quote!(#encoder.write_string(#tag, #value.as_ref())?;),
         Kind::Bytes => quote!(#encoder.write_bytes(#tag, #value.as_ref())?;),
         Kind::Message => quote! {
-            #encoder.write_nested_message(#tag, |__proto_nested| {
-                ::asupersync::grpc::protobuf::ProtoMessage::encode_fields(
-                    #value, __proto_nested,
-                )
-            })?;
+            {
+                use ::asupersync::grpc::protobuf::DerivedNestedMessage as _;
+                (#value).__asupersync_encode_nested(#tag, #encoder)?;
+            }
         },
         Kind::Enumeration(path) => quote! {
             let _: ::core::marker::PhantomData<#path> = ::core::marker::PhantomData;
@@ -963,11 +962,8 @@ fn decode_map(
     let key_decode = decode_expression(key_kind, &quote!(__proto_entry_field));
     let value_decode = if matches!(value_kind, Kind::Message) {
         quote! {
-            ::asupersync::grpc::protobuf::merge_nested_message(
-                &mut __proto_value,
-                &__proto_entry_field,
-                &mut __proto_entry_decoder,
-            )?;
+            use ::asupersync::grpc::protobuf::DerivedNestedMessage as _;
+            __proto_value.__asupersync_merge_nested(&__proto_entry_field, &mut __proto_entry_decoder)?;
         }
     } else {
         let expression = decode_expression(value_kind, &quote!(__proto_entry_field));
@@ -1040,24 +1036,19 @@ fn decode_field(spec: &FieldSpec) -> Result<TokenStream2> {
             let tag = spec.tag.expect("validated field tag");
             let body = match (spec.cardinality, kind) {
                 (Cardinality::Singular, Kind::Message) => quote! {
-                    ::asupersync::grpc::protobuf::merge_nested_message(
-                        &mut self.#ident,
-                        field,
-                        decoder,
-                    )?;
+                    use ::asupersync::grpc::protobuf::DerivedNestedMessage as _;
+                    self.#ident.__asupersync_merge_nested(field, decoder)?;
                 },
                 (Cardinality::Optional, Kind::Message) => {
                     let inner = single_type_argument(&spec.ty, "Option", span)?;
                     quote! {
                         if let ::core::option::Option::Some(present) = &mut self.#ident {
-                            ::asupersync::grpc::protobuf::merge_nested_message(
-                                present, field, decoder,
-                            )?;
+                            use ::asupersync::grpc::protobuf::DerivedNestedMessage as _;
+                            present.__asupersync_merge_nested(field, decoder)?;
                         } else {
                             let mut __proto_nested: #inner = ::core::default::Default::default();
-                            ::asupersync::grpc::protobuf::merge_nested_message(
-                                &mut __proto_nested, field, decoder,
-                            )?;
+                            use ::asupersync::grpc::protobuf::DerivedNestedMessage as _;
+                            __proto_nested.__asupersync_merge_nested(field, decoder)?;
                             self.#ident = ::core::option::Option::Some(__proto_nested);
                         }
                     }
@@ -1066,11 +1057,8 @@ fn decode_field(spec: &FieldSpec) -> Result<TokenStream2> {
                     let inner = single_type_argument(&spec.ty, "Vec", span)?;
                     quote! {
                         let mut __proto_nested: #inner = ::core::default::Default::default();
-                        ::asupersync::grpc::protobuf::merge_nested_message(
-                            &mut __proto_nested,
-                            field,
-                            decoder,
-                        )?;
+                        use ::asupersync::grpc::protobuf::DerivedNestedMessage as _;
+                        __proto_nested.__asupersync_merge_nested(field, decoder)?;
                         self.#ident.push(__proto_nested);
                     }
                 }
@@ -1319,11 +1307,8 @@ fn derive_oneof_data(name: &Ident, data: &DataEnum) -> Result<OneofParts> {
             let body = if matches!(kind, Kind::Message) {
                 quote! {
                     let mut value: #ty = ::core::default::Default::default();
-                    ::asupersync::grpc::protobuf::merge_nested_message(
-                        &mut value,
-                        field,
-                        decoder,
-                    )?;
+                    use ::asupersync::grpc::protobuf::DerivedNestedMessage as _;
+                    value.__asupersync_merge_nested(field, decoder)?;
                     value
                 }
             } else {
@@ -1338,7 +1323,8 @@ fn derive_oneof_data(name: &Ident, data: &DataEnum) -> Result<OneofParts> {
         .map(|(variant, _, _, tag)| {
             quote! {
                 (#tag, ::core::option::Option::Some(Self::#variant(present))) => {
-                    ::asupersync::grpc::protobuf::merge_nested_message(present, field, decoder)?;
+                    use ::asupersync::grpc::protobuf::DerivedNestedMessage as _;
+                    present.__asupersync_merge_nested(field, decoder)?;
                     Ok(true)
                 }
             }

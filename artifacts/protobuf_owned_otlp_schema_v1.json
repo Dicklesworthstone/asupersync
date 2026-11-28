@@ -142,7 +142,7 @@
       },
       {
         "path": "src/grpc/protobuf.rs",
-        "sha256": "9a1a08993ac07304316cc75e32b6ff17a11d49ea45ad9bbd340472694950a152",
+        "sha256": "ea9c17a1054456311f9ff0bfa4b6dd3f22aa82bf0c622321bab398581d5201c2",
         "role": "owned ProtoMessage and UnknownFields authority"
       },
       {
