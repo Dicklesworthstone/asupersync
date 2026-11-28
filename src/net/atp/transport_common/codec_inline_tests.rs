@@ -238,6 +238,29 @@ mod zstd {
     }
 
     #[test]
+    fn compresses_one_large_chunk_for_a_receiver_with_a_small_window() {
+        let mut accept = session();
+        accept.max_window_log = 12;
+        let raw = b"asupersync transfer protocol ".repeat(8000);
+        let (record, frame) = compress_chunk(&accept, &raw).unwrap();
+        assert!(frame.len() < raw.len() / 10);
+        let mut out = Vec::new();
+        decompress_chunk(
+            &record.to_bytes(),
+            Some(&accept),
+            raw.len() as u64,
+            &frame,
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(out, raw);
+
+        // The independent negotiated raw byte limit still applies.
+        accept.max_chunk_raw = 4096;
+        assert!(compress_chunk(&accept, &raw).is_none());
+    }
+
+    #[test]
     fn explicit_levels_select_the_encoder_for_direct_and_pipelined_chunks() {
         let accept = session();
         let raw = b"BCDEFGHIJKL@ABCDE!#ABCDEFGHIJKL".repeat(256);

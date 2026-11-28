@@ -509,7 +509,7 @@ pub enum ChunkCodecError {
 /// single-segment frame's window is its content size.
 #[cfg(feature = "zstd")]
 fn window_log_for(raw_len: usize) -> u8 {
-    u8::try_from(raw_len.max(1).next_power_of_two().ilog2()).unwrap_or(u8::MAX)
+    u8::try_from(usize::BITS - raw_len.saturating_sub(1).leading_zeros()).unwrap_or(u8::MAX)
 }
 
 /// What this build can decode: zstd chunks of up to `max_chunk_raw` bytes
@@ -519,7 +519,7 @@ pub fn local_decode_capability(max_chunk_raw: u32) -> DecodeCapability {
     #[cfg(feature = "zstd")]
     {
         let window_log =
-            u8::try_from(max_chunk_raw.max(1).next_power_of_two().ilog2()).unwrap_or(u8::MAX);
+            u8::try_from(u32::BITS - max_chunk_raw.saturating_sub(1).leading_zeros()).unwrap_or(u8::MAX);
         DecodeCapability::new(WireCodec::Zstd.bit(), window_log, max_chunk_raw)
     }
     #[cfg(not(feature = "zstd"))]
@@ -576,14 +576,14 @@ fn compress_chunk_at_level(
     level: asupersync_zstd::Level,
 ) -> Option<(ChunkCodec, Vec<u8>)> {
     let raw_len = u32::try_from(raw.len()).ok()?;
-    if raw_len > accept.max_chunk_raw || window_log_for(raw.len()) > accept.max_window_log {
+    if raw_len > accept.max_chunk_raw {
         return None;
     }
     let WireCodec::Zstd = accept.codec;
     // The chunk is covered by the transfer's SHA-256, so the frame skips
     // zstd's own content checksum.
     let params = asupersync_zstd::EncodeParams::new(level).with_checksum(false);
-    let compressed = asupersync_zstd::encode_all(raw, &params);
+    let compressed = asupersync_zstd::encode_all_with_window(raw, &params, accept.max_window_log)?;
     (compressed.len() + CHUNK_CODEC_OVERHEAD <= raw.len())
         .then(|| (ChunkCodec::new(WireCodec::Zstd, raw_len), compressed))
 }
